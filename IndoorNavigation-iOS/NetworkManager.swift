@@ -8,6 +8,7 @@ struct LocalizeResponse: Codable {
     let confidence: Double?
     let mapId: String?
     let numMatches: Int?
+    let matchedImageIndex: Int?
 }
 
 struct Pose: Codable {

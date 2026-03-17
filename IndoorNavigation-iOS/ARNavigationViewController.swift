@@ -12,17 +12,17 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var captureProgressLabel: UILabel!  // "사진 N/5"
 
     // MVP 용 테스트 파라미터
-    let buildingId = "49260283-e9da-4bbf-b839-104de822476b"
+    let buildingId = "a6bbfe0b-8d05-4cde-82fc-7541f75f5954"
     let destinationName = "301호"
-    var currentAROriginPose: simd_float4x4?
+    var matchedARPose: simd_float4x4?
     var localizedPose: Pose?
 
     // 다중 프레임 캡처
     let maxImages = 5
     let captureInterval: TimeInterval = 0.8   // 0.8초마다 1장
     var capturedImages: [UIImage] = []
+    var capturedARPoses: [simd_float4x4] = []
     var captureTimer: Timer?
-    var lastCapturedFrame: ARFrame?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -124,7 +124,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         sceneView.session.pause()
     }
 
-    // MARK: - Step 3: 다중 프레임 캡처 후 Localize
+    // MARK: - 다중 프레임 캡처 후 Localize
 
     @objc private func startLocalizationFlow() {
         guard sceneView.session.currentFrame != nil else {
@@ -133,7 +133,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         }
 
         capturedImages = []
-        lastCapturedFrame = nil
+        capturedARPoses = []
         setLoading(true)
         setStatus("천천히 주변을 둘러보세요\n사진을 \(maxImages)장 촬영합니다.", color: .white)
         captureProgressLabel.isHidden = false
@@ -153,7 +153,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
 
         capturedImages.append(uiImage)
-        lastCapturedFrame = frame
+        capturedARPoses.append(frame.camera.transform)
 
         let count = capturedImages.count
         captureProgressLabel.text = "\(count)/\(maxImages)"
@@ -171,7 +171,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     }
 
     private func sendToServer() {
-        guard !capturedImages.isEmpty, let frame = lastCapturedFrame else {
+        guard !capturedImages.isEmpty else {
             setLoading(false)
             setStatus("캡처 실패. 다시 시도하세요.", color: .systemRed)
             return
@@ -184,7 +184,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
                 guard let self = self else { return }
                 switch result {
                 case .success(let response):
-                    self.handleLocalizeSuccess(response: response, frame: frame)
+                    self.handleLocalizeSuccess(response: response)
                 case .failure(let error):
                     self.setLoading(false)
                     self.setStatus("서버 연결 실패:\n\(error.localizedDescription)", color: .systemRed)
@@ -193,8 +193,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         }
     }
 
-    private func handleLocalizeSuccess(response: LocalizeResponse, frame: ARFrame) {
-        // 실패 이유를 구체적으로 표시
+    private func handleLocalizeSuccess(response: LocalizeResponse) {
         guard let pose = response.pose, pose.x != nil else {
             setLoading(false)
             var reason = "위치를 특정하지 못했습니다."
@@ -209,15 +208,23 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
             return
         }
 
+        guard let matchedIndex = response.matchedImageIndex,
+              matchedIndex >= 0, matchedIndex < capturedARPoses.count else {
+            setLoading(false)
+            setStatus("매칭된 이미지 인덱스 정보가 없습니다.\n다시 시도하세요.", color: .systemOrange)
+            return
+        }
+
+        matchedARPose = capturedARPoses[matchedIndex]
+        localizedPose = pose
+
         let confidence = response.confidence.map { String(format: "%.1f%%", $0 * 100) } ?? "?"
         let matches = response.numMatches.map { "\($0)개" } ?? "?"
-        setStatus("위치 인식 성공\n신뢰도: \(confidence) | 매칭: \(matches)\n경로 계산 중...", color: .systemGreen)
-        currentAROriginPose = frame.camera.transform
-        localizedPose = pose
+        setStatus("위치 인식 성공 (이미지 #\(matchedIndex))\n신뢰도: \(confidence) | 매칭: \(matches)\n경로 계산 중...", color: .systemGreen)
         startPathfinding(pose: pose)
     }
 
-    // MARK: - Step 4: 경로 탐색 (Pathfinding)
+    // MARK: - 경로 탐색
 
     private func startPathfinding(pose: Pose) {
         let request = PathfindingRequest(
@@ -249,32 +256,27 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         }
     }
 
-    // MARK: - Step 5: AR 노드 그리기
-
-    /// Localize 응답의 position + quaternion으로 4x4 변환 행렬 생성
-    private func makeServerPoseMatrix(from pose: Pose) -> simd_float4x4 {
-        let qx = Float(pose.qx ?? 0)
-        let qy = Float(pose.qy ?? 0)
-        let qz = Float(pose.qz ?? 0)
-        let qw = Float(pose.qw ?? 1)
-        var matrix = simd_float4x4(simd_quatf(ix: qx, iy: qy, iz: qz, r: qw))
-        matrix.columns.3 = simd_float4(Float(pose.x ?? 0), Float(pose.y ?? 0), Float(pose.z ?? 0), 1)
-        return matrix
-    }
+    // MARK: - AR 경로 렌더링
 
     private func drawPathArrow(steps: [PathStep]) {
         sceneView.scene.rootNode.childNodes.filter { $0.name == "pathNode" }.forEach { $0.removeFromParentNode() }
-        guard let arOrigin = currentAROriginPose, let locPose = localizedPose else { return }
+        guard let arPose = matchedARPose, let pose = localizedPose else { return }
 
-        // T = arOrigin * serverPose^-1
-        // 서버 좌표계 → AR 월드 좌표계 변환 행렬
-        let serverPose = makeServerPoseMatrix(from: locPose)
-        let transform = arOrigin * serverPose.inverse
+        let serverPos = simd_float3(Float(pose.x ?? 0), Float(pose.y ?? 0), Float(pose.z ?? 0))
+        let quat = simd_quatf(ix: Float(pose.qx ?? 0), iy: Float(pose.qy ?? 0),
+                               iz: Float(pose.qz ?? 0), r: Float(pose.qw ?? 1))
+
+        let input = CoordinateTransformer.Input(
+            serverPosition: serverPos,
+            serverQuaternion: quat,
+            arCameraPose: arPose
+        )
 
         for step in steps {
             guard let pos = step.position else { continue }
-            let serverPos = simd_float4(Float(pos.x), Float(pos.y), Float(pos.z), 1)
-            let arPos = transform * serverPos
+
+            let serverPoint = simd_float3(Float(pos.x), Float(pos.y), Float(pos.z))
+            let arPos = CoordinateTransformer.transform(serverPoint: serverPoint, input: input)
 
             let node = createSphereNode()
             node.name = "pathNode"
