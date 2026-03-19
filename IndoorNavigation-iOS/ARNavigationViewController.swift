@@ -1,36 +1,31 @@
 import UIKit
 import SceneKit
 import ARKit
-import AVFoundation
 
 class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
 
     var sceneView: ARSCNView!
-    var statusLabel: UILabel!
     var locateButton: UIButton!
-    var spinner: UIActivityIndicatorView!
-    var captureProgressLabel: UILabel!  // "사진 N/5"
+    var scanningOverlayView: UIView!
+    var scanCompleteBadge: UIView!
+    var scanFailedView: UIView!
+    var scanFailedLabel: UILabel!
+    var arrivalBadge: UIView!
 
-    // MVP 용 테스트 파라미터
-    let buildingId = "a6bbfe0b-8d05-4cde-82fc-7541f75f5954"
-    let destinationName = "301호"
-    var matchedARPose: simd_float4x4?
-    var localizedPose: Pose?
-
-    // 다중 프레임 캡처
-    let maxImages = 5
-    let captureInterval: TimeInterval = 0.8   // 0.8초마다 1장
-    var capturedImages: [UIImage] = []
-    var capturedARPoses: [simd_float4x4] = []
-    var captureTimer: Timer?
+    private let logic = ARNavigationLogic()
 
     override func viewDidLoad() {
         super.viewDidLoad()
         setupARView()
-        setupStatusLabel()
-        setupCaptureProgressLabel()
-        setupSpinner()
         setupLocateButton()
+        setupScanningOverlay()
+        setupScanCompleteBadge()
+        setupScanFailedView()
+        setupArrivalBadge()
+
+        logic.delegate = self
+        logic.arSession = sceneView.session
+        logic.scene = sceneView.scene
     }
 
     // MARK: - UI 세팅
@@ -43,45 +38,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         sceneView.autoenablesDefaultLighting = true
     }
 
-    private func setupStatusLabel() {
-        statusLabel = UILabel()
-        statusLabel.text = "버튼을 눌러 현위치를 스캔하세요"
-        statusLabel.textColor = .white
-        statusLabel.backgroundColor = UIColor.black.withAlphaComponent(0.65)
-        statusLabel.textAlignment = .center
-        statusLabel.numberOfLines = 0
-        statusLabel.font = .systemFont(ofSize: 15, weight: .medium)
-        statusLabel.layer.cornerRadius = 10
-        statusLabel.clipsToBounds = true
-        statusLabel.frame = CGRect(x: 20, y: 60, width: self.view.bounds.width - 40, height: 70)
-        self.view.addSubview(statusLabel)
-    }
-
-    private func setupCaptureProgressLabel() {
-        captureProgressLabel = UILabel()
-        captureProgressLabel.textColor = .white
-        captureProgressLabel.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.75)
-        captureProgressLabel.textAlignment = .center
-        captureProgressLabel.font = .systemFont(ofSize: 22, weight: .bold)
-        captureProgressLabel.layer.cornerRadius = 30
-        captureProgressLabel.clipsToBounds = true
-        captureProgressLabel.frame = CGRect(
-            x: self.view.bounds.midX - 50,
-            y: self.view.bounds.midY - 50,
-            width: 100, height: 100
-        )
-        captureProgressLabel.isHidden = true
-        self.view.addSubview(captureProgressLabel)
-    }
-
-    private func setupSpinner() {
-        spinner = UIActivityIndicatorView(style: .large)
-        spinner.color = .white
-        spinner.center = CGPoint(x: self.view.center.x, y: self.view.center.y + 70)
-        spinner.hidesWhenStopped = true
-        self.view.addSubview(spinner)
-    }
-
     private func setupLocateButton() {
         locateButton = UIButton(type: .system)
         locateButton.setTitle("현위치 스캔 및 길찾기 시작", for: .normal)
@@ -89,25 +45,180 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         locateButton.setTitleColor(.white, for: .normal)
         locateButton.layer.cornerRadius = 10
         locateButton.frame = CGRect(x: 20, y: self.view.bounds.height - 100, width: self.view.bounds.width - 40, height: 50)
-        locateButton.addTarget(self, action: #selector(startLocalizationFlow), for: .touchUpInside)
+        locateButton.addTarget(self, action: #selector(onLocateButtonTapped), for: .touchUpInside)
         self.view.addSubview(locateButton)
     }
 
-    private func setStatus(_ message: String, color: UIColor = .white) {
-        statusLabel.text = message
-        statusLabel.textColor = color
+    private func setupScanningOverlay() {
+        let bounds = self.view.bounds
+
+        scanningOverlayView = UIView(frame: bounds)
+        scanningOverlayView.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        scanningOverlayView.isHidden = true
+        scanningOverlayView.isUserInteractionEnabled = false
+
+        // 스캔 아이콘 (SF Symbol)
+        let iconConfig = UIImage.SymbolConfiguration(pointSize: 60, weight: .thin)
+        let iconImage = UIImage(systemName: "viewfinder", withConfiguration: iconConfig)
+        let iconView = UIImageView(image: iconImage)
+        iconView.tintColor = .white
+        iconView.contentMode = .scaleAspectFit
+        iconView.frame = CGRect(x: bounds.midX - 40, y: bounds.midY - 120, width: 80, height: 80)
+
+        // 메인 안내 문구
+        let titleLabel = UILabel()
+        titleLabel.text = "좌우로 천천히 스캔해 주세요!"
+        titleLabel.textColor = .white
+        titleLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        titleLabel.textAlignment = .center
+        titleLabel.frame = CGRect(x: 20, y: bounds.midY - 20, width: bounds.width - 40, height: 30)
+
+        // 보조 안내 문구
+        let subtitleLabel = UILabel()
+        subtitleLabel.text = "위치를 확인하고 있어요.\n스마트폰을 들고 천천히 움직여 보세요."
+        subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.7)
+        subtitleLabel.font = .systemFont(ofSize: 14, weight: .regular)
+        subtitleLabel.textAlignment = .center
+        subtitleLabel.numberOfLines = 0
+        subtitleLabel.frame = CGRect(x: 20, y: bounds.midY + 16, width: bounds.width - 40, height: 50)
+
+        scanningOverlayView.addSubview(iconView)
+        scanningOverlayView.addSubview(titleLabel)
+        scanningOverlayView.addSubview(subtitleLabel)
+        self.view.addSubview(scanningOverlayView)
     }
 
-    private func setLoading(_ loading: Bool) {
-        if loading {
-            spinner.startAnimating()
-            locateButton.isEnabled = false
-            locateButton.alpha = 0.5
-        } else {
-            spinner.stopAnimating()
-            locateButton.isEnabled = true
-            locateButton.alpha = 1.0
-        }
+    private func setupScanCompleteBadge() {
+        let bounds = self.view.bounds
+
+        // 반투명 어두운 배경
+        scanCompleteBadge = UIView(frame: bounds)
+        scanCompleteBadge.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        scanCompleteBadge.isHidden = true
+        scanCompleteBadge.isUserInteractionEnabled = false
+
+        // 필(pill) 형태 배지
+        let pill = UIView()
+        pill.backgroundColor = UIColor.white.withAlphaComponent(0.9)
+        pill.layer.cornerRadius = 22
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        scanCompleteBadge.addSubview(pill)
+
+        // 체크마크 아이콘
+        let checkConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+        let checkImage = UIImage(systemName: "checkmark.circle.fill", withConfiguration: checkConfig)
+        let checkView = UIImageView(image: checkImage)
+        checkView.tintColor = .systemBlue
+        checkView.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(checkView)
+
+        // "스캔 완료" 텍스트
+        let label = UILabel()
+        label.text = "스캔 완료"
+        label.textColor = .darkText
+        label.font = .systemFont(ofSize: 16, weight: .semibold)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(label)
+
+        self.view.addSubview(scanCompleteBadge)
+
+        NSLayoutConstraint.activate([
+            pill.centerXAnchor.constraint(equalTo: scanCompleteBadge.centerXAnchor),
+            pill.bottomAnchor.constraint(equalTo: scanCompleteBadge.bottomAnchor, constant: -bounds.height * 0.35),
+            pill.heightAnchor.constraint(equalToConstant: 44),
+
+            checkView.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 16),
+            checkView.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+            checkView.widthAnchor.constraint(equalToConstant: 22),
+            checkView.heightAnchor.constraint(equalToConstant: 22),
+
+            label.leadingAnchor.constraint(equalTo: checkView.trailingAnchor, constant: 8),
+            label.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+            label.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -20),
+        ])
+    }
+
+    private func setupScanFailedView() {
+        let bounds = self.view.bounds
+
+        scanFailedView = UIView(frame: bounds)
+        scanFailedView.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        scanFailedView.isHidden = true
+        scanFailedView.isUserInteractionEnabled = false
+
+        // 실패 아이콘
+        let iconConfig = UIImage.SymbolConfiguration(pointSize: 40, weight: .medium)
+        let iconImage = UIImage(systemName: "exclamationmark.triangle.fill", withConfiguration: iconConfig)
+        let iconView = UIImageView(image: iconImage)
+        iconView.tintColor = .systemOrange
+        iconView.contentMode = .scaleAspectFit
+        iconView.frame = CGRect(x: bounds.midX - 25, y: bounds.midY - 80, width: 50, height: 50)
+
+        // 실패 메시지
+        scanFailedLabel = UILabel()
+        scanFailedLabel.textColor = .white
+        scanFailedLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        scanFailedLabel.textAlignment = .center
+        scanFailedLabel.numberOfLines = 0
+        scanFailedLabel.frame = CGRect(x: 20, y: bounds.midY - 16, width: bounds.width - 40, height: 60)
+
+        scanFailedView.addSubview(iconView)
+        scanFailedView.addSubview(scanFailedLabel)
+        self.view.addSubview(scanFailedView)
+    }
+
+    private func setupArrivalBadge() {
+        let bounds = self.view.bounds
+
+        // 반투명 어두운 배경
+        arrivalBadge = UIView(frame: bounds)
+        arrivalBadge.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        arrivalBadge.isHidden = true
+        arrivalBadge.isUserInteractionEnabled = false
+
+        // 필(pill) 형태 배지
+        let pill = UIView()
+        pill.backgroundColor = UIColor.white.withAlphaComponent(0.9)
+        pill.layer.cornerRadius = 22
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        arrivalBadge.addSubview(pill)
+
+        // 위치 핀 아이콘
+        let iconConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+        let iconImage = UIImage(systemName: "mappin.circle.fill", withConfiguration: iconConfig)
+        let iconView = UIImageView(image: iconImage)
+        iconView.tintColor = .systemRed
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(iconView)
+
+        // "목적지 도착" 텍스트
+        let label = UILabel()
+        label.text = "목적지 도착"
+        label.textColor = .darkText
+        label.font = .systemFont(ofSize: 16, weight: .semibold)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(label)
+
+        self.view.addSubview(arrivalBadge)
+
+        NSLayoutConstraint.activate([
+            pill.centerXAnchor.constraint(equalTo: arrivalBadge.centerXAnchor),
+            pill.bottomAnchor.constraint(equalTo: arrivalBadge.bottomAnchor, constant: -bounds.height * 0.35),
+            pill.heightAnchor.constraint(equalToConstant: 44),
+
+            iconView.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 16),
+            iconView.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 22),
+            iconView.heightAnchor.constraint(equalToConstant: 22),
+
+            label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
+            label.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+            label.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -20),
+        ])
+    }
+
+    @objc private func onLocateButtonTapped() {
+        logic.startLocalizationFlow()
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -120,176 +231,95 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        stopCapture()
+        logic.stopCapture()
+        logic.stopArrivalCheck()
         sceneView.session.pause()
     }
+}
 
-    // MARK: - 다중 프레임 캡처 후 Localize
+// MARK: - ARNavigationLogicDelegate
 
-    @objc private func startLocalizationFlow() {
-        guard sceneView.session.currentFrame != nil else {
-            setStatus("AR 세션이 준비되지 않았습니다. 잠시 후 다시 시도하세요.", color: .systemYellow)
-            return
-        }
+extension ARNavigationViewController: ARNavigationLogicDelegate {
 
-        capturedImages = []
-        capturedARPoses = []
-        setLoading(true)
-        setStatus("천천히 주변을 둘러보세요\n사진을 \(maxImages)장 촬영합니다.", color: .white)
-        captureProgressLabel.isHidden = false
-
-        captureTimer = Timer.scheduledTimer(withTimeInterval: captureInterval, repeats: true) { [weak self] _ in
-            self?.captureOneFrame()
-        }
+    func updateStatus(_ message: String, color: UIColor) {
+        // 스캔 오버레이 / 완료 배지가 대체
     }
 
-    private func captureOneFrame() {
-        guard let frame = sceneView.session.currentFrame else { return }
-
-        let pixelBuffer = frame.capturedImage
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let context = CIContext(options: nil)
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
-        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
-
-        capturedImages.append(uiImage)
-        capturedARPoses.append(frame.camera.transform)
-
-        let count = capturedImages.count
-        captureProgressLabel.text = "\(count)/\(maxImages)"
-
-        if count >= maxImages {
-            stopCapture()
-            sendToServer()
-        }
+    func setLoading(_ loading: Bool) {
+        locateButton.isEnabled = !loading
+        locateButton.alpha = loading ? 0.5 : 1.0
     }
 
-    private func stopCapture() {
-        captureTimer?.invalidate()
-        captureTimer = nil
-        captureProgressLabel.isHidden = true
+    func setCaptureProgress(text: String, isHidden: Bool) {
+        // 스캔 오버레이가 대체하므로 별도 표시 없음
     }
 
-    private func sendToServer() {
-        guard !capturedImages.isEmpty else {
-            setLoading(false)
-            setStatus("캡처 실패. 다시 시도하세요.", color: .systemRed)
-            return
-        }
-
-        setStatus("서버에 \(capturedImages.count)장 전송 중...", color: .white)
-
-        NetworkManager.shared.localize(buildingId: buildingId, images: capturedImages) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                switch result {
-                case .success(let response):
-                    self.handleLocalizeSuccess(response: response)
-                case .failure(let error):
-                    self.setLoading(false)
-                    self.setStatus("서버 연결 실패:\n\(error.localizedDescription)", color: .systemRed)
-                }
+    func setScanningOverlay(visible: Bool) {
+        if visible {
+            scanningOverlayView.alpha = 0
+            scanningOverlayView.isHidden = false
+            UIView.animate(withDuration: 0.3) {
+                self.scanningOverlayView.alpha = 1
+            }
+        } else {
+            UIView.animate(withDuration: 0.3) {
+                self.scanningOverlayView.alpha = 0
+            } completion: { _ in
+                self.scanningOverlayView.isHidden = true
             }
         }
     }
 
-    private func handleLocalizeSuccess(response: LocalizeResponse) {
-        guard let pose = response.pose, pose.x != nil else {
-            setLoading(false)
-            var reason = "위치를 특정하지 못했습니다."
-            if let matches = response.numMatches {
-                reason += "\n매칭 특징점: \(matches)개 (부족)"
-            }
-            if let conf = response.confidence {
-                reason += "\n신뢰도: \(String(format: "%.1f%%", conf * 100)) (낮음)"
-            }
-            reason += "\n더 특징적인 장소를 비추고 다시 시도하세요."
-            setStatus(reason, color: .systemOrange)
-            return
+    func showScanComplete() {
+        scanningOverlayView.isHidden = true
+
+        scanCompleteBadge.alpha = 0
+        scanCompleteBadge.isHidden = false
+        UIView.animate(withDuration: 0.3) {
+            self.scanCompleteBadge.alpha = 1
         }
 
-        guard let matchedIndex = response.matchedImageIndex,
-              matchedIndex >= 0, matchedIndex < capturedARPoses.count else {
-            setLoading(false)
-            setStatus("매칭된 이미지 인덱스 정보가 없습니다.\n다시 시도하세요.", color: .systemOrange)
-            return
-        }
-
-        matchedARPose = capturedARPoses[matchedIndex]
-        localizedPose = pose
-
-        let confidence = response.confidence.map { String(format: "%.1f%%", $0 * 100) } ?? "?"
-        let matches = response.numMatches.map { "\($0)개" } ?? "?"
-        setStatus("위치 인식 성공 (이미지 #\(matchedIndex))\n신뢰도: \(confidence) | 매칭: \(matches)\n경로 계산 중...", color: .systemGreen)
-        startPathfinding(pose: pose)
-    }
-
-    // MARK: - 경로 탐색
-
-    private func startPathfinding(pose: Pose) {
-        let request = PathfindingRequest(
-            startFloorLevel: 1,
-            startX: pose.x ?? 0.0,
-            startY: pose.y ?? 0.0,
-            startZ: pose.z ?? 0.0,
-            destinationName: destinationName,
-            preference: "SHORTEST"
-        )
-
-        NetworkManager.shared.findPath(buildingId: buildingId, requestDto: request) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.setLoading(false)
-                switch result {
-                case .success(let response):
-                    let stepCount = response.steps?.count ?? 0
-                    if stepCount > 0 {
-                        self.setStatus("경로 탐색 완료 — \(stepCount)개 경유지\n초록 구체를 따라 이동하세요.", color: .systemGreen)
-                        self.drawPathArrow(steps: response.steps ?? [])
-                    } else {
-                        self.setStatus("경로를 찾지 못했습니다.\n목적지명을 확인하세요.", color: .systemOrange)
-                    }
-                case .failure(let error):
-                    self.setStatus("경로 탐색 실패:\n\(error.localizedDescription)", color: .systemRed)
-                }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            UIView.animate(withDuration: 0.4) {
+                self.scanCompleteBadge.alpha = 0
+            } completion: { _ in
+                self.scanCompleteBadge.isHidden = true
             }
         }
     }
 
-    // MARK: - AR 경로 렌더링
+    func showArrivalNotification() {
+        arrivalBadge.alpha = 0
+        arrivalBadge.isHidden = false
+        UIView.animate(withDuration: 0.3) {
+            self.arrivalBadge.alpha = 1
+        }
 
-    private func drawPathArrow(steps: [PathStep]) {
-        sceneView.scene.rootNode.childNodes.filter { $0.name == "pathNode" }.forEach { $0.removeFromParentNode() }
-        guard let arPose = matchedARPose, let pose = localizedPose else { return }
-
-        let serverPos = simd_float3(Float(pose.x ?? 0), Float(pose.y ?? 0), Float(pose.z ?? 0))
-        let quat = simd_quatf(ix: Float(pose.qx ?? 0), iy: Float(pose.qy ?? 0),
-                               iz: Float(pose.qz ?? 0), r: Float(pose.qw ?? 1))
-
-        let input = CoordinateTransformer.Input(
-            serverPosition: serverPos,
-            serverQuaternion: quat,
-            arCameraPose: arPose
-        )
-
-        for step in steps {
-            guard let pos = step.position else { continue }
-
-            let serverPoint = simd_float3(Float(pos.x), Float(pos.y), Float(pos.z))
-            let arPos = CoordinateTransformer.transform(serverPoint: serverPoint, input: input)
-
-            let node = createSphereNode()
-            node.name = "pathNode"
-            node.position = SCNVector3(arPos.x, arPos.y, arPos.z)
-            sceneView.scene.rootNode.addChildNode(node)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            UIView.animate(withDuration: 0.4) {
+                self.arrivalBadge.alpha = 0
+            } completion: { _ in
+                self.arrivalBadge.isHidden = true
+            }
         }
     }
 
-    private func createSphereNode() -> SCNNode {
-        let sphere = SCNSphere(radius: 0.2)
-        let material = SCNMaterial()
-        material.diffuse.contents = UIColor.systemGreen.withAlphaComponent(0.8)
-        sphere.materials = [material]
-        return SCNNode(geometry: sphere)
+    func showScanFailed(message: String) {
+        scanningOverlayView.isHidden = true
+        scanFailedLabel.text = message
+
+        scanFailedView.alpha = 0
+        scanFailedView.isHidden = false
+        UIView.animate(withDuration: 0.3) {
+            self.scanFailedView.alpha = 1
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            UIView.animate(withDuration: 0.4) {
+                self.scanFailedView.alpha = 0
+            } completion: { _ in
+                self.scanFailedView.isHidden = true
+            }
+        }
     }
 }
