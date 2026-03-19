@@ -22,9 +22,13 @@ class ARNavigationLogic {
     weak var arSession: ARSession?
     weak var scene: SCNScene?
 
-    // MVP 용 테스트 파라미터
-    let buildingId = "9853086b-ef02-4a95-b61a-072d11b16f34"
-    let destinationName = "301호"
+    let buildingId: String
+    let destinationName: String
+
+    init(buildingId: String, destinationName: String) {
+        self.buildingId = buildingId
+        self.destinationName = destinationName
+    }
 
     // 다중 프레임 캡처
     let maxImages = 5
@@ -195,11 +199,12 @@ class ARNavigationLogic {
 
         guard arPoints.count >= 2 else { return }
 
-        // 바닥 경로 세그먼트 그리기 (단일 불투명 레이어로)
-        for i in 0..<(arPoints.count - 1) {
-            let segmentNode = createPathSegment(from: arPoints[i], to: arPoints[i + 1])
-            scene?.rootNode.addChildNode(segmentNode)
-        }
+        // Catmull-Rom 스플라인으로 부드러운 경로 생성
+        let smoothPoints = catmullRomSpline(points: arPoints, subdivisions: 20)
+
+        // 연속 메시 리본으로 바닥 경로 그리기
+        let pathNode = createContinuousPath(points: smoothPoints)
+        scene?.rootNode.addChildNode(pathNode)
 
         // ~5m 간격으로 방향 화살표 배치
         placeDirectionArrows(along: arPoints)
@@ -213,57 +218,164 @@ class ARNavigationLogic {
         }
     }
 
-    // MARK: - 바닥 경로
+    // MARK: - 바닥 경로 (연속 메시 리본)
 
-    /// 두 점 사이에 흰색 반투명 바닥 경로 세그먼트 생성
-    private func createPathSegment(from: simd_float3, to: simd_float3) -> SCNNode {
-        let direction = to - from
-        let distance = simd_length(direction)
-        guard distance > 0.01 else { return SCNNode() }
+    /// 포인트 배열로 하나의 연속된 삼각형 스트립 메시를 생성
+    /// 개별 사각형 대신 연속 리본으로 커브에서 매끄럽게 연결됨
+    private func createContinuousPath(points: [simd_float3]) -> SCNNode {
+        guard points.count >= 2 else { return SCNNode() }
 
-        let pathWidth: CGFloat = 0.8
-        // cornerRadius 없이 깔끔한 직사각형
-        let plane = SCNPlane(width: pathWidth, height: CGFloat(distance) + 0.05)
+        let halfWidth: Float = 0.4  // 경로 폭 0.8m의 절반
+        let yOffset: Float = 0.02   // 바닥 살짝 위
+
+        // 각 포인트에서 좌/우 정점 생성
+        var vertices: [SCNVector3] = []
+        var normals: [SCNVector3] = []
+        var texCoords: [CGPoint] = []
+
+        for i in 0..<points.count {
+            let p = points[i]
+
+            // 진행 방향 계산 (XZ 평면)
+            let forward: simd_float2
+            if i == 0 {
+                forward = simd_normalize(simd_float2(points[1].x - p.x, points[1].z - p.z))
+            } else if i == points.count - 1 {
+                forward = simd_normalize(simd_float2(p.x - points[i-1].x, p.z - points[i-1].z))
+            } else {
+                // 앞뒤 방향의 평균 → 코너에서 부드러운 전환
+                let fwd1 = simd_normalize(simd_float2(p.x - points[i-1].x, p.z - points[i-1].z))
+                let fwd2 = simd_normalize(simd_float2(points[i+1].x - p.x, points[i+1].z - p.z))
+                let avg = fwd1 + fwd2
+                let len = simd_length(avg)
+                if len > 0.001 {
+                    forward = avg / len
+                } else {
+                    // 180도 급회전 시 수직 방향 사용
+                    forward = simd_float2(-fwd1.y, fwd1.x)
+                }
+            }
+
+            // 수직 방향 (XZ 평면에서 왼쪽) = (-forwardZ, forwardX)
+            let perp = simd_float2(-forward.y, forward.x)
+
+            // Miter 제한: 급격한 코너에서 정점이 튀어나가지 않도록
+            // 앞뒤 방향이 많이 다르면 폭을 줄임
+            var adjustedHalfWidth = halfWidth
+            if i > 0 && i < points.count - 1 {
+                let fwd1 = simd_normalize(simd_float2(p.x - points[i-1].x, p.z - points[i-1].z))
+                let fwd2 = simd_normalize(simd_float2(points[i+1].x - p.x, points[i+1].z - p.z))
+                let dotProduct = simd_dot(fwd1, fwd2)
+                // dotProduct: 1.0(직선) → -1.0(180도 회전)
+                // 급회전일수록 폭을 줄여서 삐져나감 방지
+                let miterScale = max(0.5, (1.0 + dotProduct) / 2.0)
+                adjustedHalfWidth = halfWidth * Float(miterScale)
+            }
+
+            // 좌/우 정점
+            let left  = SCNVector3(p.x + perp.x * adjustedHalfWidth, p.y + yOffset, p.z + perp.y * adjustedHalfWidth)
+            let right = SCNVector3(p.x - perp.x * adjustedHalfWidth, p.y + yOffset, p.z - perp.y * adjustedHalfWidth)
+
+            vertices.append(left)
+            vertices.append(right)
+            normals.append(SCNVector3(0, 1, 0))
+            normals.append(SCNVector3(0, 1, 0))
+
+            let t = CGFloat(i) / CGFloat(points.count - 1)
+            texCoords.append(CGPoint(x: 0, y: t))
+            texCoords.append(CGPoint(x: 1, y: t))
+        }
+
+        // 삼각형 인덱스 (연속 쿼드 → 삼각형 2개씩)
+        var indices: [UInt32] = []
+        for i in 0..<(points.count - 1) {
+            let base = UInt32(i * 2)
+            // 삼각형 1: left[i], right[i], left[i+1]
+            indices.append(contentsOf: [base, base + 1, base + 2])
+            // 삼각형 2: right[i], right[i+1], left[i+1]
+            indices.append(contentsOf: [base + 1, base + 3, base + 2])
+        }
+
+        // SCNGeometry 생성
+        let vertexSource = SCNGeometrySource(vertices: vertices)
+        let normalSource = SCNGeometrySource(normals: normals)
+        let texSource = SCNGeometrySource(textureCoordinates: texCoords)
+        let element = SCNGeometryElement(indices: indices, primitiveType: .triangles)
+
+        let geometry = SCNGeometry(sources: [vertexSource, normalSource, texSource], elements: [element])
 
         let material = SCNMaterial()
-        material.diffuse.contents = UIColor.white.withAlphaComponent(0.6)
+        material.diffuse.contents = UIColor.white.withAlphaComponent(0.9)
+        material.emission.contents = UIColor.white.withAlphaComponent(0.3)
         material.isDoubleSided = true
         material.writesToDepthBuffer = false
-        material.blendMode = .replace  // 중첩 시 투명도 누적 방지
-        plane.materials = [material]
+        material.lightingModel = .constant
+        geometry.materials = [material]
 
-        let node = SCNNode(geometry: plane)
+        let node = SCNNode(geometry: geometry)
         node.name = "pathNode"
         node.renderingOrder = -1
 
-        // 중간 지점에 배치, 바닥 살짝 위
-        let mid = (from + to) / 2
-        node.position = SCNVector3(mid.x, mid.y + 0.02, mid.z)
-
-        // XY 평면 → XZ 평면 (바닥에 눕히기)
-        node.eulerAngles.x = -.pi / 2
-
-        // 경로 방향으로 회전
-        let angle = atan2(direction.x, direction.z) - .pi
-        node.eulerAngles.y = angle
-
         return node
+    }
+
+    // MARK: - Catmull-Rom 스플라인 보간
+
+    /// 포인트 배열을 Catmull-Rom 스플라인으로 부드럽게 보간
+    private func catmullRomSpline(points: [simd_float3], subdivisions: Int) -> [simd_float3] {
+        guard points.count >= 2 else { return points }
+        if points.count == 2 { return points }
+
+        var result: [simd_float3] = []
+
+        for i in 0..<(points.count - 1) {
+            let p0 = points[max(i - 1, 0)]
+            let p1 = points[i]
+            let p2 = points[i + 1]
+            let p3 = points[min(i + 2, points.count - 1)]
+
+            for j in 0..<subdivisions {
+                let t = Float(j) / Float(subdivisions)
+                let t2 = t * t
+                let t3 = t2 * t
+
+                let x = 0.5 * ((2 * p1.x) +
+                    (-p0.x + p2.x) * t +
+                    (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
+                    (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3)
+
+                let y = p1.y  // Y(높이)는 바닥 레벨 유지
+
+                let z = 0.5 * ((2 * p1.z) +
+                    (-p0.z + p2.z) * t +
+                    (2 * p0.z - 5 * p1.z + 4 * p2.z - p3.z) * t2 +
+                    (-p0.z + 3 * p1.z - 3 * p2.z + p3.z) * t3)
+
+                result.append(simd_float3(x, y, z))
+            }
+        }
+
+        result.append(points.last!)
+        return result
     }
 
     // MARK: - 방향 화살표
 
     /// 경로를 따라 ~5m 간격으로 하늘색 쉐브론 화살표 배치
+    /// 경로 가장자리(왼쪽)에 배치하여 바닥 경로와 겹치지 않도록 함
     private func placeDirectionArrows(along points: [simd_float3]) {
         guard points.count >= 2 else { return }
 
         let arrowInterval: Float = 5.0
+        let edgeOffset: Float = 0.45  // 경로 중심에서 가장자리까지 오프셋
         var accumulatedDistance: Float = 0
 
         // 시작 지점 근처에 첫 화살표
         let firstDir = simd_normalize(points[1] - points[0])
         let firstOffset = min(2.0, simd_length(points[1] - points[0]) * 0.3)
         let firstPos = points[0] + firstDir * firstOffset
-        let firstArrow = createChevronNode(at: firstPos, direction: firstDir)
+        let firstEdgePos = offsetToEdge(position: firstPos, direction: firstDir, offset: edgeOffset)
+        let firstArrow = createChevronNode(at: firstEdgePos, direction: firstDir)
         scene?.rootNode.addChildNode(firstArrow)
 
         for i in 0..<(points.count - 1) {
@@ -276,7 +388,8 @@ class ARNavigationLogic {
 
             while distInSegment < segmentLength {
                 let pos = points[i] + segmentDir * distInSegment
-                let arrow = createChevronNode(at: pos, direction: segmentDir)
+                let edgePos = offsetToEdge(position: pos, direction: segmentDir, offset: edgeOffset)
+                let arrow = createChevronNode(at: edgePos, direction: segmentDir)
                 scene?.rootNode.addChildNode(arrow)
                 distInSegment += arrowInterval
             }
@@ -286,24 +399,42 @@ class ARNavigationLogic {
         }
     }
 
-    /// 단일 셰브론(>) 형태의 UIBezierPath 생성
-    /// +X 방향(오른쪽)을 가리키는 ">" 모양, 중심 원점 기준
-    private func makeChevronPath() -> UIBezierPath {
-        let path = UIBezierPath()
-        let tipX: CGFloat = 0.15      // 셰브론 꼭짓점 X
-        let armY: CGFloat = 0.20      // 팔 끝 Y (위아래), 전체 높이 ~0.4m
-        let thickness: CGFloat = 0.07  // 셰브론 선 두께
+    /// 경로 중심 위치를 진행 방향의 왼쪽 가장자리로 오프셋
+    private func offsetToEdge(position: simd_float3, direction: simd_float3, offset: Float) -> simd_float3 {
+        // XZ 평면에서 왼쪽 수직 방향: (-dz, dx)
+        let left = simd_float3(-direction.z, 0, direction.x)
+        return position + left * offset
+    }
 
-        // ">" 모양 (바깥 → 안쪽 순서로 그림)
-        path.move(to: CGPoint(x: tipX, y: 0))                          // 꼭짓점 (오른쪽 끝)
-        path.addLine(to: CGPoint(x: -tipX, y: armY))                   // 왼쪽 위
-        path.addLine(to: CGPoint(x: -tipX + thickness, y: armY))       // 안쪽 왼쪽 위
-        path.addLine(to: CGPoint(x: tipX - thickness, y: 0))           // 안쪽 꼭짓점
-        path.addLine(to: CGPoint(x: -tipX + thickness, y: -armY))      // 안쪽 왼쪽 아래
-        path.addLine(to: CGPoint(x: -tipX, y: -armY))                  // 왼쪽 아래
-        path.close()
+    /// 단일 셰브론(>) 노드 생성 — SCNBox 2개로 ">" 형태 조립
+    /// SCNShape 대신 SCNBox 사용으로 확실한 렌더링 보장
+    private func makeSingleChevron(material: SCNMaterial) -> SCNNode {
+        let chevron = SCNNode()
 
-        return path
+        let armLength: CGFloat = 0.28   // 팔 길이
+        let armWidth: CGFloat = 0.10    // 팔 두께 (두껍게)
+        let armDepth: CGFloat = 0.08    // 앞뒤 깊이 (두께감)
+        let halfAngle: Float = .pi / 5  // 36도 ("> " 벌어진 각도)
+
+        // 위쪽 팔 ╲
+        let upperArm = SCNBox(width: armLength, height: armWidth, length: armDepth, chamferRadius: 0.01)
+        upperArm.materials = [material]
+        let upperNode = SCNNode(geometry: upperArm)
+        upperNode.position = SCNVector3(-Float(armLength) / 2 * cos(halfAngle),
+                                         Float(armLength) / 2 * sin(halfAngle), 0)
+        upperNode.eulerAngles.z = halfAngle
+
+        // 아래쪽 팔 ╱
+        let lowerArm = SCNBox(width: armLength, height: armWidth, length: armDepth, chamferRadius: 0.01)
+        lowerArm.materials = [material]
+        let lowerNode = SCNNode(geometry: lowerArm)
+        lowerNode.position = SCNVector3(-Float(armLength) / 2 * cos(halfAngle),
+                                        -Float(armLength) / 2 * sin(halfAngle), 0)
+        lowerNode.eulerAngles.z = -halfAngle
+
+        chevron.addChildNode(upperNode)
+        chevron.addChildNode(lowerNode)
+        return chevron
     }
 
     // MARK: - 목적지 3D 핀 마커
@@ -407,53 +538,43 @@ class ARNavigationLogic {
         arrivalCheckTimer = nil
     }
 
-    /// 더블 셰브론(>>) 3D 노드 생성
+    /// 더블 셰브론(>>) 3D 노드 생성 — SCNBox 기반으로 확실한 렌더링
     /// - 바닥에서 0.5m 위에 세워서 배치
-    /// - 정면(사용자 쪽)에서 ">>" 모양이 보임
-    /// - 15° 뒤로 기울여 수평 시야에서도 잘 보임
+    /// - 두 개의 ">"를 나란히 배치하여 ">>" 형태
     /// - 진행 방향을 정확히 가리킴
     private func createChevronNode(at position: simd_float3, direction: simd_float3) -> SCNNode {
         let node = SCNNode()
         node.name = "pathNode"
 
-        // 바닥에서 0.5m 위
-        node.position = SCNVector3(position.x, position.y + 0.5, position.z)
+        // 바닥에서 0.85m 위 (허리~가슴 높이로 잘 보임)
+        node.position = SCNVector3(position.x, position.y + 0.85, position.z)
 
-        // 셰브론 공통 재질
+        // 셰브론 공통 재질 — PBR로 입체감 + 자체 발광으로 가시성 확보
         let material = SCNMaterial()
-        material.diffuse.contents = UIColor(red: 0.3, green: 0.65, blue: 1.0, alpha: 1.0)
-        material.emission.contents = UIColor(red: 0.15, green: 0.35, blue: 0.7, alpha: 1.0)
+        material.diffuse.contents = UIColor(red: 0.25, green: 0.55, blue: 1.0, alpha: 1.0)
+        material.emission.contents = UIColor(red: 0.1, green: 0.3, blue: 0.6, alpha: 1.0)
         material.lightingModel = .physicallyBased
-        material.roughness.contents = 0.25
-        material.metalness.contents = 0.1
+        material.roughness.contents = 0.35
+        material.metalness.contents = 0.15
+        material.isDoubleSided = true
 
-        // 더블 셰브론: 두 개의 ">"를 진행 방향으로 나란히 배치
-        let chevronSpacing: Float = 0.18  // 두 셰브론 사이 간격
+        // 더블 셰브론: 두 개의 ">"를 진행 방향(+X)으로 나란히 배치
+        let chevronSpacing: Float = 0.22
         for i in 0..<2 {
-            let chevronPath = makeChevronPath()
-            let shape = SCNShape(path: chevronPath, extrusionDepth: 0.06)  // 옆에서 보이는 두께
-            shape.materials = [material]
-
-            let shapeNode = SCNNode(geometry: shape)
-
-            // SCNShape는 XY 평면에 생성, 팁이 +X 방향
-            // Y축 +90° 회전 → 팁이 -Z 방향(부모 노드의 진행 방향)으로 향함
-            shapeNode.eulerAngles.y = .pi / 2
-            // X축 +15° 회전 → 상단이 사용자 쪽으로 살짝 기울어짐 (수평 시야 가시성)
-            shapeNode.eulerAngles.x = 0.26  // ~15°
-
-            // 두 셰브론을 진행 방향(-Z)으로 나란히 배치
+            let chevronChild = makeSingleChevron(material: material)
             // i=0: 뒤쪽(사용자에 가까운 쪽), i=1: 앞쪽(목적지에 가까운 쪽)
-            let offset = Float(i) * chevronSpacing
-            shapeNode.position = SCNVector3(0, 0, -offset)
-
-            node.addChildNode(shapeNode)
+            chevronChild.position = SCNVector3(Float(i) * chevronSpacing, 0, 0)
+            node.addChildNode(chevronChild)
         }
 
-        // 부모 노드를 진행 방향으로 회전
-        // SceneKit 기본 정면 = -Z, 이를 direction 방향으로 회전
-        let angle = atan2(-direction.x, -direction.z)
-        node.eulerAngles.y = angle
+        // 쿼터니언으로 회전 합성 (euler angles 간섭 방지)
+        // 1) 방향 회전: ">" 팁(+X)을 진행 방향으로
+        let angle = atan2(direction.z, -direction.x)
+        let dirQuat = simd_quatf(angle: angle, axis: simd_float3(0, 1, 0))
+        // 2) 15도 기울기: 로컬 Z축 기준으로 상단이 진행 방향으로 기울어짐
+        let tiltQuat = simd_quatf(angle: -0.26, axis: simd_float3(0, 0, 1))
+        // 방향 회전 후 기울기 적용
+        node.simdOrientation = dirQuat * tiltQuat
 
         // 부드러운 펄스 애니메이션
         let pulse = SCNAction.sequence([
