@@ -2,9 +2,11 @@ import UIKit
 
 class POISelectionViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate {
 
-    private let buildingId: String
-    private let buildingName: String
+    private let building: BuildingResponse
 
+    private let headerView = UIView()
+    private let buildingNameLabel = UILabel()
+    private let buildingInfoLabel = UILabel()
     private let searchBar = UISearchBar()
     private let tableView = UITableView(frame: .zero, style: .insetGrouped)
     private let activityIndicator = UIActivityIndicatorView(style: .large)
@@ -14,10 +16,18 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
     private var filteredPOIs: [PoiResponse] = []
     private var searchWorkItem: DispatchWorkItem?
 
-    init(buildingId: String, buildingName: String) {
-        self.buildingId = buildingId
-        self.buildingName = buildingName
+    init(building: BuildingResponse) {
+        self.building = building
         super.init(nibName: nil, bundle: nil)
+    }
+
+    convenience init(buildingId: String, buildingName: String) {
+        let building = BuildingResponse(
+            id: buildingId, name: buildingName, description: nil,
+            latitude: nil, longitude: nil, status: nil,
+            floorCount: nil, passageCount: nil, createdAt: nil, updatedAt: nil
+        )
+        self.init(building: building)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -27,11 +37,63 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
         title = "목적지 선택"
         view.backgroundColor = .systemBackground
 
+        setupHeader()
         setupSearchBar()
         setupTableView()
         setupActivityIndicator()
         setupEmptyLabel()
         fetchPOIs()
+    }
+
+    // MARK: - Setup
+
+    private func setupHeader() {
+        headerView.backgroundColor = .systemBackground
+        headerView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(headerView)
+
+        buildingNameLabel.text = building.name
+        buildingNameLabel.font = .systemFont(ofSize: 22, weight: .bold)
+        buildingNameLabel.translatesAutoresizingMaskIntoConstraints = false
+        headerView.addSubview(buildingNameLabel)
+
+        var infoParts: [String] = []
+        if let desc = building.description, !desc.isEmpty { infoParts.append(desc) }
+        if let floors = building.floorCount { infoParts.append("\(floors)층") }
+        if let passages = building.passageCount { infoParts.append("통로 \(passages)개") }
+
+        buildingInfoLabel.text = infoParts.joined(separator: " · ")
+        buildingInfoLabel.font = .systemFont(ofSize: 14)
+        buildingInfoLabel.textColor = .secondaryLabel
+        buildingInfoLabel.numberOfLines = 2
+        buildingInfoLabel.isHidden = infoParts.isEmpty
+        buildingInfoLabel.translatesAutoresizingMaskIntoConstraints = false
+        headerView.addSubview(buildingInfoLabel)
+
+        let separator = UIView()
+        separator.backgroundColor = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        headerView.addSubview(separator)
+
+        NSLayoutConstraint.activate([
+            headerView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            headerView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            headerView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+
+            buildingNameLabel.topAnchor.constraint(equalTo: headerView.topAnchor, constant: 16),
+            buildingNameLabel.leadingAnchor.constraint(equalTo: headerView.leadingAnchor, constant: 20),
+            buildingNameLabel.trailingAnchor.constraint(equalTo: headerView.trailingAnchor, constant: -20),
+
+            buildingInfoLabel.topAnchor.constraint(equalTo: buildingNameLabel.bottomAnchor, constant: 4),
+            buildingInfoLabel.leadingAnchor.constraint(equalTo: headerView.leadingAnchor, constant: 20),
+            buildingInfoLabel.trailingAnchor.constraint(equalTo: headerView.trailingAnchor, constant: -20),
+
+            separator.topAnchor.constraint(equalTo: buildingInfoLabel.bottomAnchor, constant: 16),
+            separator.leadingAnchor.constraint(equalTo: headerView.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: headerView.trailingAnchor),
+            separator.heightAnchor.constraint(equalToConstant: 0.5),
+            separator.bottomAnchor.constraint(equalTo: headerView.bottomAnchor),
+        ])
     }
 
     private func setupSearchBar() {
@@ -42,7 +104,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
         view.addSubview(searchBar)
 
         NSLayoutConstraint.activate([
-            searchBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            searchBar.topAnchor.constraint(equalTo: headerView.bottomAnchor),
             searchBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             searchBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
@@ -90,14 +152,14 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
         ])
     }
 
-    // MARK: - 데이터 로드
+    // MARK: - Data
 
     private func fetchPOIs() {
         activityIndicator.startAnimating()
         tableView.isHidden = true
         emptyLabel.isHidden = true
 
-        NetworkManager.shared.fetchPOIs(buildingId: buildingId) { [weak self] result in
+        NetworkManager.shared.fetchPOIs(buildingId: building.id) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.activityIndicator.stopAnimating()
@@ -118,9 +180,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
 
     private func showError(_ message: String) {
         let alert = UIAlertController(title: "오류", message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "다시 시도", style: .default) { [weak self] _ in
-            self?.fetchPOIs()
-        })
+        alert.addAction(UIAlertAction(title: "다시 시도", style: .default) { [weak self] _ in self?.fetchPOIs() })
         alert.addAction(UIAlertAction(title: "닫기", style: .cancel))
         present(alert, animated: true)
     }
@@ -140,22 +200,18 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            NetworkManager.shared.searchPOIs(buildingId: self.buildingId, query: trimmed) { [weak self] result in
+            NetworkManager.shared.searchPOIs(buildingId: self.building.id, query: trimmed) { [weak self] result in
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     switch result {
                     case .success(let pois):
                         self.filteredPOIs = pois
-                        self.emptyLabel.text = "'\(trimmed)' 검색 결과가 없습니다."
-                        self.emptyLabel.isHidden = !pois.isEmpty
-                        self.tableView.reloadData()
                     case .failure:
-                        // 서버 검색 실패 시 로컬 필터링 fallback
                         self.filteredPOIs = self.allPOIs.filter { $0.name.localizedCaseInsensitiveContains(trimmed) }
-                        self.emptyLabel.text = "'\(trimmed)' 검색 결과가 없습니다."
-                        self.emptyLabel.isHidden = !self.filteredPOIs.isEmpty
-                        self.tableView.reloadData()
                     }
+                    self.emptyLabel.text = "'\(trimmed)' 검색 결과가 없습니다."
+                    self.emptyLabel.isHidden = !self.filteredPOIs.isEmpty
+                    self.tableView.reloadData()
                 }
             }
         }
@@ -170,9 +226,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
     // MARK: - UITableViewDataSource
 
     func numberOfSections(in tableView: UITableView) -> Int {
-        // 층별로 그룹핑
-        let floors = Set(filteredPOIs.compactMap { $0.floorLevel })
-        return max(floors.count, 1)
+        max(sortedFloors().count, 1)
     }
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
@@ -182,8 +236,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
     func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         let floors = sortedFloors()
         guard section < floors.count else { return nil }
-        let level = floors[section]
-        return "\(level)층"
+        return "\(floors[section])층"
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -193,9 +246,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
         var config = cell.defaultContentConfiguration()
         config.text = poi.name
         config.image = iconForCategory(poi.category)
-        if let cat = poi.category {
-            config.secondaryText = categoryDisplayName(cat)
-        }
+        if let cat = poi.category { config.secondaryText = categoryDisplayName(cat) }
         cell.contentConfiguration = config
         cell.accessoryType = .disclosureIndicator
         return cell
@@ -215,7 +266,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
         alert.addAction(UIAlertAction(title: "시작", style: .default) { [weak self] _ in
             guard let self = self else { return }
             let arVC = ARNavigationViewController()
-            arVC.buildingId = self.buildingId
+            arVC.buildingId = self.building.id
             arVC.destinationName = poi.name
             arVC.modalPresentationStyle = .fullScreen
             self.present(arVC, animated: true)
@@ -224,42 +275,40 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
         present(alert, animated: true)
     }
 
-    // MARK: - 헬퍼
+    // MARK: - Helpers
 
     private func sortedFloors() -> [Int] {
-        let floors = Set(filteredPOIs.compactMap { $0.floorLevel })
-        return floors.sorted()
+        Set(filteredPOIs.compactMap { $0.floorLevel }).sorted()
     }
 
     private func poisForSection(_ section: Int) -> [PoiResponse] {
         let floors = sortedFloors()
         guard section < floors.count else { return filteredPOIs }
-        let level = floors[section]
-        return filteredPOIs.filter { $0.floorLevel == level }
+        return filteredPOIs.filter { $0.floorLevel == floors[section] }
     }
 
     private func iconForCategory(_ category: String?) -> UIImage? {
         switch category {
         case "CLASSROOM": return UIImage(systemName: "book")
-        case "OFFICE": return UIImage(systemName: "person.crop.square")
-        case "RESTROOM": return UIImage(systemName: "toilet")
-        case "EXIT": return UIImage(systemName: "door.left.hand.open")
-        case "ELEVATOR": return UIImage(systemName: "arrow.up.arrow.down")
+        case "OFFICE":    return UIImage(systemName: "person.crop.square")
+        case "RESTROOM":  return UIImage(systemName: "toilet")
+        case "EXIT":      return UIImage(systemName: "door.left.hand.open")
+        case "ELEVATOR":  return UIImage(systemName: "arrow.up.arrow.down")
         case "STAIRCASE": return UIImage(systemName: "stairs")
-        default: return UIImage(systemName: "mappin")
+        default:          return UIImage(systemName: "mappin")
         }
     }
 
     private func categoryDisplayName(_ category: String) -> String {
         switch category {
         case "CLASSROOM": return "강의실"
-        case "OFFICE": return "사무실"
-        case "RESTROOM": return "화장실"
-        case "EXIT": return "출입구"
-        case "ELEVATOR": return "엘리베이터"
+        case "OFFICE":    return "사무실"
+        case "RESTROOM":  return "화장실"
+        case "EXIT":      return "출입구"
+        case "ELEVATOR":  return "엘리베이터"
         case "STAIRCASE": return "계단"
-        case "OTHER": return "기타"
-        default: return category
+        case "OTHER":     return "기타"
+        default:          return category
         }
     }
 }
