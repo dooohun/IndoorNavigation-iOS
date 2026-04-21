@@ -1,7 +1,33 @@
 import Foundation
 import UIKit
 
-// MARK: - DTOs
+// MARK: - Building / POI DTOs
+
+struct BuildingResponse: Codable {
+    let id: String
+    let name: String
+    let description: String?
+    let latitude: Double?
+    let longitude: Double?
+    let status: String?
+    let floorCount: Int?
+    let passageCount: Int?
+    let createdAt: String?
+    let updatedAt: String?
+}
+
+struct PoiResponse: Codable {
+    let nodeId: String
+    let name: String
+    let category: String?
+    let floorLevel: Int?
+    let floorName: String?
+    let x: Double?
+    let y: Double?
+    let z: Double?
+}
+
+// MARK: - Localize / Pathfinding DTOs
 
 struct LocalizeResponse: Codable {
     let pose: Pose?
@@ -169,6 +195,110 @@ class NetworkManager {
             } catch {
                 log("ERR", "파싱 실패:", error)
                 completion(.failure(Self.makeError("응답 파싱 실패\n\(responseBody)")))
+            }
+        }.resume()
+    }
+
+    // MARK: - 3. 건물 목록 조회
+
+    func fetchBuildings(status: String? = "ACTIVE", completion: @escaping (Result<[BuildingResponse], Error>) -> Void) {
+        var urlString = "\(baseURL)/buildings"
+        if let status = status {
+            urlString += "?status=\(status)"
+        }
+        guard let url = URL(string: urlString) else { return }
+
+        log("REQ", "GET", url.absoluteString)
+
+        URLSession.shared.dataTask(with: url) { data, response, error in
+            if let error = error {
+                log("ERR", "네트워크 오류:", error)
+                completion(.failure(Self.networkError(error)))
+                return
+            }
+            let http = response as? HTTPURLResponse
+            let statusCode = http?.statusCode ?? 0
+            let data = data ?? Data()
+            log("RES", "HTTP \(statusCode)")
+
+            guard (200..<300).contains(statusCode) else {
+                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
+                return
+            }
+            do {
+                let result = try JSONDecoder().decode([BuildingResponse].self, from: data)
+                log("RES", "건물 \(result.count)개 조회")
+                completion(.success(result))
+            } catch {
+                log("ERR", "파싱 실패:", error)
+                completion(.failure(Self.makeError("응답 파싱 실패")))
+            }
+        }.resume()
+    }
+
+    // MARK: - 4. POI 목록 조회
+
+    func fetchPOIs(buildingId: String, completion: @escaping (Result<[PoiResponse], Error>) -> Void) {
+        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/pois") else { return }
+
+        log("REQ", "GET", url.absoluteString)
+
+        URLSession.shared.dataTask(with: url) { data, response, error in
+            if let error = error {
+                log("ERR", "네트워크 오류:", error)
+                completion(.failure(Self.networkError(error)))
+                return
+            }
+            let http = response as? HTTPURLResponse
+            let statusCode = http?.statusCode ?? 0
+            let data = data ?? Data()
+            log("RES", "HTTP \(statusCode)")
+
+            guard (200..<300).contains(statusCode) else {
+                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
+                return
+            }
+            do {
+                let result = try JSONDecoder().decode([PoiResponse].self, from: data)
+                log("RES", "POI \(result.count)개 조회")
+                completion(.success(result))
+            } catch {
+                log("ERR", "파싱 실패:", error)
+                completion(.failure(Self.makeError("응답 파싱 실패")))
+            }
+        }.resume()
+    }
+
+    // MARK: - 5. POI 검색
+
+    func searchPOIs(buildingId: String, query: String, completion: @escaping (Result<[PoiResponse], Error>) -> Void) {
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/pois/search?query=\(encoded)") else { return }
+
+        log("REQ", "GET", url.absoluteString)
+
+        URLSession.shared.dataTask(with: url) { data, response, error in
+            if let error = error {
+                log("ERR", "네트워크 오류:", error)
+                completion(.failure(Self.networkError(error)))
+                return
+            }
+            let http = response as? HTTPURLResponse
+            let statusCode = http?.statusCode ?? 0
+            let data = data ?? Data()
+            log("RES", "HTTP \(statusCode)")
+
+            guard (200..<300).contains(statusCode) else {
+                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
+                return
+            }
+            do {
+                let result = try JSONDecoder().decode([PoiResponse].self, from: data)
+                log("RES", "POI 검색 결과 \(result.count)개")
+                completion(.success(result))
+            } catch {
+                log("ERR", "파싱 실패:", error)
+                completion(.failure(Self.makeError("응답 파싱 실패")))
             }
         }.resume()
     }

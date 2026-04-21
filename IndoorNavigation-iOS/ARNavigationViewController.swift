@@ -4,19 +4,27 @@ import ARKit
 
 class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
 
+    var buildingId: String = ""
+    var destinationName: String = ""
+
     var sceneView: ARSCNView!
     var locateButton: UIButton!
+    var closeButton: UIButton!
     var scanningOverlayView: UIView!
     var scanCompleteBadge: UIView!
     var scanFailedView: UIView!
     var scanFailedLabel: UILabel!
     var arrivalBadge: UIView!
 
-    private let logic = ARNavigationLogic()
+    private var logic: ARNavigationLogic!
 
     override func viewDidLoad() {
         super.viewDidLoad()
+
+        logic = ARNavigationLogic(buildingId: buildingId, destinationName: destinationName)
+
         setupARView()
+        setupCloseButton()
         setupLocateButton()
         setupScanningOverlay()
         setupScanCompleteBadge()
@@ -38,9 +46,25 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         sceneView.autoenablesDefaultLighting = true
     }
 
+    private func setupCloseButton() {
+        closeButton = UIButton(type: .system)
+        let config = UIImage.SymbolConfiguration(pointSize: 16, weight: .bold)
+        closeButton.setImage(UIImage(systemName: "xmark", withConfiguration: config), for: .normal)
+        closeButton.tintColor = .white
+        closeButton.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        closeButton.layer.cornerRadius = 20
+        closeButton.frame = CGRect(x: 16, y: 60, width: 40, height: 40)
+        closeButton.addTarget(self, action: #selector(onCloseButtonTapped), for: .touchUpInside)
+        self.view.addSubview(closeButton)
+    }
+
+    @objc private func onCloseButtonTapped() {
+        dismiss(animated: true)
+    }
+
     private func setupLocateButton() {
         locateButton = UIButton(type: .system)
-        locateButton.setTitle("현위치 스캔 및 길찾기 시작", for: .normal)
+        locateButton.setTitle("\(destinationName) 길찾기 시작", for: .normal)
         locateButton.backgroundColor = .systemBlue
         locateButton.setTitleColor(.white, for: .normal)
         locateButton.layer.cornerRadius = 10

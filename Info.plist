@@ -14,8 +14,12 @@
     <string>APPL</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
+    <key>NMFNcpKeyId</key>
+    <string>rze1uktvon</string>
     <key>NSCameraUsageDescription</key>
     <string>AR 실내 네비게이션을 위해 카메라가 필요합니다.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>현재 위치 근처 건물을 지도에 표시하기 위해 위치 정보가 필요합니다.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoads</key>
