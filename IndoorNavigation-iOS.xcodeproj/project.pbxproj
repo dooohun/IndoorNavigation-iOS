@@ -7,9 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		21172141F5F9EA1CCD39146C /* Pods_IndoorNavigation_iOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 237AC6C10D3D8C5E5F947CD5 /* Pods_IndoorNavigation_iOS.framework */; };
-		21F6A6A7367FEC77D318CCA4 /* Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2DBE9E7232BE3065536D0BD8 /* Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework */; };
-		CA86479B97321FD939E0C988 /* Pods_IndoorNavigation_iOSTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DB060AFF37A1C5F9C43C5AA7 /* Pods_IndoorNavigation_iOSTests.framework */; };
+		C0D545C447A7F014676DAA4E /* Pods_IndoorNavigation_iOSTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B855377E0C31DBE1415EBBB9 /* Pods_IndoorNavigation_iOSTests.framework */; };
+		D60618F64CC4DFF2F2CB5055 /* Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C1469C3C7ED700899DD46AB5 /* Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework */; };
+		FAB3670D9215E2E0B3EC70BE /* Pods_IndoorNavigation_iOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B12F6DDCA598FBE003F6B9BC /* Pods_IndoorNavigation_iOS.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -30,39 +30,33 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		1C2164D861F28DE9BCFF0A8E /* Pods-IndoorNavigation-iOSTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOSTests.release.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOSTests/Pods-IndoorNavigation-iOSTests.release.xcconfig"; sourceTree = "<group>"; };
-		237AC6C10D3D8C5E5F947CD5 /* Pods_IndoorNavigation_iOS.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_IndoorNavigation_iOS.framework; sourceTree = BUILT_PRODUCTS_DIR; };
-		2DBE9E7232BE3065536D0BD8 /* Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		393E9AAB2F5EADFF00EDBAAE /* IndoorNavigation-iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "IndoorNavigation-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		393E9AB82F5EAE0100EDBAAE /* IndoorNavigation-iOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "IndoorNavigation-iOSTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		393E9AC22F5EAE0100EDBAAE /* IndoorNavigation-iOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "IndoorNavigation-iOSUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
-		5BBD8A804A63D27E90DA3AC5 /* Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.release.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.release.xcconfig"; sourceTree = "<group>"; };
-		67BCFEB23AEA0E4A73C07419 /* Pods-IndoorNavigation-iOSTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOSTests.debug.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOSTests/Pods-IndoorNavigation-iOSTests.debug.xcconfig"; sourceTree = "<group>"; };
-		967870EF0BF4623B7A150469 /* Pods-IndoorNavigation-iOS.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOS.release.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOS/Pods-IndoorNavigation-iOS.release.xcconfig"; sourceTree = "<group>"; };
-		B34465FB1CF0DF3544C813AE /* Pods-IndoorNavigation-iOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOS.debug.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOS/Pods-IndoorNavigation-iOS.debug.xcconfig"; sourceTree = "<group>"; };
-		DB060AFF37A1C5F9C43C5AA7 /* Pods_IndoorNavigation_iOSTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_IndoorNavigation_iOSTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
-		F76AAD190806FB1874E32F28 /* Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.debug.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.debug.xcconfig"; sourceTree = "<group>"; };
+		638CCC6BF4A7075847E5FB1A /* Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.release.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.release.xcconfig"; sourceTree = "<group>"; };
+		A2BBBB5B93F14568A3102295 /* Pods-IndoorNavigation-iOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOS.debug.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOS/Pods-IndoorNavigation-iOS.debug.xcconfig"; sourceTree = "<group>"; };
+		B12F6DDCA598FBE003F6B9BC /* Pods_IndoorNavigation_iOS.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_IndoorNavigation_iOS.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		B1B2592C38C4EE12B4DA0C76 /* Pods-IndoorNavigation-iOSTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOSTests.debug.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOSTests/Pods-IndoorNavigation-iOSTests.debug.xcconfig"; sourceTree = "<group>"; };
+		B634F310EBCBD15D2B282FA0 /* Pods-IndoorNavigation-iOS.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOS.release.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOS/Pods-IndoorNavigation-iOS.release.xcconfig"; sourceTree = "<group>"; };
+		B855377E0C31DBE1415EBBB9 /* Pods_IndoorNavigation_iOSTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_IndoorNavigation_iOSTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		C1469C3C7ED700899DD46AB5 /* Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		DB03A4A98F1195793A489FB3 /* Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.debug.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.debug.xcconfig"; sourceTree = "<group>"; };
+		FEF6AF0B5E52E516AAF23F8D /* Pods-IndoorNavigation-iOSTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOSTests.release.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOSTests/Pods-IndoorNavigation-iOSTests.release.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		393E9AAD2F5EADFF00EDBAAE /* IndoorNavigation-iOS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
 			path = "IndoorNavigation-iOS";
 			sourceTree = "<group>";
 		};
 		393E9ABB2F5EAE0100EDBAAE /* IndoorNavigation-iOSTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
 			path = "IndoorNavigation-iOSTests";
 			sourceTree = "<group>";
 		};
 		393E9AC52F5EAE0100EDBAAE /* IndoorNavigation-iOSUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
 			path = "IndoorNavigation-iOSUITests";
 			sourceTree = "<group>";
 		};
@@ -73,7 +67,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				21172141F5F9EA1CCD39146C /* Pods_IndoorNavigation_iOS.framework in Frameworks */,
+				FAB3670D9215E2E0B3EC70BE /* Pods_IndoorNavigation_iOS.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -81,7 +75,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CA86479B97321FD939E0C988 /* Pods_IndoorNavigation_iOSTests.framework in Frameworks */,
+				C0D545C447A7F014676DAA4E /* Pods_IndoorNavigation_iOSTests.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -89,7 +83,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				21F6A6A7367FEC77D318CCA4 /* Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework in Frameworks */,
+				D60618F64CC4DFF2F2CB5055 /* Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -103,8 +97,8 @@
 				393E9ABB2F5EAE0100EDBAAE /* IndoorNavigation-iOSTests */,
 				393E9AC52F5EAE0100EDBAAE /* IndoorNavigation-iOSUITests */,
 				393E9AAC2F5EADFF00EDBAAE /* Products */,
-				953D624C8202C2C0BC0B757A /* Pods */,
-				DC60D5EA74197D705668EB1C /* Frameworks */,
+				E94C159CAA56FF5141A02EA7 /* Pods */,
+				E3D646A00B203021A20B83F0 /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -118,28 +112,27 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		953D624C8202C2C0BC0B757A /* Pods */ = {
+		E3D646A00B203021A20B83F0 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
-				B34465FB1CF0DF3544C813AE /* Pods-IndoorNavigation-iOS.debug.xcconfig */,
-				967870EF0BF4623B7A150469 /* Pods-IndoorNavigation-iOS.release.xcconfig */,
-				F76AAD190806FB1874E32F28 /* Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.debug.xcconfig */,
-				5BBD8A804A63D27E90DA3AC5 /* Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.release.xcconfig */,
-				67BCFEB23AEA0E4A73C07419 /* Pods-IndoorNavigation-iOSTests.debug.xcconfig */,
-				1C2164D861F28DE9BCFF0A8E /* Pods-IndoorNavigation-iOSTests.release.xcconfig */,
-			);
-			name = Pods;
-			path = Pods;
-			sourceTree = "<group>";
-		};
-		DC60D5EA74197D705668EB1C /* Frameworks */ = {
-			isa = PBXGroup;
-			children = (
-				237AC6C10D3D8C5E5F947CD5 /* Pods_IndoorNavigation_iOS.framework */,
-				2DBE9E7232BE3065536D0BD8 /* Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework */,
-				DB060AFF37A1C5F9C43C5AA7 /* Pods_IndoorNavigation_iOSTests.framework */,
+				B12F6DDCA598FBE003F6B9BC /* Pods_IndoorNavigation_iOS.framework */,
+				C1469C3C7ED700899DD46AB5 /* Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework */,
+				B855377E0C31DBE1415EBBB9 /* Pods_IndoorNavigation_iOSTests.framework */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		E94C159CAA56FF5141A02EA7 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				A2BBBB5B93F14568A3102295 /* Pods-IndoorNavigation-iOS.debug.xcconfig */,
+				B634F310EBCBD15D2B282FA0 /* Pods-IndoorNavigation-iOS.release.xcconfig */,
+				DB03A4A98F1195793A489FB3 /* Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.debug.xcconfig */,
+				638CCC6BF4A7075847E5FB1A /* Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.release.xcconfig */,
+				B1B2592C38C4EE12B4DA0C76 /* Pods-IndoorNavigation-iOSTests.debug.xcconfig */,
+				FEF6AF0B5E52E516AAF23F8D /* Pods-IndoorNavigation-iOSTests.release.xcconfig */,
+			);
+			path = Pods;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -149,11 +142,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 393E9ACC2F5EAE0100EDBAAE /* Build configuration list for PBXNativeTarget "IndoorNavigation-iOS" */;
 			buildPhases = (
-				F3469CA697E510C8E079D8CA /* [CP] Check Pods Manifest.lock */,
+				BB7BEE8FA0711D822520FBCF /* [CP] Check Pods Manifest.lock */,
 				393E9AA72F5EADFF00EDBAAE /* Sources */,
 				393E9AA82F5EADFF00EDBAAE /* Frameworks */,
 				393E9AA92F5EADFF00EDBAAE /* Resources */,
-				AA8FC46AF72582831171F6C1 /* [CP] Embed Pods Frameworks */,
+				ED8313B646CDAC8436B0BF54 /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
 			);
@@ -171,7 +164,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 393E9ACF2F5EAE0100EDBAAE /* Build configuration list for PBXNativeTarget "IndoorNavigation-iOSTests" */;
 			buildPhases = (
-				D3077BDC5CC788EE041459DE /* [CP] Check Pods Manifest.lock */,
+				E6010EE597F71B339C0C3FCC /* [CP] Check Pods Manifest.lock */,
 				393E9AB42F5EAE0100EDBAAE /* Sources */,
 				393E9AB52F5EAE0100EDBAAE /* Frameworks */,
 				393E9AB62F5EAE0100EDBAAE /* Resources */,
@@ -193,11 +186,11 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 393E9AD22F5EAE0100EDBAAE /* Build configuration list for PBXNativeTarget "IndoorNavigation-iOSUITests" */;
 			buildPhases = (
-				FDE8912C574BD9AA60319B4F /* [CP] Check Pods Manifest.lock */,
+				644A043DD254011217A85197 /* [CP] Check Pods Manifest.lock */,
 				393E9ABE2F5EAE0100EDBAAE /* Sources */,
 				393E9ABF2F5EAE0100EDBAAE /* Frameworks */,
 				393E9AC02F5EAE0100EDBAAE /* Resources */,
-				69E6A100A7E43C9C149FA273 /* [CP] Embed Pods Frameworks */,
+				68339E798DFD9124D3D5137F /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
 			);
@@ -281,41 +274,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		69E6A100A7E43C9C149FA273 /* [CP] Embed Pods Frameworks */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests-frameworks-${CONFIGURATION}-input-files.xcfilelist",
-			);
-			name = "[CP] Embed Pods Frameworks";
-			outputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests-frameworks-${CONFIGURATION}-output-files.xcfilelist",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests-frameworks.sh\"\n";
-			showEnvVarsInLog = 0;
-		};
-		AA8FC46AF72582831171F6C1 /* [CP] Embed Pods Frameworks */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-IndoorNavigation-iOS/Pods-IndoorNavigation-iOS-frameworks-${CONFIGURATION}-input-files.xcfilelist",
-			);
-			name = "[CP] Embed Pods Frameworks";
-			outputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-IndoorNavigation-iOS/Pods-IndoorNavigation-iOS-frameworks-${CONFIGURATION}-output-files.xcfilelist",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-IndoorNavigation-iOS/Pods-IndoorNavigation-iOS-frameworks.sh\"\n";
-			showEnvVarsInLog = 0;
-		};
-		D3077BDC5CC788EE041459DE /* [CP] Check Pods Manifest.lock */ = {
+		644A043DD254011217A85197 /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -330,14 +289,35 @@
 			outputFileListPaths = (
 			);
 			outputPaths = (
-				"$(DERIVED_FILE_DIR)/Pods-IndoorNavigation-iOSTests-checkManifestLockResult.txt",
+				"$(DERIVED_FILE_DIR)/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests-checkManifestLockResult.txt",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
-		F3469CA697E510C8E079D8CA /* [CP] Check Pods Manifest.lock */ = {
+		68339E798DFD9124D3D5137F /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			inputPaths = (
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests-frameworks.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+		BB7BEE8FA0711D822520FBCF /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -359,7 +339,7 @@
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
-		FDE8912C574BD9AA60319B4F /* [CP] Check Pods Manifest.lock */ = {
+		E6010EE597F71B339C0C3FCC /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -374,11 +354,32 @@
 			outputFileListPaths = (
 			);
 			outputPaths = (
-				"$(DERIVED_FILE_DIR)/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests-checkManifestLockResult.txt",
+				"$(DERIVED_FILE_DIR)/Pods-IndoorNavigation-iOSTests-checkManifestLockResult.txt",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		ED8313B646CDAC8436B0BF54 /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-IndoorNavigation-iOS/Pods-IndoorNavigation-iOS-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			inputPaths = (
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-IndoorNavigation-iOS/Pods-IndoorNavigation-iOS-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-IndoorNavigation-iOS/Pods-IndoorNavigation-iOS-frameworks.sh\"\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
@@ -544,7 +545,7 @@
 		};
 		393E9ACD2F5EAE0100EDBAAE /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = B34465FB1CF0DF3544C813AE /* Pods-IndoorNavigation-iOS.debug.xcconfig */;
+			baseConfigurationReference = A2BBBB5B93F14568A3102295 /* Pods-IndoorNavigation-iOS.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -571,7 +572,7 @@
 		};
 		393E9ACE2F5EAE0100EDBAAE /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 967870EF0BF4623B7A150469 /* Pods-IndoorNavigation-iOS.release.xcconfig */;
+			baseConfigurationReference = B634F310EBCBD15D2B282FA0 /* Pods-IndoorNavigation-iOS.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -598,7 +599,7 @@
 		};
 		393E9AD02F5EAE0100EDBAAE /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 67BCFEB23AEA0E4A73C07419 /* Pods-IndoorNavigation-iOSTests.debug.xcconfig */;
+			baseConfigurationReference = B1B2592C38C4EE12B4DA0C76 /* Pods-IndoorNavigation-iOSTests.debug.xcconfig */;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
@@ -621,7 +622,7 @@
 		};
 		393E9AD12F5EAE0100EDBAAE /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 1C2164D861F28DE9BCFF0A8E /* Pods-IndoorNavigation-iOSTests.release.xcconfig */;
+			baseConfigurationReference = FEF6AF0B5E52E516AAF23F8D /* Pods-IndoorNavigation-iOSTests.release.xcconfig */;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
@@ -644,7 +645,7 @@
 		};
 		393E9AD32F5EAE0100EDBAAE /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = F76AAD190806FB1874E32F28 /* Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.debug.xcconfig */;
+			baseConfigurationReference = DB03A4A98F1195793A489FB3 /* Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.debug.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -665,7 +666,7 @@
 		};
 		393E9AD42F5EAE0100EDBAAE /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 5BBD8A804A63D27E90DA3AC5 /* Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.release.xcconfig */;
+			baseConfigurationReference = 638CCC6BF4A7075847E5FB1A /* Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.release.xcconfig */;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;

@@ -14,6 +14,7 @@ class MapViewController: UIViewController {
     private let infoCardNameLabel = UILabel()
     private let infoCardSubtitleLabel = UILabel()
     private let infoCardButton = UIButton(type: .system)
+    private let emptyStateLabel = UILabel()
 
     // MARK: - Constraints
 
@@ -35,6 +36,7 @@ class MapViewController: UIViewController {
         setupSearchBar()
         setupSearchResultsTable()
         setupInfoCard()
+        setupEmptyStateLabel()
         fetchBuildings()
     }
 
@@ -183,6 +185,24 @@ class MapViewController: UIViewController {
         ])
     }
 
+    private func setupEmptyStateLabel() {
+        emptyStateLabel.text = "표시할 건물 위치 정보가 없습니다.\n관리자에게 문의하세요."
+        emptyStateLabel.numberOfLines = 0
+        emptyStateLabel.textAlignment = .center
+        emptyStateLabel.textColor = .secondaryLabel
+        emptyStateLabel.font = .systemFont(ofSize: 15)
+        emptyStateLabel.isHidden = true
+        emptyStateLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(emptyStateLabel)
+
+        NSLayoutConstraint.activate([
+            emptyStateLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            emptyStateLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            emptyStateLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 32),
+            emptyStateLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -32),
+        ])
+    }
+
     // MARK: - Data
 
     private func fetchBuildings() {
@@ -191,10 +211,14 @@ class MapViewController: UIViewController {
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.activityIndicator.stopAnimating()
-                if case .success(let buildings) = result {
+
+                switch result {
+                case .success(let buildings):
                     self.buildings = buildings
                     self.placeMarkers(for: buildings)
                     self.centerMapOnBuildings(buildings)
+                case .failure(let error):
+                    self.showError(error.localizedDescription)
                 }
             }
         }
@@ -216,6 +240,8 @@ class MapViewController: UIViewController {
             }
             markers.append(marker)
         }
+
+        emptyStateLabel.isHidden = !markers.isEmpty
     }
 
     private func centerMapOnBuildings(_ buildings: [BuildingResponse]) {
@@ -225,10 +251,20 @@ class MapViewController: UIViewController {
         let avgLat = located.compactMap { $0.latitude }.reduce(0, +) / Double(located.count)
         let avgLng = located.compactMap { $0.longitude }.reduce(0, +) / Double(located.count)
 
-        let position = NMFCameraPosition(NMGLatLng(lat: avgLat, lng: avgLng), zoom: 16)
+        let zoom: Double = located.count == 1 ? 17 : 16
+        let position = NMFCameraPosition(NMGLatLng(lat: avgLat, lng: avgLng), zoom: zoom)
         let cameraUpdate = NMFCameraUpdate(position: position)
         cameraUpdate.animation = .easeIn
         mapView.moveCamera(cameraUpdate)
+    }
+
+    private func showError(_ message: String) {
+        let alert = UIAlertController(title: "오류", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "다시 시도", style: .default) { [weak self] _ in
+            self?.fetchBuildings()
+        })
+        alert.addAction(UIAlertAction(title: "닫기", style: .cancel))
+        present(alert, animated: true)
     }
 
     // MARK: - Info Card
