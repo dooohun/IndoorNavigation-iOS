@@ -4,6 +4,10 @@ IndoorNavigation-iOS/Secrets.plist
 # Claude Code working directories
 _workspace/
 _workspace_prev/
+.claude/worktrees/
+
+# Xcode user data
+xcuserdata/
 
 # Xcode
 build/
