@@ -417,9 +417,10 @@ class ARNavigationLogic {
         mat.lightingModel = .constant
         mat.isDoubleSided = true
 
-        // ">>" shape in local XY plane (vertical sign); face normal = local Z = travel direction.
-        // Tip at (+halfW, 0), base opens to (-halfW, ±halfH).
-        // Placement Y-rotation in placeChevronArrows makes local Z = travel direction.
+        // ">>" shape in local XY plane (vertical sign); face normal = local Z.
+        // Tip is at +X (local). placeChevronArrows aligns local +X to travel direction
+        // via yaw, then applies a small pitch (~20°) around the world-horizontal axis
+        // perpendicular to travel for sign-board visibility.
         let halfW: Float = 0.22
         let halfH: Float = 0.32
         let armLen: Float = sqrt((2 * halfW) * (2 * halfW) + halfH * halfH)
@@ -481,9 +482,30 @@ class ARNavigationLogic {
             let len = sqrt(dx * dx + dz * dz)
             guard len > 0.001 else { return }
             let chevron = createChevronNode()
-            chevron.position = SCNVector3(p.x, p.y + 0.8, p.z)
-            chevron.simdOrientation = simd_quatf(angle: atan2(dx / len, dz / len),
-                                                  axis: simd_float3(0, 1, 0))
+
+            // 위치: 다음 노드 직전(가장자리 끝)으로 이동. pn에서 진행 반대로 0.6m 뒤.
+            let edgeOffsetFromNext: Float = 0.6
+            let t: Float = max(0.0, (len - edgeOffsetFromNext) / len)
+            let ex = p.x + (pn.x - p.x) * t
+            let ez = p.z + (pn.z - p.z) * t
+            let ey = p.y + 0.8
+            chevron.position = SCNVector3(ex, ey, ez)
+
+            // Yaw: 모델의 +X(tip)이 진행 방향(dx,dz)으로 향하도록.
+            // SceneKit Y-up + right-hand: +Y 양의 각도는 +Z → +X 회전이므로,
+            // 모델 +X(tip)을 (dx,dz)로 보내려면 angle = -atan2(dz, dx).
+            let yaw = atan2(dz, dx)
+            let yawQ = simd_quatf(angle: -yaw, axis: simd_float3(0, 1, 0))
+
+            // Pitch: 사용자 시야에 잘 보이도록 화살표 윗면을 사용자 쪽(진행 반대)으로 약 20° 기울임.
+            // 진행 방향에 수직인 수평축(world right axis) 기준 회전.
+            let pitchAngleDeg: Float = 20.0
+            let pitchAngle = pitchAngleDeg * .pi / 180.0
+            let worldRightAxis = simd_float3(-dz / len, 0, dx / len)
+            let pitchQ = simd_quatf(angle: pitchAngle, axis: worldRightAxis)
+
+            // 합성: world frame 기준이므로 pitch * yaw (왼쪽이 후속 적용)
+            chevron.simdOrientation = pitchQ * yawQ
             chevron.renderingOrder = 10  // ribbon보다 위에 렌더링
             rootNode.addChildNode(chevron)
             allChevronNodes.append((node: chevron, pointIndex: idx))
