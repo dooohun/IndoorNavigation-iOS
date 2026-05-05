@@ -367,7 +367,7 @@ class ARNavigationLogic {
         guard points.count >= 2 else { return }
 
         let arrowInterval: Float = 5.0
-        let edgeOffset: Float = 0.45  // 경로 중심에서 가장자리까지 오프셋
+        let edgeOffset: Float = 0.40  // 경로 중심에서 가장자리 끝까지 오프셋 (halfWidth와 일치)
         var accumulatedDistance: Float = 0
 
         // 시작 지점 근처에 첫 화살표
@@ -546,8 +546,8 @@ class ARNavigationLogic {
         let node = SCNNode()
         node.name = "pathNode"
 
-        // 바닥에서 0.85m 위 (허리~가슴 높이로 잘 보임)
-        node.position = SCNVector3(position.x, position.y + 0.85, position.z)
+        // 바닥에서 0.80m 위 (요구사항)
+        node.position = SCNVector3(position.x, position.y + 0.80, position.z)
 
         // 셰브론 공통 재질 — PBR로 입체감 + 자체 발광으로 가시성 확보
         let material = SCNMaterial()
@@ -568,12 +568,12 @@ class ARNavigationLogic {
         }
 
         // 쿼터니언으로 회전 합성 (euler angles 간섭 방지)
-        // 1) 방향 회전: ">" 팁(+X)을 진행 방향으로
-        let angle = atan2(direction.z, -direction.x)
+        // 1) 방향 회전: ">" 팁(+X)을 진행 방향으로 — y-up 우상계에서 atan2(-dz, dx)
+        let angle = atan2(-direction.z, direction.x)
         let dirQuat = simd_quatf(angle: angle, axis: simd_float3(0, 1, 0))
-        // 2) 15도 기울기: 로컬 Z축 기준으로 상단이 진행 방향으로 기울어짐
-        let tiltQuat = simd_quatf(angle: -0.26, axis: simd_float3(0, 0, 1))
-        // 방향 회전 후 기울기 적용
+        // 2) 약 20° 틸트: 로컬 +X축(셰브론 팁축) 기준, 상단을 사용자 시점 쪽으로 젖힘
+        let tiltQuat = simd_quatf(angle: 0.349, axis: simd_float3(1, 0, 0))
+        // (방향 정렬) → (자기 좌표계에서 X축 기준 위로 젖힘)
         node.simdOrientation = dirQuat * tiltQuat
 
         // 부드러운 펄스 애니메이션
