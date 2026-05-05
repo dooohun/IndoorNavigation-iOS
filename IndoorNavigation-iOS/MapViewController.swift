@@ -1,5 +1,6 @@
 import UIKit
 import NMapsMap
+import CoreLocation
 
 class MapViewController: UIViewController {
 
@@ -27,6 +28,8 @@ class MapViewController: UIViewController {
     private var filteredBuildings: [BuildingResponse] = []
     private var markers: [NMFMarker] = []
     private var selectedBuilding: BuildingResponse?
+    private let locationManager = CLLocationManager()
+    private var didCenterOnUserLocation = false
 
     // MARK: - Lifecycle
 
@@ -37,6 +40,7 @@ class MapViewController: UIViewController {
         setupSearchResultsTable()
         setupInfoCard()
         setupEmptyStateLabel()
+        setupLocationManager()
         fetchBuildings()
     }
 
@@ -203,6 +207,23 @@ class MapViewController: UIViewController {
         ])
     }
 
+    // MARK: - Location
+
+    private func setupLocationManager() {
+        locationManager.delegate = self
+        locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        mapView.positionMode = .direction
+
+        switch locationManager.authorizationStatus {
+        case .notDetermined:
+            locationManager.requestWhenInUseAuthorization()
+        case .authorizedWhenInUse, .authorizedAlways:
+            locationManager.startUpdatingLocation()
+        default:
+            break
+        }
+    }
+
     // MARK: - Data
 
     private func fetchBuildings() {
@@ -216,7 +237,9 @@ class MapViewController: UIViewController {
                 case .success(let buildings):
                     self.buildings = buildings
                     self.placeMarkers(for: buildings)
-                    self.centerMapOnBuildings(buildings)
+                    if !self.didCenterOnUserLocation {
+                        self.centerMapOnBuildings(buildings)
+                    }
                 case .failure(let error):
                     self.showError(error.localizedDescription)
                 }
@@ -380,5 +403,36 @@ extension MapViewController: NMFMapViewTouchDelegate {
     func mapView(_ mapView: NMFMapView, didTapMap latlng: NMGLatLng, point: CGPoint) {
         hideInfoCard()
         if searchBar.isFirstResponder { dismissSearch() }
+    }
+}
+
+// MARK: - CLLocationManagerDelegate
+
+extension MapViewController: CLLocationManagerDelegate {
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        switch manager.authorizationStatus {
+        case .authorizedWhenInUse, .authorizedAlways:
+            manager.startUpdatingLocation()
+        default:
+            break
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last else { return }
+        let position = NMFCameraPosition(
+            NMGLatLng(lat: location.coordinate.latitude,
+                      lng: location.coordinate.longitude),
+            zoom: 17
+        )
+        let cameraUpdate = NMFCameraUpdate(position: position)
+        cameraUpdate.animation = .easeIn
+        mapView.moveCamera(cameraUpdate)
+        didCenterOnUserLocation = true
+        manager.stopUpdatingLocation()
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        print("Location update failed: \(error)")
     }
 }

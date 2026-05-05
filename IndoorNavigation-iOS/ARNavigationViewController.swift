@@ -11,10 +11,21 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var locateButton: UIButton!
     var closeButton: UIButton!
     var scanningOverlayView: UIView!
+    var captureCountLabel: UILabel!
     var scanCompleteBadge: UIView!
     var scanFailedView: UIView!
     var scanFailedLabel: UILabel!
     var arrivalBadge: UIView!
+
+    var hudContainerView: UIView!
+    var destinationPillView: UIView!
+    var destinationLabel: UILabel!
+    var remainingDistanceLabel: UILabel!
+    var instructionCardView: UIView!
+    var instructionLabel: UILabel!
+
+    var routeCalculatingView: UIView!
+    var routeCalculatingLabel: UILabel!
 
     private var logic: ARNavigationLogic!
 
@@ -30,6 +41,8 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         setupScanCompleteBadge()
         setupScanFailedView()
         setupArrivalBadge()
+        setupHUD()
+        setupRouteCalculatingView()
 
         logic.delegate = self
         logic.arSession = sceneView.session
@@ -91,7 +104,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
 
         // 메인 안내 문구
         let titleLabel = UILabel()
-        titleLabel.text = "좌우로 천천히 스캔해 주세요!"
+        titleLabel.text = "주변을 천천히 둘러보세요"
         titleLabel.textColor = .white
         titleLabel.font = .systemFont(ofSize: 20, weight: .bold)
         titleLabel.textAlignment = .center
@@ -106,9 +119,19 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         subtitleLabel.numberOfLines = 0
         subtitleLabel.frame = CGRect(x: 20, y: bounds.midY + 16, width: bounds.width - 40, height: 50)
 
+        // 캡처 진행 카운트 (subtitle 아래 16pt)
+        captureCountLabel = UILabel()
+        captureCountLabel.text = ""
+        captureCountLabel.textColor = UIColor.white.withAlphaComponent(0.9)
+        captureCountLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        captureCountLabel.textAlignment = .center
+        captureCountLabel.isHidden = true
+        captureCountLabel.frame = CGRect(x: 20, y: bounds.midY + 82, width: bounds.width - 40, height: 20)
+
         scanningOverlayView.addSubview(iconView)
         scanningOverlayView.addSubview(titleLabel)
         scanningOverlayView.addSubview(subtitleLabel)
+        scanningOverlayView.addSubview(captureCountLabel)
         self.view.addSubview(scanningOverlayView)
     }
 
@@ -241,6 +264,124 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         ])
     }
 
+    private func setupHUD() {
+        let bounds = self.view.bounds
+
+        // 컨테이너 (visibility 토글용)
+        hudContainerView = UIView(frame: bounds)
+        hudContainerView.isUserInteractionEnabled = false
+        hudContainerView.isHidden = true
+        self.view.addSubview(hudContainerView)
+
+        // 상단 목적지 pill
+        destinationPillView = UIView()
+        destinationPillView.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        destinationPillView.layer.cornerRadius = 18
+        destinationPillView.translatesAutoresizingMaskIntoConstraints = false
+        hudContainerView.addSubview(destinationPillView)
+
+        destinationLabel = UILabel()
+        destinationLabel.text = destinationName
+        destinationLabel.textColor = .white
+        destinationLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        destinationLabel.translatesAutoresizingMaskIntoConstraints = false
+        destinationPillView.addSubview(destinationLabel)
+
+        // 남은 거리 라벨
+        remainingDistanceLabel = UILabel()
+        remainingDistanceLabel.text = "약 ―m"
+        remainingDistanceLabel.textColor = .white
+        remainingDistanceLabel.font = .systemFont(ofSize: 28, weight: .bold)
+        remainingDistanceLabel.textAlignment = .center
+        remainingDistanceLabel.layer.shadowColor = UIColor.black.cgColor
+        remainingDistanceLabel.layer.shadowOpacity = 0.6
+        remainingDistanceLabel.layer.shadowRadius = 4
+        remainingDistanceLabel.layer.shadowOffset = .zero
+        remainingDistanceLabel.translatesAutoresizingMaskIntoConstraints = false
+        hudContainerView.addSubview(remainingDistanceLabel)
+
+        // 하단 안내 카드
+        instructionCardView = UIView()
+        instructionCardView.backgroundColor = UIColor.white.withAlphaComponent(0.95)
+        instructionCardView.layer.cornerRadius = 16
+        instructionCardView.layer.shadowColor = UIColor.black.cgColor
+        instructionCardView.layer.shadowOpacity = 0.15
+        instructionCardView.layer.shadowRadius = 8
+        instructionCardView.layer.shadowOffset = CGSize(width: 0, height: 2)
+        instructionCardView.translatesAutoresizingMaskIntoConstraints = false
+        hudContainerView.addSubview(instructionCardView)
+
+        instructionLabel = UILabel()
+        instructionLabel.text = "경로를 계산 중입니다…"
+        instructionLabel.textColor = .darkText
+        instructionLabel.font = .systemFont(ofSize: 16, weight: .medium)
+        instructionLabel.numberOfLines = 0
+        instructionLabel.translatesAutoresizingMaskIntoConstraints = false
+        instructionCardView.addSubview(instructionLabel)
+
+        let safeArea = self.view.safeAreaLayoutGuide
+
+        NSLayoutConstraint.activate([
+            // pill
+            destinationPillView.centerXAnchor.constraint(equalTo: hudContainerView.centerXAnchor),
+            destinationPillView.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 16),
+            destinationPillView.heightAnchor.constraint(equalToConstant: 36),
+
+            destinationLabel.leadingAnchor.constraint(equalTo: destinationPillView.leadingAnchor, constant: 16),
+            destinationLabel.trailingAnchor.constraint(equalTo: destinationPillView.trailingAnchor, constant: -16),
+            destinationLabel.topAnchor.constraint(equalTo: destinationPillView.topAnchor, constant: 8),
+            destinationLabel.bottomAnchor.constraint(equalTo: destinationPillView.bottomAnchor, constant: -8),
+
+            // 남은 거리
+            remainingDistanceLabel.centerXAnchor.constraint(equalTo: hudContainerView.centerXAnchor),
+            remainingDistanceLabel.topAnchor.constraint(equalTo: destinationPillView.bottomAnchor, constant: 12),
+
+            // 안내 카드
+            instructionCardView.centerXAnchor.constraint(equalTo: hudContainerView.centerXAnchor),
+            instructionCardView.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor, constant: -100),
+            instructionCardView.widthAnchor.constraint(equalTo: hudContainerView.widthAnchor, constant: -40),
+
+            instructionLabel.leadingAnchor.constraint(equalTo: instructionCardView.leadingAnchor, constant: 20),
+            instructionLabel.trailingAnchor.constraint(equalTo: instructionCardView.trailingAnchor, constant: -20),
+            instructionLabel.topAnchor.constraint(equalTo: instructionCardView.topAnchor, constant: 14),
+            instructionLabel.bottomAnchor.constraint(equalTo: instructionCardView.bottomAnchor, constant: -14),
+        ])
+    }
+
+    private func setupRouteCalculatingView() {
+        routeCalculatingView = UIView()
+        routeCalculatingView.backgroundColor = UIColor.white.withAlphaComponent(0.95)
+        routeCalculatingView.layer.cornerRadius = 16
+        routeCalculatingView.layer.shadowColor = UIColor.black.cgColor
+        routeCalculatingView.layer.shadowOpacity = 0.15
+        routeCalculatingView.layer.shadowRadius = 8
+        routeCalculatingView.layer.shadowOffset = CGSize(width: 0, height: 2)
+        routeCalculatingView.translatesAutoresizingMaskIntoConstraints = false
+        routeCalculatingView.isHidden = true
+        routeCalculatingView.isUserInteractionEnabled = false
+        self.view.addSubview(routeCalculatingView)
+
+        routeCalculatingLabel = UILabel()
+        routeCalculatingLabel.text = "경로를 계산 중입니다…"
+        routeCalculatingLabel.textColor = .darkText
+        routeCalculatingLabel.font = .systemFont(ofSize: 16, weight: .medium)
+        routeCalculatingLabel.textAlignment = .center
+        routeCalculatingLabel.translatesAutoresizingMaskIntoConstraints = false
+        routeCalculatingView.addSubview(routeCalculatingLabel)
+
+        let safeArea = self.view.safeAreaLayoutGuide
+
+        NSLayoutConstraint.activate([
+            routeCalculatingView.centerXAnchor.constraint(equalTo: self.view.centerXAnchor),
+            routeCalculatingView.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor, constant: -100),
+
+            routeCalculatingLabel.leadingAnchor.constraint(equalTo: routeCalculatingView.leadingAnchor, constant: 20),
+            routeCalculatingLabel.trailingAnchor.constraint(equalTo: routeCalculatingView.trailingAnchor, constant: -20),
+            routeCalculatingLabel.topAnchor.constraint(equalTo: routeCalculatingView.topAnchor, constant: 14),
+            routeCalculatingLabel.bottomAnchor.constraint(equalTo: routeCalculatingView.bottomAnchor, constant: -14),
+        ])
+    }
+
     @objc private func onLocateButtonTapped() {
         logic.startLocalizationFlow()
     }
@@ -257,6 +398,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         super.viewWillDisappear(animated)
         logic.stopCapture()
         logic.stopArrivalCheck()
+        logic.stopPathProgressTracking()
         sceneView.session.pause()
     }
 }
@@ -275,7 +417,13 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
     }
 
     func setCaptureProgress(text: String, isHidden: Bool) {
-        // 스캔 오버레이가 대체하므로 별도 표시 없음
+        if isHidden || text.isEmpty {
+            captureCountLabel.isHidden = true
+            captureCountLabel.text = ""
+        } else {
+            captureCountLabel.isHidden = false
+            captureCountLabel.text = "\(text) 촬영 중"
+        }
     }
 
     func setScanningOverlay(visible: Bool) {
@@ -313,6 +461,7 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
     }
 
     func showArrivalNotification() {
+        setHUDVisible(false)
         arrivalBadge.alpha = 0
         arrivalBadge.isHidden = false
         UIView.animate(withDuration: 0.3) {
@@ -343,6 +492,60 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
                 self.scanFailedView.alpha = 0
             } completion: { _ in
                 self.scanFailedView.isHidden = true
+            }
+        }
+    }
+
+    func updateHUD(destinationName: String, remainingDistance: Float, instruction: String?) {
+        destinationLabel.text = destinationName
+        remainingDistanceLabel.text = String(format: "약 %.0fm", remainingDistance)
+        instructionLabel.text = instruction ?? "경로를 따라가세요"
+    }
+
+    func setHUDVisible(_ visible: Bool) {
+        if visible {
+            hudContainerView.alpha = 0
+            hudContainerView.isHidden = false
+            UIView.animate(withDuration: 0.3) {
+                self.hudContainerView.alpha = 1
+            }
+        } else {
+            UIView.animate(withDuration: 0.3) {
+                self.hudContainerView.alpha = 0
+            } completion: { _ in
+                self.hudContainerView.isHidden = true
+            }
+        }
+    }
+
+    func setLocateButtonVisible(_ visible: Bool) {
+        if visible {
+            locateButton.alpha = 0
+            locateButton.isHidden = false
+            UIView.animate(withDuration: 0.2) {
+                self.locateButton.alpha = 1
+            }
+        } else {
+            UIView.animate(withDuration: 0.2) {
+                self.locateButton.alpha = 0
+            } completion: { _ in
+                self.locateButton.isHidden = true
+            }
+        }
+    }
+
+    func showRouteCalculating(_ visible: Bool) {
+        if visible {
+            routeCalculatingView.alpha = 0
+            routeCalculatingView.isHidden = false
+            UIView.animate(withDuration: 0.3) {
+                self.routeCalculatingView.alpha = 1
+            }
+        } else {
+            UIView.animate(withDuration: 0.3) {
+                self.routeCalculatingView.alpha = 0
+            } completion: { _ in
+                self.routeCalculatingView.isHidden = true
             }
         }
     }
