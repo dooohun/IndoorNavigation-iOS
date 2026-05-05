@@ -59,6 +59,7 @@ class ARNavigationLogic {
     private var allARPoints: [simd_float3] = []
     private var smoothedPoints: [simd_float3] = []
     private var allChevronNodes: [(node: SCNNode, pointIndex: Int)] = []
+    private var destinationPinNode: SCNNode?
     private var currentTargetWaypointIndex: Int = 0
     private var lastWindowUpdatePosition: simd_float3?
     private var pathProgressTimer: Timer?
@@ -83,6 +84,7 @@ class ARNavigationLogic {
         pathRootNode?.removeFromParentNode()
         pathRootNode = nil
         allChevronNodes.removeAll()
+        destinationPinNode = nil
         lastWindowUpdatePosition = nil
         allSteps = []
         allARPoints = []
@@ -230,6 +232,7 @@ class ARNavigationLogic {
         pathRootNode?.removeFromParentNode()
         pathRootNode = nil
         allChevronNodes.removeAll()
+        destinationPinNode = nil
 
         guard let arPose = matchedARPose, let pose = localizedPose else { return }
 
@@ -281,9 +284,6 @@ class ARNavigationLogic {
         currentTargetWaypointIndex = 1
         lastWindowUpdatePosition = cameraPos
 
-        // 30m 슬라이딩 윈도우 초기 렌더링
-        updateRibbonWindow(cameraPos: cameraPos)
-
         // 경로 구간별 더블 쉐브론 화살표 배치
         placeChevronArrows(on: smoothPoints, steps: steps, rootNode: rootNode)
 
@@ -291,9 +291,13 @@ class ARNavigationLogic {
         if let lastPoint = arPoints.last {
             let pinNode = createDestinationPin(at: lastPoint)
             rootNode.addChildNode(pinNode)
+            destinationPinNode = pinNode
             destinationARPosition = lastPoint
             startArrivalCheck()
         }
+
+        // 30m 슬라이딩 윈도우 초기 적용 (ribbon + 쉐브론 + 핀 일괄)
+        updateSlidingWindow(cameraPos: cameraPos)
 
         // 진행 추적 시작 + HUD 표시
         startPathProgressTracking()
@@ -417,32 +421,35 @@ class ARNavigationLogic {
         mat.lightingModel = .constant
         mat.isDoubleSided = true
 
-        // ">>" shape in local XY plane (vertical sign); face normal = local Z.
-        // Tip is at +X (local). placeChevronArrows aligns local +X to travel direction
-        // via yaw, then applies a small pitch (~20°) around the world-horizontal axis
-        // perpendicular to travel for sign-board visibility.
-        let halfW: Float = 0.22
-        let halfH: Float = 0.32
+        // ">>" 형태의 더블 쉐브론. 두 개의 V자(">")가 local +X(진행 방향)으로 in-line 분리되어 배치됨.
+        // V자 평면은 local XY에 펼쳐지며(수직/세움), tip은 +X. placeChevronArrows에서 yaw로 +X를 진행 방향에 정렬한 뒤
+        // 진행 방향에 수직인 수평축(world right) 기준 pitch를 적용하여 tip을 살짝 아래로 기울임.
+        // 사용자는 chevron이 진행 방향 너머로 똑바로 서서 보임.
+        let halfW: Float = 0.22     // 팔의 X방향 길이 (tip→base의 X 거리 절반)
+        let halfH: Float = 0.32     // 팔이 펼쳐진 Y방향 (V자 폭) 절반
         let armLen: Float = sqrt((2 * halfW) * (2 * halfW) + halfH * halfH)
-        let armThick: Float = 0.07  // Y cross-section (visual thickness of arm)
-        let faceDepth: Float = 0.04 // Z depth (face thickness, thin)
-        let gap: Float = 0.26       // Z spacing between two ">" shapes
+        let armThick: Float = 0.085 // Y cross-section (수평 자세에서 두께)
+        let faceDepth: Float = 0.085// 팔 단면 깊이 (Z, 사각 단면)
+        let gap: Float = 0.30       // 두 V자의 X축 간격 (in-line 분리)
 
-        // arm from tip (+halfW, 0) → base (-halfW, ±halfH): direction (-2*halfW, ±halfH)
-        let armAngle = atan2(halfH, -2 * halfW)  // Z-rotation angle (Q2, upper-left from tip)
+        // 팔 방향: tip (xOff, 0, 0) → base (xOff - 2*halfW, ±halfH, 0).
+        // local Z축 회전으로 V자 형성 (XY 평면에 펼침).
+        let armAngle = atan2(halfH, 2 * halfW)
 
-        for zOff: Float in [-gap / 2, gap / 2] {
+        for xOff: Float in [-gap / 2, gap / 2] {
+            // 위쪽 팔 (Y+): Z축 +armAngle 회전
             let uBox = SCNBox(width: CGFloat(armLen), height: CGFloat(armThick), length: CGFloat(faceDepth), chamferRadius: 0)
             uBox.materials = [mat]
             let uNode = SCNNode(geometry: uBox)
-            uNode.position = SCNVector3(0, halfH / 2, zOff)
+            uNode.position = SCNVector3(xOff - halfW, halfH / 2, 0)
             uNode.eulerAngles = SCNVector3(0, 0, armAngle)
             bobNode.addChildNode(uNode)
 
+            // 아래쪽 팔 (Y-): Z축 -armAngle 회전
             let lBox = SCNBox(width: CGFloat(armLen), height: CGFloat(armThick), length: CGFloat(faceDepth), chamferRadius: 0)
             lBox.materials = [mat]
             let lNode = SCNNode(geometry: lBox)
-            lNode.position = SCNVector3(0, -halfH / 2, zOff)
+            lNode.position = SCNVector3(xOff - halfW, -halfH / 2, 0)
             lNode.eulerAngles = SCNVector3(0, 0, -armAngle)
             bobNode.addChildNode(lNode)
         }
@@ -483,26 +490,33 @@ class ARNavigationLogic {
             guard len > 0.001 else { return }
             let chevron = createChevronNode()
 
-            // 위치: 다음 노드 직전(가장자리 끝)으로 이동. pn에서 진행 반대로 0.6m 뒤.
+            // 진행 단위 벡터 t̂, 우측 perpendicular r̂ (Y-up right-hand)
+            let invLen: Float = 1.0 / len
+            let tHat = simd_float2(dx * invLen, dz * invLen)
+            let rHat = simd_float2(-tHat.y, tHat.x)
+
+            // 위치: 다음 노드 직전(진행 방향 끝) + 경로 우측 가장자리로 lateral 오프셋.
             let edgeOffsetFromNext: Float = 0.6
+            let edgeLateralOffset: Float = 0.55  // ribbon stripWidth 0.8 → ±0.4 외측
+            let chevronHeight: Float = 1       // 바닥에서 띄운 높이
             let t: Float = max(0.0, (len - edgeOffsetFromNext) / len)
-            let ex = p.x + (pn.x - p.x) * t
-            let ez = p.z + (pn.z - p.z) * t
-            let ey = p.y + 0.8
-            chevron.position = SCNVector3(ex, ey, ez)
+            let cx = p.x + (pn.x - p.x) * t + rHat.x * edgeLateralOffset
+            let cz = p.z + (pn.z - p.z) * t + rHat.y * edgeLateralOffset
+            let cy = p.y + chevronHeight
+            chevron.position = SCNVector3(cx, cy, cz)
 
-            // Yaw: 모델의 +X(tip)이 진행 방향(dx,dz)으로 향하도록.
-            // SceneKit Y-up + right-hand: +Y 양의 각도는 +Z → +X 회전이므로,
-            // 모델 +X(tip)을 (dx,dz)로 보내려면 angle = -atan2(dz, dx).
-            let yaw = atan2(dz, dx)
-            let yawQ = simd_quatf(angle: -yaw, axis: simd_float3(0, 1, 0))
+            // Yaw: V자 꼭짓점은 모델 local -X에 위치하므로, local -X를 진행 방향(dx,dz)으로 향하게 하려면
+            // local +X를 진행 방향에 맞추는 atan2(-dz, dx)에 π를 더해 180° 뒤집는다.
+            let yawOffsetDeg: Float = 2.0
+            let yawAngle = atan2(-dz, dx) * .pi + (yawOffsetDeg * .pi / 180.0)
+            let yawQ = simd_quatf(angle: yawAngle, axis: simd_float3(0, 1, 0))
 
-            // Pitch: 사용자 시야에 잘 보이도록 화살표 윗면을 사용자 쪽(진행 반대)으로 약 20° 기울임.
-            // 진행 방향에 수직인 수평축(world right axis) 기준 회전.
-            let pitchAngleDeg: Float = 20.0
+            // Pitch: 진행 방향 안쪽(아래쪽)으로 살짝 기울임. yaw 180° 반전에 따라 부호도 반전(-15°).
+            // rHat 축 기준 -15° 회전 시 V자 꼭짓점(=진행 방향 끝)이 -Y쪽(아래)으로 기울어 안쪽으로 향함.
+            let pitchAngleDeg: Float = 0
             let pitchAngle = pitchAngleDeg * .pi / 180.0
-            let worldRightAxis = simd_float3(-dz / len, 0, dx / len)
-            let pitchQ = simd_quatf(angle: pitchAngle, axis: worldRightAxis)
+            let pitchAxis = simd_float3(rHat.x, 0, rHat.y)
+            let pitchQ = simd_quatf(angle: pitchAngle, axis: pitchAxis)
 
             // 합성: world frame 기준이므로 pitch * yaw (왼쪽이 후속 적용)
             chevron.simdOrientation = pitchQ * yawQ
@@ -534,8 +548,9 @@ class ARNavigationLogic {
         }
     }
 
-    // 30m 슬라이딩 윈도우: 카메라와 가장 가까운 smooth point부터 30m 앞까지만 렌더링
-    private func updateRibbonWindow(cameraPos: simd_float3) {
+    // 30m 슬라이딩 윈도우: 카메라 XZ 평면 거리 기준으로 ribbon·쉐브론·목적지 핀의 가시성을 일괄 갱신.
+    // ribbon은 windowPoints로 동적 재생성, 쉐브론은 pointIndex 범위 hidden 토글, 핀은 단일 점 평면 거리 비교 hidden 토글.
+    private func updateSlidingWindow(cameraPos: simd_float3) {
         guard let rootNode = pathRootNode, !smoothedPoints.isEmpty else { return }
 
         // 카메라 XZ 위치와 가장 가까운 smooth point → window 시작점
@@ -567,6 +582,14 @@ class ARNavigationLogic {
 
         for (chevron, pointIdx) in allChevronNodes {
             chevron.isHidden = pointIdx < startIdx || pointIdx > endIdx
+        }
+
+        // 목적지 핀: 카메라와의 XZ 평면 거리 기준으로 가시성 결정
+        if let pin = destinationPinNode, let dest = destinationARPosition {
+            let dx = cameraPos.x - dest.x
+            let dz = cameraPos.z - dest.z
+            let planarDist = sqrt(dx * dx + dz * dz)
+            pin.isHidden = planarDist > renderWindowDistance
         }
     }
 
@@ -607,7 +630,7 @@ class ARNavigationLogic {
             let ddx = cameraPos.x - lastPos.x
             let ddz = cameraPos.z - lastPos.z
             if sqrt(ddx * ddx + ddz * ddz) >= windowUpdateMoveDelta {
-                updateRibbonWindow(cameraPos: cameraPos)
+                updateSlidingWindow(cameraPos: cameraPos)
                 lastWindowUpdatePosition = cameraPos
             }
         }
@@ -648,6 +671,7 @@ class ARNavigationLogic {
         pathRootNode?.removeFromParentNode()
         pathRootNode = nil
         allChevronNodes.removeAll()
+        destinationPinNode = nil
         lastWindowUpdatePosition = nil
         allSteps = []
         allARPoints = []
