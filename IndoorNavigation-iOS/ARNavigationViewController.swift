@@ -27,6 +27,11 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var routeCalculatingView: UIView!
     var routeCalculatingLabel: UILabel!
 
+    var floorTransitionOverlayView: UIView!
+    var floorTransitionTitleLabel: UILabel!
+    var floorTransitionTargetLabel: UILabel!
+    var floorTransitionRestartButton: UIButton!
+
     private var logic: ARNavigationLogic!
 
     override func viewDidLoad() {
@@ -43,6 +48,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         setupArrivalBadge()
         setupHUD()
         setupRouteCalculatingView()
+        setupFloorTransitionOverlay()
 
         logic.delegate = self
         logic.arSession = sceneView.session
@@ -382,6 +388,113 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         ])
     }
 
+    private func setupFloorTransitionOverlay() {
+        let bounds = self.view.bounds
+
+        // 컨테이너 (전체화면 어두운 배경)
+        floorTransitionOverlayView = UIView(frame: bounds)
+        floorTransitionOverlayView.backgroundColor = UIColor.black.withAlphaComponent(0.75)
+        floorTransitionOverlayView.isHidden = true
+        floorTransitionOverlayView.isUserInteractionEnabled = true
+        self.view.addSubview(floorTransitionOverlayView)
+
+        // 카드 뷰 (중앙)
+        let cardView = UIView()
+        cardView.backgroundColor = UIColor.white
+        cardView.layer.cornerRadius = 20
+        cardView.layer.shadowColor = UIColor.black.cgColor
+        cardView.layer.shadowOpacity = 0.2
+        cardView.layer.shadowRadius = 12
+        cardView.layer.shadowOffset = CGSize(width: 0, height: 4)
+        cardView.translatesAutoresizingMaskIntoConstraints = false
+        floorTransitionOverlayView.addSubview(cardView)
+
+        // 아이콘
+        let iconConfig = UIImage.SymbolConfiguration(pointSize: 50, weight: .medium)
+        let iconImage = UIImage(systemName: "figure.stairs", withConfiguration: iconConfig)
+        let iconView = UIImageView(image: iconImage)
+        iconView.tintColor = .systemBlue
+        iconView.contentMode = .scaleAspectFit
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        cardView.addSubview(iconView)
+
+        // 타이틀 라벨
+        floorTransitionTitleLabel = UILabel()
+        floorTransitionTitleLabel.text = "계단을 이용해주세요"
+        floorTransitionTitleLabel.textColor = .darkText
+        floorTransitionTitleLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        floorTransitionTitleLabel.textAlignment = .center
+        floorTransitionTitleLabel.numberOfLines = 0
+        floorTransitionTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        cardView.addSubview(floorTransitionTitleLabel)
+
+        // 본문 라벨 (정적)
+        let bodyLabel = UILabel()
+        bodyLabel.text = "원하는 층에 도착하면 다시 스캔해야 합니다."
+        bodyLabel.textColor = .gray
+        bodyLabel.font = .systemFont(ofSize: 14, weight: .regular)
+        bodyLabel.textAlignment = .center
+        bodyLabel.numberOfLines = 0
+        bodyLabel.translatesAutoresizingMaskIntoConstraints = false
+        cardView.addSubview(bodyLabel)
+
+        // 목표 층 라벨
+        floorTransitionTargetLabel = UILabel()
+        floorTransitionTargetLabel.text = "목표: ―층으로 이동"
+        floorTransitionTargetLabel.textColor = .systemBlue
+        floorTransitionTargetLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        floorTransitionTargetLabel.textAlignment = .center
+        floorTransitionTargetLabel.numberOfLines = 0
+        floorTransitionTargetLabel.translatesAutoresizingMaskIntoConstraints = false
+        cardView.addSubview(floorTransitionTargetLabel)
+
+        // 버튼
+        floorTransitionRestartButton = UIButton(type: .system)
+        floorTransitionRestartButton.setTitle("도착했습니다 — 다시 스캔하기", for: .normal)
+        floorTransitionRestartButton.setTitleColor(.white, for: .normal)
+        floorTransitionRestartButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        floorTransitionRestartButton.backgroundColor = .systemBlue
+        floorTransitionRestartButton.tintColor = .white
+        floorTransitionRestartButton.layer.cornerRadius = 12
+        floorTransitionRestartButton.translatesAutoresizingMaskIntoConstraints = false
+        floorTransitionRestartButton.addTarget(self, action: #selector(onFloorTransitionRestartTapped), for: .touchUpInside)
+        cardView.addSubview(floorTransitionRestartButton)
+
+        NSLayoutConstraint.activate([
+            cardView.centerXAnchor.constraint(equalTo: floorTransitionOverlayView.centerXAnchor),
+            cardView.centerYAnchor.constraint(equalTo: floorTransitionOverlayView.centerYAnchor),
+            cardView.leadingAnchor.constraint(equalTo: floorTransitionOverlayView.leadingAnchor, constant: 24),
+            cardView.trailingAnchor.constraint(equalTo: floorTransitionOverlayView.trailingAnchor, constant: -24),
+
+            iconView.centerXAnchor.constraint(equalTo: cardView.centerXAnchor),
+            iconView.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 28),
+            iconView.widthAnchor.constraint(equalToConstant: 60),
+            iconView.heightAnchor.constraint(equalToConstant: 60),
+
+            floorTransitionTitleLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 16),
+            floorTransitionTitleLabel.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 20),
+            floorTransitionTitleLabel.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -20),
+
+            bodyLabel.topAnchor.constraint(equalTo: floorTransitionTitleLabel.bottomAnchor, constant: 16),
+            bodyLabel.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 20),
+            bodyLabel.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -20),
+
+            floorTransitionTargetLabel.topAnchor.constraint(equalTo: bodyLabel.bottomAnchor, constant: 16),
+            floorTransitionTargetLabel.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 20),
+            floorTransitionTargetLabel.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -20),
+
+            floorTransitionRestartButton.topAnchor.constraint(equalTo: floorTransitionTargetLabel.bottomAnchor, constant: 16),
+            floorTransitionRestartButton.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 20),
+            floorTransitionRestartButton.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -20),
+            floorTransitionRestartButton.heightAnchor.constraint(equalToConstant: 50),
+            floorTransitionRestartButton.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -28),
+        ])
+    }
+
+    @objc private func onFloorTransitionRestartTapped() {
+        logic.restartFromFloorTransition()
+    }
+
     @objc private func onLocateButtonTapped() {
         logic.startLocalizationFlow()
     }
@@ -547,6 +660,34 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
             } completion: { _ in
                 self.routeCalculatingView.isHidden = true
             }
+        }
+    }
+
+    func showFloorTransition(transitionType: String, targetFloor: Int?, currentFloor: Int?) {
+        if transitionType == "ELEVATOR" {
+            floorTransitionTitleLabel.text = "엘리베이터를 이용해주세요"
+        } else {
+            floorTransitionTitleLabel.text = "계단을 이용해주세요"
+        }
+
+        if let target = targetFloor {
+            floorTransitionTargetLabel.text = "목표: \(target)층으로 이동"
+        } else {
+            floorTransitionTargetLabel.text = "목표 층으로 이동해주세요"
+        }
+
+        floorTransitionOverlayView.alpha = 0
+        floorTransitionOverlayView.isHidden = false
+        UIView.animate(withDuration: 0.3) {
+            self.floorTransitionOverlayView.alpha = 1
+        }
+    }
+
+    func hideFloorTransition() {
+        UIView.animate(withDuration: 0.3) {
+            self.floorTransitionOverlayView.alpha = 0
+        } completion: { _ in
+            self.floorTransitionOverlayView.isHidden = true
         }
     }
 }

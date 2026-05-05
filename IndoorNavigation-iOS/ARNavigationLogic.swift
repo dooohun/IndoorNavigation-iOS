@@ -16,6 +16,8 @@ protocol ARNavigationLogicDelegate: AnyObject {
     func setHUDVisible(_ visible: Bool)
     func setLocateButtonVisible(_ visible: Bool)
     func showRouteCalculating(_ visible: Bool)
+    func showFloorTransition(transitionType: String, targetFloor: Int?, currentFloor: Int?)
+    func hideFloorTransition()
 }
 
 // MARK: - Logic
@@ -24,7 +26,7 @@ class ARNavigationLogic {
 
     // MARK: - Mock Mode (서버 미가용 시 UI 점검용)
     // FIXME: 서버 복구 후 false로 전환
-    static let useMockData: Bool = true
+    static let useMockData: Bool = false
 
     weak var delegate: ARNavigationLogicDelegate?
     weak var arSession: ARSession?
@@ -66,6 +68,13 @@ class ARNavigationLogic {
     private let waypointSwitchThreshold: Float = 0.8
     private let renderWindowDistance: Float = 30.0
     private let windowUpdateMoveDelta: Float = 1.0
+
+    // 층 이동 인터렉션
+    private var hasActiveFloorTransition: Bool = false
+    private var pendingRemainingSteps: [PathStep] = []
+    private var pendingTargetFloor: Int? = nil
+    private var isFloorTransitionRestart: Bool = false
+    private let floorTransitionTriggerDistance: Float = 1.0
 
     // MARK: - 다중 프레임 캡처 후 Localize
 
@@ -185,8 +194,20 @@ class ARNavigationLogic {
         localizedPose = pose
 
         delegate?.showScanComplete()
-        delegate?.showRouteCalculating(true)
-        startPathfinding(pose: pose)
+
+        if isFloorTransitionRestart {
+            // 잔여 경로 재렌더링 (서버 pathfinding 호출 생략)
+            delegate?.showRouteCalculating(false)
+            delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
+            let steps = pendingRemainingSteps
+            pendingRemainingSteps = []
+            isFloorTransitionRestart = false
+            delegate?.setLoading(false)
+            drawPathNodes(steps: steps)
+        } else {
+            delegate?.showRouteCalculating(true)
+            startPathfinding(pose: pose)
+        }
     }
 
     // MARK: - 경로 탐색
@@ -625,6 +646,22 @@ class ARNavigationLogic {
             }
         }
 
+        // 1-1. 층 이동 감지: 현재 waypoint(smooth index) → step index로 환산
+        if !hasActiveFloorTransition {
+            let subdiv = 20
+            let curStepIdx = max(0, min(currentTargetWaypointIndex / subdiv, allSteps.count - 1))
+            if let detection = detectFloorTransition(currentStepIdx: curStepIdx) {
+                let target = smoothedPoints[currentTargetWaypointIndex]
+                let dx = cameraPos.x - target.x
+                let dz = cameraPos.z - target.z
+                let dist = sqrt(dx * dx + dz * dz)
+                if dist < floorTransitionTriggerDistance {
+                    triggerFloorTransition(type: detection.type, targetFloor: detection.targetFloor, currentStepIdx: curStepIdx)
+                    return
+                }
+            }
+        }
+
         // 2. 30m 슬라이딩 윈도우 업데이트 (1m 이동마다)
         if let lastPos = lastWindowUpdatePosition {
             let ddx = cameraPos.x - lastPos.x
@@ -694,6 +731,21 @@ class ARNavigationLogic {
             guard let self = self else { return }
             self.delegate?.setScanningOverlay(visible: false)
             self.delegate?.showScanComplete()
+
+            if self.isFloorTransitionRestart {
+                // 재스캔 모드: 잔여 경로 직접 사용 (경로 계산 카드 표시 생략)
+                self.delegate?.showRouteCalculating(false)
+                self.matchedARPose = frame.camera.transform
+                self.localizedPose = self.makeMockPose()
+                self.delegate?.setLoading(false)
+                self.delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
+                let steps = self.pendingRemainingSteps
+                self.pendingRemainingSteps = []
+                self.isFloorTransitionRestart = false
+                self.drawPathNodes(steps: steps)
+                return
+            }
+
             self.delegate?.showRouteCalculating(true)
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
@@ -731,6 +783,119 @@ class ARNavigationLogic {
                 position: Position(x: x, y: y, z: z),
                 instruction: instruction
             )
+        }
+    }
+
+    // MARK: - 층 이동 인터렉션
+
+    /// 현재 step → 다음 step 사이에 층 이동(계단/엘리베이터)이 발생하는지 감지.
+    /// floorLevel 변화 또는 instruction 키워드 매칭. 둘 중 하나만 만족해도 트리거.
+    private func detectFloorTransition(currentStepIdx: Int) -> (type: String, targetFloor: Int?)? {
+        guard currentStepIdx + 1 < allSteps.count else { return nil }
+        let cur = allSteps[currentStepIdx]
+        let nxt = allSteps[currentStepIdx + 1]
+
+        // 조건 1: floorLevel 변화
+        let floorChanged: Bool = {
+            if let cf = cur.floorLevel, let nf = nxt.floorLevel, cf != nf { return true }
+            return false
+        }()
+
+        // 조건 2: instruction 키워드 매칭 (현재 또는 다음 step)
+        let curInstr = cur.instruction ?? ""
+        let nxtInstr = nxt.instruction ?? ""
+        let combined = curInstr + " " + nxtInstr
+
+        let stairsKeywords = ["TAKE_STAIRS", "STAIRS", "계단"]
+        let elevatorKeywords = ["TAKE_ELEVATOR", "ELEVATOR", "엘리베이터"]
+
+        let hasStairs = stairsKeywords.contains { combined.contains($0) }
+        let hasElevator = elevatorKeywords.contains { combined.contains($0) }
+
+        guard floorChanged || hasStairs || hasElevator else { return nil }
+
+        // type 우선순위: instruction 키워드 매칭 결과로 결정. 없으면 기본 STAIRS.
+        let type: String
+        if hasElevator {
+            type = "ELEVATOR"
+        } else if hasStairs {
+            type = "STAIRS"
+        } else {
+            type = "STAIRS"
+        }
+
+        return (type, nxt.floorLevel)
+    }
+
+    private func triggerFloorTransition(type: String, targetFloor: Int?, currentStepIdx: Int) {
+        hasActiveFloorTransition = true
+
+        // 잔여 steps 추출
+        let remaining: [PathStep]
+        if currentStepIdx + 1 < allSteps.count {
+            remaining = Array(allSteps[(currentStepIdx + 1)...])
+        } else {
+            remaining = []
+        }
+
+        // 잔여 step이 비어있으면 도착 처리로 폴백
+        if remaining.isEmpty {
+            hasActiveFloorTransition = false
+            delegate?.showArrivalNotification()
+            return
+        }
+
+        pendingRemainingSteps = remaining
+        pendingTargetFloor = targetFloor
+
+        pathProgressTimer?.invalidate()
+        pathProgressTimer = nil
+        arrivalCheckTimer?.invalidate()
+        arrivalCheckTimer = nil
+
+        // AR 노드 숨김 (세션은 유지)
+        pathRootNode?.isHidden = true
+
+        delegate?.setHUDVisible(false)
+        delegate?.showFloorTransition(transitionType: type, targetFloor: targetFloor, currentFloor: allSteps[currentStepIdx].floorLevel)
+    }
+
+    func restartFromFloorTransition() {
+        guard hasActiveFloorTransition else { return }
+        delegate?.hideFloorTransition()
+
+        // 기존 노드 정리
+        pathRootNode?.removeFromParentNode()
+        pathRootNode = nil
+        allChevronNodes.removeAll()
+        destinationPinNode = nil
+        lastWindowUpdatePosition = nil
+        currentTargetWaypointIndex = 0
+        matchedARPose = nil
+        localizedPose = nil
+        destinationARPosition = nil
+        hasNotifiedArrival = false
+
+        hasActiveFloorTransition = false
+        isFloorTransitionRestart = true
+
+        // 재스캔 안내 UI 복귀 + 캡처 재시작
+        delegate?.setLocateButtonVisible(false)
+        delegate?.setLoading(true)
+        delegate?.setScanningOverlay(visible: true)
+        delegate?.updateStatus("천천히 주변을 둘러보세요\n사진을 \(maxImages)장 촬영합니다.", color: .white)
+        delegate?.setCaptureProgress(text: "", isHidden: false)
+
+        capturedImages = []
+        capturedARPoses = []
+
+        if Self.useMockData {
+            runMockFlow()
+            return
+        }
+
+        captureTimer = Timer.scheduledTimer(withTimeInterval: captureInterval, repeats: true) { [weak self] _ in
+            self?.captureOneFrame()
         }
     }
 
