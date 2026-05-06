@@ -16,7 +16,7 @@ iOS ARKit 기반 실내 내비게이션 앱.
 |-------|------|------|
 | Phase 1 | `phases/phase1_map_building_markers.md` | 구현됨 (개선 여지) |
 | Phase 2 | `phases/phase2_ar_navigation_core.md` | 부분 구현 |
-| Phase 3 | `phases/phase3_floor_transition.md` | 미구현 |
+| Phase 3 | `phases/phase3_floor_transition.md` | 구현됨 |
 | Phase 4 | `phases/phase4_arrival_ux.md` | 미구현 |
 
 Phase 문서의 `## 상태` 필드는 구현 완료 시 업데이트한다.
@@ -27,3 +27,5 @@ Phase 문서의 `## 상태` 필드는 구현 완료 시 업데이트한다.
 | 2026-04-20 | 초기 구성 | 전체 | - |
 | 2026-04-29 | 에이전트·스킬 파일 생성 | agents/, skills/ | 신규 구축 (파일 없던 상태) |
 | 2026-05-02 | Phase 문서 추가 | .claude/phases/ | 서비스 전체 흐름 목표 정의 |
+| 2026-05-06 | Phase 3 상태 갱신 | CLAUDE.md, phases/README.md | 층 전환 인터렉션 구현 완료 반영 |
+| 2026-05-06 | `_workspace/` 제거, 스킬·에이전트 동기화 | agents/, skills/ | 코드 진화(SLAM 로컬라이즈, 좌표 기반 경로, ribbon+쉐브론, 층 전환)에 맞춰 문서 갱신 / 파이프라인 데이터 전달을 메시지 본문 기반으로 단순화 |

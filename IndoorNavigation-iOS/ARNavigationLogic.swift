@@ -290,7 +290,7 @@ class ARNavigationLogic {
 
         // 카메라 높이에서 바닥 레벨 추정 (스마트폰 들고 있는 높이 ~1.5m)
         let cameraY = arPose.columns.3.y
-        let floorY = cameraY - 1.5
+        let floorY = cameraY - 1.7
 
         // 서버 좌표를 AR 좌표로 변환 후 Y를 바닥 레벨로 고정
         var arPoints: [simd_float3] = []

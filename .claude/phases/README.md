@@ -19,7 +19,7 @@
 |-------|------|------|----------|
 | [Phase 1](phase1_map_building_markers.md) | 네이버 지도 - 건물 마커 & 탐색 | 구현됨 (개선 여지 있음) | 지도에 건물 마커 표시, 검색, InfoCard |
 | [Phase 2](phase2_ar_navigation_core.md) | AR 실내 내비게이션 - 핵심 플로우 | 부분 구현 | 스캔 → 로컬라이즈 → 경로 렌더링 |
-| [Phase 3](phase3_floor_transition.md) | 층 이동 인터렉션 | 미구현 | 계단/엘리베이터 도착 감지 + 재스캔 |
+| [Phase 3](phase3_floor_transition.md) | 층 이동 인터렉션 | 구현됨 | 계단/엘리베이터 도착 감지 + 재스캔 |
 | [Phase 4](phase4_arrival_ux.md) | 도착 UX | 미구현 | 목적지 도착 감지 + 완료 화면 |
 
 ## 기술 스택
