@@ -22,6 +22,12 @@
 | [Phase 3](phase3_floor_transition.md) | 층 이동 인터렉션 | 구현됨 | 계단/엘리베이터 도착 감지 + 재스캔 |
 | [Phase 4](phase4_arrival_ux.md) | 도착 UX | 미구현 | 목적지 도착 감지 + 완료 화면 |
 | [Phase 5](phase5_directional_guidance_ux.md) | 방향 안내 UX (턴 카드 + 풀스크린 회전 안내) | 미구현 | 로컬라이즈 직후 헤딩 정렬, 턴-바이-턴 카드, 재정렬 오버레이 |
+| [Phase 6](phase6_superpoint_overview.md) | SuperPoint 온보드 내비게이션 — 개요 (전면 재설계) | 미구현 (신규 아키텍처) | 동기·아키텍처·롤아웃. 모듈별 상세는 Phase 7~11 |
+| [Phase 7](phase7_superpoint_extractor.md) | SuperPoint 추출 인프라 (Core ML) | 미구현 | 온디바이스 SuperPoint 추론, 추론 빈도 적응 |
+| [Phase 8](phase8_superpoint_localize.md) | 서버 SuperPoint 로컬라이즈 | 미구현 | 신규 `localize-sp` 엔드포인트, 초기 스캔, 재로컬라이즈 |
+| [Phase 9](phase9_feature_chunk_store.md) | 특징점 청크 저장소 + 프리페치 | 미구현 | `feature-chunks`, hot/cold 윈도우, LRU, 디스크 캐시 |
+| [Phase 10](phase10_pose_tracker.md) | 온보드 Pose 추적 (PnP 6DoF) | 미구현 | PnP 매칭·신뢰도, ARKit drift 보정 |
+| [Phase 11](phase11_checkpoint_guidance.md) | 체크포인트 엔진 + 안내 통합 + 복구 | 미구현 | 체크포인트 분해, GuidanceDirector wiring, 길 잃음 복구 |
 
 ## 기술 스택
 
