@@ -4,37 +4,91 @@ import UIKit
 // MARK: - Building / POI DTOs
 
 struct BuildingResponse: Codable {
-    let id: String
+    let buildingId: String
     let name: String
     let description: String?
     let latitude: Double?
     let longitude: Double?
     let status: String?
-    let floorCount: Int?
-    let passageCount: Int?
     let createdAt: String?
     let updatedAt: String?
 }
 
-struct PoiResponse: Codable {
-    let nodeId: String
-    let name: String
+struct BuildingDetailResponse: Codable {
+    let buildingId: String?
+    let name: String?
+    let description: String?
+    let latitude: Double?
+    let longitude: Double?
+    let status: String?
+    let createdAt: String?
+    let updatedAt: String?
+    let floors: [FloorResponse]?
+    let verticalPassages: [VerticalPassageResponse]?
+}
+
+struct FloorResponse: Codable {
+    let floorId: String?
+    let buildingId: String?
+    let name: String?
+    let level: Int?
+    let height: Double?
+    let hasPath: Bool?
+    let hasPly: Bool?
+    let activeScanId: String?
+    let createdAt: String?
+    let updatedAt: String?
+}
+
+struct VerticalPassageResponse: Codable {
+    let passageId: String?
+    let buildingId: String?
+    let connectorType: String?
+    let connectorKey: String?
+    let name: String?
+    let mock: Bool?
+    let segments: [PassageSegment]?
+}
+
+struct PassageSegment: Codable {
+    let stopId: String?
+    let levelId: String?
+    let routeNodeId: String?
+    let x: Double?
+    let y: Double?
+    let floorId: String?
+    let kind: String?
+}
+
+struct POIResponse: Codable {
+    let poiId: String?
+    let buildingId: String?
+    let floorId: String?
+    let name: String?
+    let label: String?
     let category: String?
-    let floorLevel: Int?
-    let floorName: String?
+    let routeNodeId: String?
+    let displayPoint: PoiDisplayPoint?
+    let needsReview: Bool?
+    let llmConfidence: Double?
+}
+
+struct PoiDisplayPoint: Codable {
     let x: Double?
     let y: Double?
     let z: Double?
 }
 
-// MARK: - Localize / Pathfinding DTOs
+// MARK: - Localize / Coordinate Route DTOs
 
-struct LocalizeResponse: Codable {
+struct SLAMLocalizeResponse: Codable {
     let pose: Pose?
     let confidence: Double?
     let mapId: String?
     let numMatches: Int?
     let matchedImageIndex: Int?
+    let floorId: String?
+    let floorLevel: Int?
 }
 
 struct Pose: Codable {
@@ -48,20 +102,38 @@ struct Pose: Codable {
     let qw: Double?
 }
 
-struct PathfindingRequest: Codable {
-    let startFloorLevel: Int
-    let startX: Double
-    let startY: Double
-    let startZ: Double
-    let destinationName: String
-    let preference: String?
+struct Coordinate: Codable {
+    let x: Double
+    let y: Double
+    let z: Double?
 }
 
-struct PathfindingResponse: Codable {
-    let totalDistance: Double?
-    let estimatedTimeSeconds: Int?
-    let steps: [PathStep]?
+struct FloorCoordinateRouteRequest: Codable {
+    let start: Coordinate
+    let goal: Coordinate
 }
+
+struct FloorCoordinateRouteResponse: Codable {
+    let buildingId: String?
+    let floorId: String?
+    let scanId: String?
+    let pathGeometry: PathGeometry?
+    let lengthM: Double?
+    let nodeCount: Int?
+    let snapInfo: RouteSnapInfo?
+}
+
+struct PathGeometry: Codable {
+    let type: String?
+    let coordinates: [[Double]]?
+}
+
+struct RouteSnapInfo: Codable {
+    let startSnapDistanceM: Double?
+    let goalSnapDistanceM: Double?
+}
+
+// MARK: - 내부 경로 렌더링 모델 (서버 응답 어댑터 대상)
 
 struct PathStep: Codable {
     let stepNumber: Int?
@@ -76,11 +148,22 @@ struct Position: Codable {
     let z: Double
 }
 
-private struct ServerErrorBody: Codable {
-    let status: Int?
-    let error: String?
-    let message: String?
-    let path: String?
+// MARK: - 에러 모델
+
+private struct V1ErrorResponse: Codable {
+    let code: String
+    let message: String
+    let detail: String?
+}
+
+private struct HTTPValidationError: Codable {
+    let detail: [ValidationErrorItem]?
+}
+
+private struct ValidationErrorItem: Codable {
+    let loc: [String]?
+    let msg: String?
+    let type: String?
 }
 
 // MARK: - 로거
@@ -95,11 +178,12 @@ private func log(_ tag: String, _ items: Any...) {
 class NetworkManager {
     static let shared = NetworkManager()
     let baseURL = "http://218.150.183.198:8080/api/v1"
+    let slamBaseURL = "http://218.150.183.198:8080/api/slam/v3"
 
     // MARK: - 1. Localize
 
-    func localize(buildingId: String, images: [UIImage], completion: @escaping (Result<LocalizeResponse, Error>) -> Void) {
-        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/localize") else { return }
+    func localize(buildingId: String?, mapId: String?, images: [UIImage], completion: @escaping (Result<SLAMLocalizeResponse, Error>) -> Void) {
+        guard let url = URL(string: "\(slamBaseURL)/localize") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 30
@@ -108,6 +192,17 @@ class NetworkManager {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         var body = Data()
+
+        func appendField(_ name: String, _ value: String) {
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+            body.append(value.data(using: .utf8)!)
+            body.append("\r\n".data(using: .utf8)!)
+        }
+
+        if let bid = buildingId { appendField("building_id", bid) }
+        if let mid = mapId { appendField("map_id", mid) }
+
         for (index, image) in images.enumerated() {
             guard let imageData = image.jpegData(compressionQuality: 0.5) else { continue }
             body.append("--\(boundary)\r\n".data(using: .utf8)!)
@@ -141,7 +236,7 @@ class NetworkManager {
                 return
             }
             do {
-                let result = try JSONDecoder().decode(LocalizeResponse.self, from: data)
+                let result = try JSONDecoder().decode(SLAMLocalizeResponse.self, from: data)
                 log("RES", "파싱 성공:", result)
                 completion(.success(result))
             } catch {
@@ -151,10 +246,10 @@ class NetworkManager {
         }.resume()
     }
 
-    // MARK: - 2. Pathfinding
+    // MARK: - 2. Coordinate Route
 
-    func findPath(buildingId: String, requestDto: PathfindingRequest, completion: @escaping (Result<PathfindingResponse, Error>) -> Void) {
-        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/pathfinding") else { return }
+    func findRouteByCoordinates(buildingId: String, floorId: String, request requestDto: FloorCoordinateRouteRequest, completion: @escaping (Result<FloorCoordinateRouteResponse, Error>) -> Void) {
+        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/floors/\(floorId)/routes/coordinates") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -189,7 +284,7 @@ class NetworkManager {
                 return
             }
             do {
-                let result = try JSONDecoder().decode(PathfindingResponse.self, from: data)
+                let result = try JSONDecoder().decode(FloorCoordinateRouteResponse.self, from: data)
                 log("RES", "파싱 성공:", result)
                 completion(.success(result))
             } catch {
@@ -236,9 +331,42 @@ class NetworkManager {
         }.resume()
     }
 
-    // MARK: - 4. POI 목록 조회
+    // MARK: - 4. 건물 상세 조회
 
-    func fetchPOIs(buildingId: String, completion: @escaping (Result<[PoiResponse], Error>) -> Void) {
+    func fetchBuildingDetail(buildingId: String, completion: @escaping (Result<BuildingDetailResponse, Error>) -> Void) {
+        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)") else { return }
+
+        log("REQ", "GET", url.absoluteString)
+
+        URLSession.shared.dataTask(with: url) { data, response, error in
+            if let error = error {
+                log("ERR", "네트워크 오류:", error)
+                completion(.failure(Self.networkError(error)))
+                return
+            }
+            let http = response as? HTTPURLResponse
+            let statusCode = http?.statusCode ?? 0
+            let data = data ?? Data()
+            log("RES", "HTTP \(statusCode)")
+
+            guard (200..<300).contains(statusCode) else {
+                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
+                return
+            }
+            do {
+                let result = try JSONDecoder().decode(BuildingDetailResponse.self, from: data)
+                log("RES", "건물 상세 조회 성공")
+                completion(.success(result))
+            } catch {
+                log("ERR", "파싱 실패:", error)
+                completion(.failure(Self.makeError("응답 파싱 실패")))
+            }
+        }.resume()
+    }
+
+    // MARK: - 5. POI 목록 조회
+
+    func fetchPOIs(buildingId: String, completion: @escaping (Result<[POIResponse], Error>) -> Void) {
         guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/pois") else { return }
 
         log("REQ", "GET", url.absoluteString)
@@ -259,7 +387,7 @@ class NetworkManager {
                 return
             }
             do {
-                let result = try JSONDecoder().decode([PoiResponse].self, from: data)
+                let result = try JSONDecoder().decode([POIResponse].self, from: data)
                 log("RES", "POI \(result.count)개 조회")
                 completion(.success(result))
             } catch {
@@ -269,9 +397,9 @@ class NetworkManager {
         }.resume()
     }
 
-    // MARK: - 5. POI 검색
+    // MARK: - 6. POI 검색
 
-    func searchPOIs(buildingId: String, query: String, completion: @escaping (Result<[PoiResponse], Error>) -> Void) {
+    func searchPOIs(buildingId: String, query: String, completion: @escaping (Result<[POIResponse], Error>) -> Void) {
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
         guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/pois/search?query=\(encoded)") else { return }
 
@@ -293,7 +421,7 @@ class NetworkManager {
                 return
             }
             do {
-                let result = try JSONDecoder().decode([PoiResponse].self, from: data)
+                let result = try JSONDecoder().decode([POIResponse].self, from: data)
                 log("RES", "POI 검색 결과 \(result.count)개")
                 completion(.success(result))
             } catch {
@@ -311,6 +439,14 @@ class NetworkManager {
     }
 
     private static func httpError(statusCode: Int, data: Data) -> Error {
+        if let v1 = try? JSONDecoder().decode(V1ErrorResponse.self, from: data) {
+            return makeError("HTTP \(statusCode) [\(v1.code)] \(v1.message)\(v1.detail.map { "\n\($0)" } ?? "")")
+        }
+        if let v = try? JSONDecoder().decode(HTTPValidationError.self, from: data),
+           let items = v.detail, !items.isEmpty {
+            let lines = items.map { "- \($0.loc?.joined(separator: ".") ?? "") \($0.msg ?? "")" }.joined(separator: "\n")
+            return makeError("HTTP \(statusCode) Validation\n\(lines)")
+        }
         let body = String(data: data, encoding: .utf8) ?? "(빈 응답)"
         return makeError("HTTP \(statusCode)\n\(body)")
     }

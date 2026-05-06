@@ -298,7 +298,6 @@ class MapViewController: UIViewController {
 
         var parts: [String] = []
         if let desc = building.description, !desc.isEmpty { parts.append(desc) }
-        if let floors = building.floorCount { parts.append("\(floors)층") }
         infoCardSubtitleLabel.text = parts.joined(separator: " · ")
 
         infoCardBottomConstraint.constant = 0

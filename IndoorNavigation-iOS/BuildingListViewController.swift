@@ -118,7 +118,7 @@ class BuildingListViewController: UIViewController, UITableViewDataSource, UITab
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         let building = buildings[indexPath.row]
-        let poiVC = POISelectionViewController(buildingId: building.id, buildingName: building.name)
+        let poiVC = POISelectionViewController(buildingId: building.buildingId, buildingName: building.name)
         navigationController?.pushViewController(poiVC, animated: true)
     }
 }

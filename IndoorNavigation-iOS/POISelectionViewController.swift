@@ -12,9 +12,12 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
     private let activityIndicator = UIActivityIndicatorView(style: .large)
     private let emptyLabel = UILabel()
 
-    private var allPOIs: [PoiResponse] = []
-    private var filteredPOIs: [PoiResponse] = []
+    private var allPOIs: [POIResponse] = []
+    private var filteredPOIs: [POIResponse] = []
     private var searchWorkItem: DispatchWorkItem?
+
+    private var floorIdToLevel: [String: Int] = [:]
+    private var floors: [FloorResponse] = []
 
     init(building: BuildingResponse) {
         self.building = building
@@ -23,9 +26,9 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
 
     convenience init(buildingId: String, buildingName: String) {
         let building = BuildingResponse(
-            id: buildingId, name: buildingName, description: nil,
+            buildingId: buildingId, name: buildingName, description: nil,
             latitude: nil, longitude: nil, status: nil,
-            floorCount: nil, passageCount: nil, createdAt: nil, updatedAt: nil
+            createdAt: nil, updatedAt: nil
         )
         self.init(building: building)
     }
@@ -42,6 +45,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
         setupTableView()
         setupActivityIndicator()
         setupEmptyLabel()
+        fetchBuildingDetail()
         fetchPOIs()
     }
 
@@ -59,8 +63,6 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
 
         var infoParts: [String] = []
         if let desc = building.description, !desc.isEmpty { infoParts.append(desc) }
-        if let floors = building.floorCount { infoParts.append("\(floors)층") }
-        if let passages = building.passageCount { infoParts.append("통로 \(passages)개") }
 
         buildingInfoLabel.text = infoParts.joined(separator: " · ")
         buildingInfoLabel.font = .systemFont(ofSize: 14)
@@ -154,12 +156,31 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
 
     // MARK: - Data
 
+    private func fetchBuildingDetail() {
+        NetworkManager.shared.fetchBuildingDetail(buildingId: building.buildingId) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if case .success(let detail) = result {
+                    let floors = detail.floors ?? []
+                    self.floors = floors
+                    var map: [String: Int] = [:]
+                    for f in floors {
+                        if let fid = f.floorId, let lv = f.level { map[fid] = lv }
+                    }
+                    self.floorIdToLevel = map
+                    self.tableView.reloadData()
+                }
+                // 실패해도 fetchPOIs는 진행. 섹션은 빈 상태로 폴백.
+            }
+        }
+    }
+
     private func fetchPOIs() {
         activityIndicator.startAnimating()
         tableView.isHidden = true
         emptyLabel.isHidden = true
 
-        NetworkManager.shared.fetchPOIs(buildingId: building.id) { [weak self] result in
+        NetworkManager.shared.fetchPOIs(buildingId: building.buildingId) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.activityIndicator.stopAnimating()
@@ -200,14 +221,14 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            NetworkManager.shared.searchPOIs(buildingId: self.building.id, query: trimmed) { [weak self] result in
+            NetworkManager.shared.searchPOIs(buildingId: self.building.buildingId, query: trimmed) { [weak self] result in
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     switch result {
                     case .success(let pois):
                         self.filteredPOIs = pois
                     case .failure:
-                        self.filteredPOIs = self.allPOIs.filter { $0.name.localizedCaseInsensitiveContains(trimmed) }
+                        self.filteredPOIs = self.allPOIs.filter { ($0.name ?? "").localizedCaseInsensitiveContains(trimmed) }
                     }
                     self.emptyLabel.text = "'\(trimmed)' 검색 결과가 없습니다."
                     self.emptyLabel.isHidden = !self.filteredPOIs.isEmpty
@@ -244,7 +265,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
         let poi = poisForSection(indexPath.section)[indexPath.row]
 
         var config = cell.defaultContentConfiguration()
-        config.text = poi.name
+        config.text = poi.name ?? "(이름 없음)"
         config.image = iconForCategory(poi.category)
         if let cat = poi.category { config.secondaryText = categoryDisplayName(cat) }
         cell.contentConfiguration = config
@@ -258,16 +279,27 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
         tableView.deselectRow(at: indexPath, animated: true)
         let poi = poisForSection(indexPath.section)[indexPath.row]
 
+        // floorId/displayPoint 유효성 가드
+        guard poi.displayPoint?.x != nil, poi.displayPoint?.y != nil, (poi.floorId ?? "").isEmpty == false else {
+            let warn = UIAlertController(title: "안내", message: "이 목적지에는 좌표 정보가 없어 길찾기를 시작할 수 없습니다.", preferredStyle: .alert)
+            warn.addAction(UIAlertAction(title: "확인", style: .default))
+            self.present(warn, animated: true)
+            return
+        }
+
         let alert = UIAlertController(
-            title: poi.name,
+            title: poi.name ?? "목적지",
             message: "이 목적지로 길찾기를 시작할까요?",
             preferredStyle: .alert
         )
         alert.addAction(UIAlertAction(title: "시작", style: .default) { [weak self] _ in
             guard let self = self else { return }
             let arVC = ARNavigationViewController()
-            arVC.buildingId = self.building.id
-            arVC.destinationName = poi.name
+            arVC.buildingId = self.building.buildingId
+            arVC.destinationName = poi.name ?? ""
+            arVC.floorId = poi.floorId ?? ""
+            let dp = poi.displayPoint
+            arVC.goal = Coordinate(x: dp?.x ?? 0, y: dp?.y ?? 0, z: dp?.z)
             arVC.modalPresentationStyle = .fullScreen
             self.present(arVC, animated: true)
         })
@@ -278,13 +310,21 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
     // MARK: - Helpers
 
     private func sortedFloors() -> [Int] {
-        Set(filteredPOIs.compactMap { $0.floorLevel }).sorted()
+        let levels = filteredPOIs.compactMap { poi -> Int? in
+            guard let fid = poi.floorId else { return nil }
+            return floorIdToLevel[fid]
+        }
+        return Set(levels).sorted()
     }
 
-    private func poisForSection(_ section: Int) -> [PoiResponse] {
+    private func poisForSection(_ section: Int) -> [POIResponse] {
         let floors = sortedFloors()
         guard section < floors.count else { return filteredPOIs }
-        return filteredPOIs.filter { $0.floorLevel == floors[section] }
+        let target = floors[section]
+        return filteredPOIs.filter { poi in
+            guard let fid = poi.floorId, let lv = floorIdToLevel[fid] else { return false }
+            return lv == target
+        }
     }
 
     private func iconForCategory(_ category: String?) -> UIImage? {

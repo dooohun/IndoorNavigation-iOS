@@ -5,7 +5,9 @@ import ARKit
 class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
 
     var buildingId: String = ""
+    var floorId: String = ""
     var destinationName: String = ""
+    var goal: Coordinate = Coordinate(x: 0, y: 0, z: nil)
 
     var sceneView: ARSCNView!
     var locateButton: UIButton!
@@ -37,7 +39,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        logic = ARNavigationLogic(buildingId: buildingId, destinationName: destinationName)
+        logic = ARNavigationLogic(buildingId: buildingId, floorId: floorId, destinationName: destinationName, goal: goal)
 
         setupARView()
         setupCloseButton()

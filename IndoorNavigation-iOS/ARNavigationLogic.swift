@@ -33,11 +33,15 @@ class ARNavigationLogic {
     weak var scene: SCNScene?
 
     let buildingId: String
+    let floorId: String
     let destinationName: String
+    let goal: Coordinate
 
-    init(buildingId: String, destinationName: String) {
+    init(buildingId: String, floorId: String, destinationName: String, goal: Coordinate) {
         self.buildingId = buildingId
+        self.floorId = floorId
         self.destinationName = destinationName
+        self.goal = goal
     }
 
     // 다중 프레임 캡처
@@ -45,6 +49,8 @@ class ARNavigationLogic {
     let captureInterval: TimeInterval = 0.8
     private var matchedARPose: simd_float4x4?
     private var localizedPose: Pose?
+    private var localizedFloorId: String?
+    private var localizedFloorLevel: Int?
     private var capturedImages: [UIImage] = []
     private var capturedARPoses: [simd_float4x4] = []
     private var captureTimer: Timer?
@@ -158,7 +164,7 @@ class ARNavigationLogic {
             return
         }
 
-        NetworkManager.shared.localize(buildingId: buildingId, images: capturedImages) { [weak self] result in
+        NetworkManager.shared.localize(buildingId: buildingId, mapId: nil, images: capturedImages) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.delegate?.setScanningOverlay(visible: false)
@@ -174,7 +180,7 @@ class ARNavigationLogic {
         }
     }
 
-    private func handleLocalizeSuccess(response: LocalizeResponse) {
+    private func handleLocalizeSuccess(response: SLAMLocalizeResponse) {
         guard let pose = response.pose, pose.x != nil else {
             delegate?.setLoading(false)
             delegate?.showScanFailed(message: "위치를 인식하지 못했어요.\n주변을 비추며 다시 스캔해 주세요.")
@@ -192,6 +198,8 @@ class ARNavigationLogic {
 
         matchedARPose = capturedARPoses[matchedIndex]
         localizedPose = pose
+        localizedFloorId = response.floorId
+        localizedFloorLevel = response.floorLevel
 
         delegate?.showScanComplete()
 
@@ -206,34 +214,30 @@ class ARNavigationLogic {
             drawPathNodes(steps: steps)
         } else {
             delegate?.showRouteCalculating(true)
-            startPathfinding(pose: pose)
+            let activeFloorId = response.floorId ?? self.floorId
+            startCoordinateRoute(pose: pose, floorId: activeFloorId)
         }
     }
 
     // MARK: - 경로 탐색
 
-    private func startPathfinding(pose: Pose) {
-        let request = PathfindingRequest(
-            // TODO: Phase 3에서 서버가 매칭된 floorLevel 반환 시 동적 설정
-            startFloorLevel: 1,
-            startX: pose.x ?? 0.0,
-            startY: pose.y ?? 0.0,
-            startZ: pose.z ?? 0.0,
-            destinationName: destinationName,
-            preference: "SHORTEST"
+    private func startCoordinateRoute(pose: Pose, floorId: String) {
+        let request = FloorCoordinateRouteRequest(
+            start: Coordinate(x: pose.x ?? 0.0, y: pose.y ?? 0.0, z: pose.z),
+            goal: self.goal
         )
 
-        NetworkManager.shared.findPath(buildingId: buildingId, requestDto: request) { [weak self] result in
+        NetworkManager.shared.findRouteByCoordinates(buildingId: buildingId, floorId: floorId, request: request) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.delegate?.setLoading(false)
                 self.delegate?.showRouteCalculating(false)
                 switch result {
                 case .success(let response):
-                    let stepCount = response.steps?.count ?? 0
-                    if stepCount > 0 {
+                    let steps = self.adaptRouteResponseToSteps(response: response)
+                    if !steps.isEmpty {
                         self.delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
-                        self.drawPathNodes(steps: response.steps ?? [])
+                        self.drawPathNodes(steps: steps)
                     } else {
                         self.delegate?.showScanFailed(message: "경로를 찾지 못했어요.\n다시 한번 스캔해 주세요.")
                         self.delegate?.setLocateButtonVisible(true)
@@ -243,6 +247,23 @@ class ARNavigationLogic {
                     self.delegate?.setLocateButtonVisible(true)
                 }
             }
+        }
+    }
+
+    private func adaptRouteResponseToSteps(response: FloorCoordinateRouteResponse) -> [PathStep] {
+        guard let coords = response.pathGeometry?.coordinates else { return [] }
+        let level = self.localizedFloorLevel
+        return coords.enumerated().compactMap { (idx, c) in
+            guard c.count >= 2 else { return nil }
+            let x = c[0]
+            let y = c[1]
+            let z = c.count >= 3 ? c[2] : 0.0
+            return PathStep(
+                stepNumber: idx,
+                floorLevel: level,
+                position: Position(x: x, y: y, z: z),
+                instruction: nil
+            )
         }
     }
 
