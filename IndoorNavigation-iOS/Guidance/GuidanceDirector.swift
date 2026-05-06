@@ -35,14 +35,20 @@ final class GuidanceDirector {
     weak var delegate: GuidanceDirectorDelegate?
     private(set) var isPaused: Bool = false
 
+    // MARK: - 내부 타입
+
+    private struct Turn {
+        let position: simd_float3
+        let direction: TurnDirection
+    }
+
     // MARK: - 경로 캐시
     private var smoothedPoints: [simd_float3] = []
-    private var turnIndices: [Int] = []
-    private var turnDirections: [Int: TurnDirection] = [:]
+    private var turns: [Turn] = []
 
     // MARK: - 턴 카드 상태
     private var currentTurnLookupCursor: Int = 0
-    private var activeTurnSmoothIndex: Int? = nil
+    private var activeTurnIndex: Int? = nil
 
     // MARK: - 상태 머신
     private enum State {
@@ -71,10 +77,9 @@ final class GuidanceDirector {
     /// 모든 상태 초기화 + delegate에 dismiss/hide 발행. 새 흐름 시작/도착/층전환 재시작 직전에 호출.
     func reset() {
         smoothedPoints = []
-        turnIndices = []
-        turnDirections = [:]
+        turns = []
         currentTurnLookupCursor = 0
-        activeTurnSmoothIndex = nil
+        activeTurnIndex = nil
         state = .idle
         initialAlignmentTriggered = false
         reorientStartTime = nil
@@ -85,11 +90,12 @@ final class GuidanceDirector {
     }
 
     /// 경로 수신 직후 1회 호출. 턴 인덱스 룩업 빌드 + initialAlignment 상태 진입.
+    /// ARNavigationLogic에서 RDP 단순화된 후 spline 보간된 점열을 받음. turn 판정도 같은 점열 기반.
     func setRoute(smoothedPoints: [simd_float3]) {
         self.smoothedPoints = smoothedPoints
-        buildTurnIndices()
+        buildTurns(from: smoothedPoints)
         currentTurnLookupCursor = 0
-        activeTurnSmoothIndex = nil
+        activeTurnIndex = nil
         state = .initialAlignment
         initialAlignmentTriggered = false
         reorientStartTime = nil
@@ -117,29 +123,22 @@ final class GuidanceDirector {
         isPaused = false
     }
 
-    // MARK: - 턴 인덱스 빌드
+    // MARK: - 턴 룩업 빌드
 
-    /// smoothedPoints를 한 번 순회하며 인접 두 세그먼트 각도 차가 임계값 이상인 점을
-    /// turnIndices에 모은다. 각 인덱스의 방향(좌/우/유턴)도 함께 캐시.
-    private func buildTurnIndices() {
-        turnIndices = []
-        turnDirections = [:]
-        guard smoothedPoints.count >= 3 else { return }
-
-        for i in 1..<(smoothedPoints.count - 1) {
-            let prev = smoothedPoints[i - 1]
-            let cur = smoothedPoints[i]
-            let nxt = smoothedPoints[i + 1]
-
-            // XZ 평면 단위 벡터 (.y 슬롯에 z 성분을 매핑)
-            let v1 = normalizeXZ(simd_float2(cur.x - prev.x, cur.z - prev.z))
-            let v2 = normalizeXZ(simd_float2(nxt.x - cur.x, nxt.z - cur.z))
-            guard let d1 = v1, let d2 = v2 else { continue }
-
-            let angleDeg = vectorAngleSignedDeg(from: d1, to: d2)
+    /// 단순화된 점열을 한 번 순회하며 인접 두 세그먼트 각도 차가 임계값 이상인 점을
+    /// turns 배열에 (위치, 방향) 쌍으로 모은다.
+    private func buildTurns(from simplifiedPoints: [simd_float3]) {
+        turns = []
+        guard simplifiedPoints.count >= 3 else { return }
+        for i in 1..<(simplifiedPoints.count - 1) {
+            let prev = simplifiedPoints[i - 1]
+            let cur = simplifiedPoints[i]
+            let nxt = simplifiedPoints[i + 1]
+            guard let v1 = normalizeXZ(simd_float2(cur.x - prev.x, cur.z - prev.z)),
+                  let v2 = normalizeXZ(simd_float2(nxt.x - cur.x, nxt.z - cur.z)) else { continue }
+            let angleDeg = vectorAngleSignedDeg(from: v1, to: v2)
             if abs(angleDeg) >= turnAngleThresholdDeg {
-                turnIndices.append(i)
-                turnDirections[i] = turnDirection(forSignedDeg: angleDeg)
+                turns.append(Turn(position: cur, direction: turnDirection(forSignedDeg: angleDeg)))
             }
         }
     }
@@ -188,8 +187,7 @@ final class GuidanceDirector {
 
         case .navigating:
             // 턴 카드 평가는 reorient와 독립
-            evaluateTurnCard(cameraPosition: cameraPosition,
-                             currentTargetWaypointIndex: currentTargetWaypointIndex)
+            evaluateTurnCard(cameraPosition: cameraPosition)
 
             // 큰 방향 이탈 감지 (다음 waypoint 기준)
             guard let targetWp = nextWaypoint(after: currentTargetWaypointIndex) else { return }
@@ -205,7 +203,7 @@ final class GuidanceDirector {
                         delegate?.guidance(self, showReorient: dir, angle: yawDelta)
                         // 재정렬 동안 턴 카드는 가린다(중첩 방지)
                         delegate?.guidanceHideTurnCard(self)
-                        activeTurnSmoothIndex = nil
+                        activeTurnIndex = nil
                         state = .majorReorient
                         reorientStartTime = nil
                     }
@@ -229,62 +227,50 @@ final class GuidanceDirector {
         }
     }
 
-    /// 턴 카드 등장/거리갱신/퇴장.
-    private func evaluateTurnCard(cameraPosition: simd_float3,
-                                  currentTargetWaypointIndex: Int) {
-        // 활성 턴이 있으면: 거리 갱신 + 통과 체크
-        if let activeIdx = activeTurnSmoothIndex {
-            // 통과한 turn은 cursor 진행
-            if currentTargetWaypointIndex > activeIdx {
-                delegate?.guidanceHideTurnCard(self)
-                activeTurnSmoothIndex = nil
-                advanceCursorPast(activeIdx)
-                return
-            }
-
-            let p = smoothedPoints[activeIdx]
-            let dx = cameraPosition.x - p.x
-            let dz = cameraPosition.z - p.z
+    /// 턴 카드 등장/거리갱신/퇴장. waypoint 인덱스에 의존하지 않고 turns 배열 기반으로만 평가.
+    private func evaluateTurnCard(cameraPosition: simd_float3) {
+        // (A) 활성 턴이 있는 경우: 거리 갱신 + 통과 판정
+        if let activeIdx = activeTurnIndex {
+            let turn = turns[activeIdx]
+            let dx = cameraPosition.x - turn.position.x
+            let dz = cameraPosition.z - turn.position.z
             let dist = sqrt(dx * dx + dz * dz)
 
-            if dist <= turnCardPassDistance {
+            var passed = dist <= turnCardPassDistance
+
+            // 다음 turn이 있으면 진행 방향 dot product 가드
+            if !passed, activeIdx + 1 < turns.count {
+                let nextTurn = turns[activeIdx + 1]
+                if let progressDir = normalizeXZ(simd_float2(nextTurn.position.x - turn.position.x,
+                                                             nextTurn.position.z - turn.position.z)) {
+                    let toCam = simd_float2(cameraPosition.x - turn.position.x,
+                                            cameraPosition.z - turn.position.z)
+                    if simd_dot(progressDir, toCam) > 0 {
+                        passed = true
+                    }
+                }
+            }
+
+            if passed {
                 delegate?.guidanceHideTurnCard(self)
-                activeTurnSmoothIndex = nil
-                advanceCursorPast(activeIdx)
+                activeTurnIndex = nil
+                currentTurnLookupCursor = activeIdx + 1
             } else {
                 delegate?.guidance(self, updateTurnCardDistance: Double(dist))
             }
             return
         }
 
-        // 활성 턴이 없으면: 다음 후보 턴을 cursor부터 탐색
-        // (현재 진행 인덱스 이후의 턴만 본다)
-        while currentTurnLookupCursor < turnIndices.count {
-            let candidateIdx = turnIndices[currentTurnLookupCursor]
-            if candidateIdx <= currentTargetWaypointIndex {
-                currentTurnLookupCursor += 1
-                continue
-            }
-
-            let p = smoothedPoints[candidateIdx]
-            let dx = cameraPosition.x - p.x
-            let dz = cameraPosition.z - p.z
+        // (B) 활성 턴 없음: 다음 후보 평가
+        if currentTurnLookupCursor < turns.count {
+            let candidate = turns[currentTurnLookupCursor]
+            let dx = cameraPosition.x - candidate.position.x
+            let dz = cameraPosition.z - candidate.position.z
             let dist = sqrt(dx * dx + dz * dz)
-
             if dist <= turnCardShowDistance {
-                let dir = turnDirections[candidateIdx] ?? .right
-                activeTurnSmoothIndex = candidateIdx
-                delegate?.guidance(self, showTurnCard: dir, distance: Double(dist))
+                activeTurnIndex = currentTurnLookupCursor
+                delegate?.guidance(self, showTurnCard: candidate.direction, distance: Double(dist))
             }
-            // 가까우면 표시, 아직 멀면 계속 대기 (다음 tick에서 재평가)
-            return
-        }
-    }
-
-    private func advanceCursorPast(_ idx: Int) {
-        while currentTurnLookupCursor < turnIndices.count,
-              turnIndices[currentTurnLookupCursor] <= idx {
-            currentTurnLookupCursor += 1
         }
     }
 

@@ -85,6 +85,11 @@ class ARNavigationLogic {
     // 방향 안내 (Phase 5)
     private let guidanceDirector = GuidanceDirector()
     private let pathSubdivisions: Int = 20  // catmullRomSpline subdivisions와 동기화
+    /// RDP(Ramer-Douglas-Peucker) 사전 경로 단순화 임계값 (XZ 평면, m).
+    /// 0.25m 격자·0.5m 미만 단차 흡수. 시각 경로(리본·쉐브론)와 GuidanceDirector turn 판정 모두에 적용.
+    private let pathSimplificationEpsilonM: Float = 0.7
+    /// drawPathNodes에서 RDP 단순화 결과 점 개수. tickPathProgress의 step index 비례 환산에 사용.
+    private var simplifiedPointCount: Int = 0
 
     // MARK: - 외부 노출
 
@@ -113,6 +118,7 @@ class ARNavigationLogic {
         allSteps = []
         allARPoints = []
         smoothedPoints = []
+        simplifiedPointCount = 0
         currentTargetWaypointIndex = 0
         matchedARPose = nil
         localizedPose = nil
@@ -330,8 +336,13 @@ class ARNavigationLogic {
             return
         }
 
+        // RDP 사전 단순화: 시각 경로·turn 판정 모두 동일 점열 기반
+        let simplifiedARPoints = simplifyXZ(points: arPoints, epsilon: pathSimplificationEpsilonM)
+        simplifiedPointCount = simplifiedARPoints.count
+        print(String(format: "[PATH-RDP] raw=%d → simplified=%d (ε=%.2fm)", arPoints.count, simplifiedARPoints.count, pathSimplificationEpsilonM))
+
         // Catmull-Rom 스플라인으로 부드러운 경로 생성
-        let smoothPoints = catmullRomSpline(points: arPoints, subdivisions: pathSubdivisions)
+        let smoothPoints = catmullRomSpline(points: simplifiedARPoints, subdivisions: pathSubdivisions)
 
         // 상태 보관
         allSteps = steps
@@ -534,11 +545,15 @@ class ARNavigationLogic {
         allChevronNodes.removeAll()
 
         // 회전 구간: instruction에 "회전" 포함된 step의 smooth point 인덱스
-        let subdiv = 20
+        // RDP 단순화로 spline 입력 점 수가 줄어 points.count ≠ steps.count * subdiv 이므로 비례 환산.
+        // TODO: 정확한 turn 매핑 개선은 GuidanceDirector turns 좌표 활용으로 후속 분리.
+        let subdiv = pathSubdivisions
+        let denom = max((steps.count - 1) * subdiv, 1)
+        let ratio = Float(points.count - 1) / Float(denom)
         var turnIndices: Set<Int> = []
         for (idx, step) in steps.enumerated() {
             if (step.instruction ?? "").contains("회전") {
-                let si = min(idx * subdiv, points.count - 1)
+                let si = min(Int(Float(idx * subdiv) * ratio), points.count - 1)
                 turnIndices.insert(si)
             }
         }
@@ -656,8 +671,14 @@ class ARNavigationLogic {
 
         // 1-1. 층 이동 감지: 현재 waypoint(smooth index) → step index로 환산
         if !hasActiveFloorTransition {
-            let subdiv = 20
-            let curStepIdx = max(0, min(currentTargetWaypointIndex / subdiv, allSteps.count - 1))
+            let subdiv = pathSubdivisions
+            // RDP 단순화 후 spline 보간되어 smoothedPoints 길이가 (simplifiedPointCount-1)*subdiv 기준이 됨.
+            // 원본 allSteps 인덱스로 비례 환산 (보정 옵션 2).
+            let denom = max((simplifiedPointCount - 1) * subdiv, 1)
+            let curStepIdx = max(0, min(
+                Int(Float(currentTargetWaypointIndex) * Float(allSteps.count - 1) / Float(denom)),
+                allSteps.count - 1
+            ))
             if let detection = detectFloorTransition(currentStepIdx: curStepIdx) {
                 let target = smoothedPoints[currentTargetWaypointIndex]
                 let dx = cameraPos.x - target.x
@@ -681,7 +702,12 @@ class ARNavigationLogic {
         }
 
         let remaining = computeRemainingDistance(cameraPos: cameraPos)
-        let stepIdx = min(currentTargetWaypointIndex, max(allSteps.count - 1, 0))
+        let subdiv = pathSubdivisions
+        let denom2 = max((simplifiedPointCount - 1) * subdiv, 1)
+        let stepIdx = max(0, min(
+            Int(Float(currentTargetWaypointIndex) * Float(allSteps.count - 1) / Float(denom2)),
+            allSteps.count - 1
+        ))
         let instruction = (stepIdx >= 0 && stepIdx < allSteps.count) ? allSteps[stepIdx].instruction : nil
         delegate?.updateHUD(destinationName: destinationName, remainingDistance: remaining, instruction: instruction)
     }
@@ -711,6 +737,7 @@ class ARNavigationLogic {
         allSteps = []
         allARPoints = []
         smoothedPoints = []
+        simplifiedPointCount = 0
         currentTargetWaypointIndex = 0
         matchedARPose = nil
         localizedPose = nil
@@ -953,6 +980,46 @@ class ARNavigationLogic {
             i += 1
         }
         return total
+    }
+
+    // MARK: - 경로 단순화 (RDP)
+
+    /// XZ 2D RDP(Ramer-Douglas-Peucker) 단순화. spline 입력 사전 정제용.
+    /// 시각 경로/턴 판정 모두 단순화 결과 기반 — 양자화 격자(0.25m)·미세 단차로 인한
+    /// 코너 오탐과 경로 노이즈를 흡수. 시작/끝 점은 항상 보존.
+    private func simplifyXZ(points: [simd_float3], epsilon: Float) -> [simd_float3] {
+        if points.count < 3 { return points }
+        var keep = Array(repeating: false, count: points.count)
+        keep[0] = true
+        keep[points.count - 1] = true
+        rdpRecurse(points, 0, points.count - 1, epsilon, &keep)
+        return zip(points, keep).compactMap { $1 ? $0 : nil }
+    }
+
+    private func rdpRecurse(_ pts: [simd_float3], _ start: Int, _ end: Int, _ eps: Float, _ keep: inout [Bool]) {
+        guard end > start + 1 else { return }
+        var maxDist: Float = 0
+        var maxIdx: Int = start
+        for i in (start + 1)..<end {
+            let d = perpendicularDistanceXZ(point: pts[i], lineStart: pts[start], lineEnd: pts[end])
+            if d > maxDist { maxDist = d; maxIdx = i }
+        }
+        if maxDist > eps {
+            keep[maxIdx] = true
+            rdpRecurse(pts, start, maxIdx, eps, &keep)
+            rdpRecurse(pts, maxIdx, end, eps, &keep)
+        }
+    }
+
+    private func perpendicularDistanceXZ(point p: simd_float3, lineStart a: simd_float3, lineEnd b: simd_float3) -> Float {
+        let abx = b.x - a.x, abz = b.z - a.z
+        let apx = p.x - a.x, apz = p.z - a.z
+        let lineLen = sqrt(abx * abx + abz * abz)
+        if lineLen < 1e-5 {
+            return sqrt(apx * apx + apz * apz)
+        }
+        let cross = abs(abx * apz - abz * apx)
+        return cross / lineLen
     }
 
     // MARK: - Catmull-Rom 스플라인 보간

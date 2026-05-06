@@ -59,6 +59,14 @@
 - 서버 `PathStep.instruction` 필드에 의존하지 않고 `PathStep.position` 좌표만으로 클라이언트가 자체 산출한다.
 - 경로 수신 직후 한 번 전체를 스캔해 `[turnIndex: angleDelta]` 룩업 테이블을 만들어 두면 매 프레임 재계산 불필요.
 
+**사전 경로 단순화 (RDP, ε=0.7m)**:
+- 서버 경로는 0.25m 격자로 양자화되어 같은 직선 위 중간점·0.125m 미세 단차가 다수 포함된다.
+  이를 그대로 두면 인접 세그먼트 각도 계산 시 노이즈가 코너로 오인된다 (실측 25점 → 의미 있는 코너 약 8개).
+- ε=0.7m로 상향하면 0.5m 미만의 짧은 단차도 흡수.
+- `ARNavigationLogic.drawPathNodes`에서 Catmull-Rom spline 보간 직전에 XZ 2D RDP 알고리즘을 임계값 ε = 0.7m로 적용한다. 단순화 결과를 spline 입력으로 사용하므로 시각 경로(리본·쉐브론)·GuidanceDirector turn 판정 모두 동일 점열 기반.
+- **시각 경로(리본·쉐브론)도 단순화된 점 기준으로 그려짐** — `ARNavigationLogic.drawPathNodes`에서 spline 입력 단계에 RDP 적용. GuidanceDirector는 단순화된 결과를 받아 turn 빌드만 수행.
+- ε는 `ARNavigationLogic.pathSimplificationEpsilonM` 상수로 노출 (디바이스 튜닝 가능).
+
 **무엇을**:
 - [ ] 화면 우상단 모서리에서 16pt 안쪽으로 띄운 카드 (safeArea 기준)
 - [ ] 카드 크기: 폭 160pt, 높이 80pt, 둥근 모서리 12pt
@@ -103,7 +111,7 @@
 | 카메라 헤딩(forward) | `ARFrame.camera.transform.columns.2` (-z 정면) 1줄 추가 | XZ 평면 투영 후 정규화 |
 | 다음 waypoint 위치 | `PathStep.position(x,y,z)` → `CoordinateTransformer`로 ARKit world 변환 | 변환은 이미 yaw 포함 완전 적용 |
 | 현재 진행 인덱스 | 기존 `currentTargetWaypointIndex` | 그대로 사용 |
-| 턴 지점 판정 | 인접 두 세그먼트 벡터 각도 차 | **`PathStep.instruction` 필드에 의존하지 않음** (optional·미보장) |
+| 턴 지점 판정 | RDP(ε=0.7m) 단순화 후 인접 두 세그먼트 벡터 각도 차 | `PathStep.instruction` 미사용. 단순화는 시각 경로·turn 판정 공통 적용 (drawPathNodes 단계) |
 
 따라서 서버 스펙 변경·추가 호출 없이 5-1·5-2·5-3 모두 구현 가능하다.
 
@@ -208,3 +216,4 @@ protocol GuidanceDirectorDelegate: AnyObject {
 - [ ] 턴 지점 각도 임계값(25°)·풀스크린 트리거(60°·2초)·히스테리시스(15°/20°) 수치를 실제 단말 테스트로 튜닝 필요
 - [ ] "거리" 표시 단위: 10m 미만은 m 단위 정수, 10m 이상은 5m 단위 반올림(예: 12 → 10, 13 → 15) 적용 여부
 - [ ] 계단/엘리베이터 진입 직전 턴이 겹치는 경우, Phase 3 인터렉션과 카드 우선순위 (현재는 Phase 3 우선 가정)
+- [ ] RDP ε(`ARNavigationLogic.pathSimplificationEpsilonM = 0.7m`) 튜닝 — 너무 크면 실제 코너 누락(특히 90° 미만 완만한 회전), 너무 작으면 0.25m 격자 노이즈가 chevron 오배치를 유발. 단말 실측으로 0.5~1.0m 범위 검증 권장.
