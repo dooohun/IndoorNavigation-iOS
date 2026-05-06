@@ -29,3 +29,13 @@ DerivedData/
 
 # CocoaPods
 Pods/
+
+# Python (tools/)
+.venv-tools/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+IndoorNavigation-iOS/Resources/*.mlpackage
