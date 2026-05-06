@@ -307,11 +307,8 @@ class ARNavigationLogic {
             return
         }
 
-        // 서버 voxel 양자화 노이즈 제거 (collinear 점 + 인접 중복 점)
-        let simplifiedPoints = simplifyPathPoints(arPoints)
-
         // Catmull-Rom 스플라인으로 부드러운 경로 생성
-        let smoothPoints = catmullRomSpline(points: simplifiedPoints, subdivisions: 20)
+        let smoothPoints = catmullRomSpline(points: arPoints, subdivisions: 20)
 
         // 상태 보관
         allSteps = steps
@@ -944,68 +941,6 @@ class ARNavigationLogic {
             i += 1
         }
         return total
-    }
-
-    // MARK: - 경로 정리(양자화 노이즈 제거)
-
-    /// 서버 voxel 양자화로 인한 경로 control point 노이즈 정리
-    /// (1) collinear sweep: 거의 직선 위에 있는 중간 점 제거
-    /// (2) 인접 거리 병합: 너무 가까운 인접 점 병합
-    /// 시작/끝점은 항상 보존된다.
-    private func simplifyPathPoints(_ points: [simd_float3]) -> [simd_float3] {
-        let collinearEpsilon: Float = 0.15      // XZ 평면 수직거리 임계 (m)
-        let mergeDistanceEpsilon: Float = 0.30  // 인접 점 병합 임계 (m)
-
-        // 안전 폴백 1: 3점 미만이면 원본 그대로 반환
-        guard points.count >= 3 else { return points }
-
-        // 단계 A — collinear sweep
-        var swept: [simd_float3] = []
-        swept.append(points[0])  // 시작점 보존
-        for i in 1..<(points.count - 1) {
-            let prev = swept.last!
-            let cur = points[i]
-            let next = points[i + 1]
-
-            // XZ 평면 수직거리: prev↔next 직선과 cur 사이 거리
-            let ax = next.x - prev.x
-            let az = next.z - prev.z
-            let lineLen = sqrt(ax * ax + az * az)
-
-            // degenerate: prev와 next가 거의 같은 점이면 cur 제거
-            if lineLen < 0.0001 { continue }
-
-            let cross = abs(ax * (cur.z - prev.z) - az * (cur.x - prev.x))
-            let perpDist = cross / lineLen
-
-            if perpDist < collinearEpsilon {
-                // collinear 판정: cur 제거
-                continue
-            } else {
-                swept.append(cur)
-            }
-        }
-        swept.append(points.last!)  // 끝점 보존
-
-        // 단계 B — 인접 거리 병합
-        var merged: [simd_float3] = []
-        merged.append(swept[0])  // 시작점 보존
-        if swept.count >= 2 {
-            for i in 1..<(swept.count - 1) {
-                let prev = merged.last!
-                let cur = swept[i]
-                let dx = cur.x - prev.x
-                let dz = cur.z - prev.z
-                if sqrt(dx * dx + dz * dz) >= mergeDistanceEpsilon {
-                    merged.append(cur)
-                }
-            }
-            merged.append(swept.last!)  // 끝점 보존
-        }
-
-        // 안전 폴백 2: 결과가 비정상이면 원본 반환
-        if merged.count < 2 { return points }
-        return merged
     }
 
     // MARK: - Catmull-Rom 스플라인 보간
