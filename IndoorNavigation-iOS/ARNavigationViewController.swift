@@ -34,6 +34,10 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var floorTransitionTargetLabel: UILabel!
     var floorTransitionRestartButton: UIButton!
 
+    // Phase 5: 방향 안내 UI
+    private var headingOverlayView: HeadingAlignmentOverlayView!
+    private var turnCardView: TurnCardView!
+
     private var logic: ARNavigationLogic!
 
     override func viewDidLoad() {
@@ -51,10 +55,13 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         setupHUD()
         setupRouteCalculatingView()
         setupFloorTransitionOverlay()
+        setupHeadingOverlay()
+        setupTurnCard()
 
         logic.delegate = self
         logic.arSession = sceneView.session
         logic.scene = sceneView.scene
+        logic.setGuidanceDelegate(self)
     }
 
     // MARK: - UI 세팅
@@ -493,6 +500,26 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         ])
     }
 
+    private func setupHeadingOverlay() {
+        headingOverlayView = HeadingAlignmentOverlayView(frame: self.view.bounds)
+        headingOverlayView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        self.view.addSubview(headingOverlayView)
+    }
+
+    private func setupTurnCard() {
+        turnCardView = TurnCardView(frame: .zero)
+        turnCardView.translatesAutoresizingMaskIntoConstraints = false
+        self.view.addSubview(turnCardView)
+
+        let safeArea = self.view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            turnCardView.widthAnchor.constraint(equalToConstant: TurnCardView.cardWidth),
+            turnCardView.heightAnchor.constraint(equalToConstant: TurnCardView.cardHeight),
+            turnCardView.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: TurnCardView.topInset),
+            turnCardView.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor, constant: -TurnCardView.trailingInset),
+        ])
+    }
+
     @objc private func onFloorTransitionRestartTapped() {
         logic.restartFromFloorTransition()
     }
@@ -690,6 +717,54 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
             self.floorTransitionOverlayView.alpha = 0
         } completion: { _ in
             self.floorTransitionOverlayView.isHidden = true
+        }
+    }
+}
+
+// MARK: - GuidanceDirectorDelegate (Phase 5)
+
+extension ARNavigationViewController: GuidanceDirectorDelegate {
+
+    func guidance(_ director: GuidanceDirector, showInitialAlignment direction: TurnDirection, angle: Double) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.headingOverlayView.show(direction: direction, angleDeg: angle, mode: .initial)
+        }
+    }
+
+    func guidance(_ director: GuidanceDirector, showReorient direction: TurnDirection, angle: Double) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.headingOverlayView.show(direction: direction, angleDeg: angle, mode: .reorient)
+        }
+    }
+
+    func guidanceDismissAlignmentOverlay(_ director: GuidanceDirector) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.headingOverlayView.dismiss()
+        }
+    }
+
+    func guidance(_ director: GuidanceDirector, showTurnCard direction: TurnDirection, distance: Double) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.turnCardView.update(direction: direction, distanceMeters: distance)
+            self.turnCardView.showSlideIn(in: self.view)
+        }
+    }
+
+    func guidance(_ director: GuidanceDirector, updateTurnCardDistance distance: Double) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.turnCardView.updateDistance(distance)
+        }
+    }
+
+    func guidanceHideTurnCard(_ director: GuidanceDirector) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.turnCardView.hideSlideOut()
         }
     }
 }

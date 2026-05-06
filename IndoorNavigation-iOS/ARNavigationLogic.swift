@@ -82,6 +82,16 @@ class ARNavigationLogic {
     // 경로 시작점 진단
     private var lastStartSnapDistance: Double?
 
+    // 방향 안내 (Phase 5)
+    private let guidanceDirector = GuidanceDirector()
+    private let pathSubdivisions: Int = 20  // catmullRomSpline subdivisions와 동기화
+
+    // MARK: - 외부 노출
+
+    func setGuidanceDelegate(_ delegate: GuidanceDirectorDelegate) {
+        guidanceDirector.delegate = delegate
+    }
+
     // MARK: - 다중 프레임 캡처 후 Localize
 
     func startLocalizationFlow() {
@@ -111,6 +121,7 @@ class ARNavigationLogic {
 
         pathProgressTimer?.invalidate()
         pathProgressTimer = nil
+        guidanceDirector.reset()
         arrivalCheckTimer?.invalidate()
         arrivalCheckTimer = nil
         hasNotifiedArrival = false
@@ -320,7 +331,7 @@ class ARNavigationLogic {
         }
 
         // Catmull-Rom 스플라인으로 부드러운 경로 생성
-        let smoothPoints = catmullRomSpline(points: arPoints, subdivisions: 20)
+        let smoothPoints = catmullRomSpline(points: arPoints, subdivisions: pathSubdivisions)
 
         // 상태 보관
         allSteps = steps
@@ -350,6 +361,9 @@ class ARNavigationLogic {
             destinationARPosition = lastPoint
             startArrivalCheck()
         }
+
+        // Phase 5: 방향 안내 director에 경로 전달
+        guidanceDirector.setRoute(smoothedPoints: smoothPoints)
 
         // 진행 추적 시작 + HUD 표시
         startPathProgressTracking()
@@ -612,7 +626,15 @@ class ARNavigationLogic {
                 frame.camera.transform.columns.3.y,
                 frame.camera.transform.columns.3.z
             )
+            // ARKit columns.2는 카메라 back vector이므로 부호 반전하여 forward로 사용
+            let camCol2 = frame.camera.transform.columns.2
+            let cameraForward = simd_float3(-camCol2.x, -camCol2.y, -camCol2.z)
             self.tickPathProgress(cameraPos: cameraPos)
+            self.guidanceDirector.update(
+                cameraPosition: cameraPos,
+                cameraForward: cameraForward,
+                currentTargetWaypointIndex: self.currentTargetWaypointIndex
+            )
         }
     }
 
@@ -653,6 +675,7 @@ class ARNavigationLogic {
             // 도착
             pathProgressTimer?.invalidate()
             pathProgressTimer = nil
+            guidanceDirector.reset()
             delegate?.updateHUD(destinationName: destinationName, remainingDistance: 0, instruction: "목적지에 도착했습니다")
             return
         }
@@ -831,6 +854,9 @@ class ARNavigationLogic {
         // AR 노드 숨김 (세션은 유지)
         pathRootNode?.isHidden = true
 
+        // Phase 5: 층 전환 중에는 방향 안내 UI 일시 정지
+        guidanceDirector.pause()
+
         delegate?.setHUDVisible(false)
         delegate?.showFloorTransition(transitionType: type, targetFloor: targetFloor, currentFloor: allSteps[currentStepIdx].floorLevel)
     }
@@ -850,6 +876,9 @@ class ARNavigationLogic {
         destinationARPosition = nil
         hasNotifiedArrival = false
         lastStartSnapDistance = nil
+
+        // Phase 5: director 상태도 초기화. 새 setRoute가 들어오면 isPaused 자동 해제.
+        guidanceDirector.reset()
 
         hasActiveFloorTransition = false
         isFloorTransitionRestart = true
@@ -1054,6 +1083,7 @@ class ARNavigationLogic {
 
         if distance < arrivalThreshold {
             hasNotifiedArrival = true
+            guidanceDirector.reset()
             arrivalCheckTimer?.invalidate()
             arrivalCheckTimer = nil
             DispatchQueue.main.async {
