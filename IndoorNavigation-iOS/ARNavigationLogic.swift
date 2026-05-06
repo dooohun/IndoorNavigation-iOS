@@ -69,11 +69,8 @@ class ARNavigationLogic {
     private var allChevronNodes: [(node: SCNNode, pointIndex: Int)] = []
     private var destinationPinNode: SCNNode?
     private var currentTargetWaypointIndex: Int = 0
-    private var lastWindowUpdatePosition: simd_float3?
     private var pathProgressTimer: Timer?
     private let waypointSwitchThreshold: Float = 0.8
-    private let renderWindowDistance: Float = 30.0
-    private let windowUpdateMoveDelta: Float = 1.0
 
     // 층 이동 인터렉션
     private var hasActiveFloorTransition: Bool = false
@@ -81,6 +78,9 @@ class ARNavigationLogic {
     private var pendingTargetFloor: Int? = nil
     private var isFloorTransitionRestart: Bool = false
     private let floorTransitionTriggerDistance: Float = 1.0
+
+    // 경로 시작점 진단
+    private var lastStartSnapDistance: Double?
 
     // MARK: - 다중 프레임 캡처 후 Localize
 
@@ -100,7 +100,6 @@ class ARNavigationLogic {
         pathRootNode = nil
         allChevronNodes.removeAll()
         destinationPinNode = nil
-        lastWindowUpdatePosition = nil
         allSteps = []
         allARPoints = []
         smoothedPoints = []
@@ -108,6 +107,7 @@ class ARNavigationLogic {
         matchedARPose = nil
         localizedPose = nil
         destinationARPosition = nil
+        lastStartSnapDistance = nil
 
         pathProgressTimer?.invalidate()
         pathProgressTimer = nil
@@ -136,8 +136,9 @@ class ARNavigationLogic {
         let context = CIContext(options: nil)
         guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
         let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
+        let bakedImage = bakeOrientation(uiImage)
 
-        capturedImages.append(uiImage)
+        capturedImages.append(bakedImage)
         capturedARPoses.append(frame.camera.transform)
 
         let count = capturedImages.count
@@ -234,6 +235,7 @@ class ARNavigationLogic {
                 self.delegate?.showRouteCalculating(false)
                 switch result {
                 case .success(let response):
+                    self.lastStartSnapDistance = response.snapInfo?.startSnapDistanceM
                     let steps = self.adaptRouteResponseToSteps(response: response)
                     if !steps.isEmpty {
                         self.delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
@@ -301,6 +303,16 @@ class ARNavigationLogic {
             arPoints.append(simd_float3(arPos.x, floorY, arPos.z))
         }
 
+        if let firstAR = arPoints.first,
+           let frame = arSession?.currentFrame {
+            let cam = frame.camera.transform.columns.3
+            let dxz = sqrt((firstAR.x - cam.x) * (firstAR.x - cam.x) +
+                           (firstAR.z - cam.z) * (firstAR.z - cam.z))
+            let snapStr = lastStartSnapDistance.map { String(format: "%.2f", $0) } ?? "nil"
+            print(String(format: "[PATH-START] firstAR=(%.2f, %.2f, %.2f), camNow=(%.2f, %.2f), Δxz=%.2fm, snapStart=%@",
+                         firstAR.x, firstAR.y, firstAR.z, cam.x, cam.z, dxz, snapStr))
+        }
+
         guard arPoints.count >= 2 else {
             delegate?.showScanFailed(message: "경로 정보가 비어 있어요.\n다시 한번 스캔해 주세요.")
             delegate?.setLocateButtonVisible(true)
@@ -322,9 +334,10 @@ class ARNavigationLogic {
         scene?.rootNode.addChildNode(rootNode)
         pathRootNode = rootNode
 
-        let cameraPos = simd_float3(arPose.columns.3.x, arPose.columns.3.y, arPose.columns.3.z)
         currentTargetWaypointIndex = 1
-        lastWindowUpdatePosition = cameraPos
+
+        // 전체 경로 ribbon 생성
+        rootNode.addChildNode(buildRibbonNode(points: smoothPoints))
 
         // 경로 구간별 더블 쉐브론 화살표 배치
         placeChevronArrows(on: smoothPoints, steps: steps, rootNode: rootNode)
@@ -337,9 +350,6 @@ class ARNavigationLogic {
             destinationARPosition = lastPoint
             startArrivalCheck()
         }
-
-        // 30m 슬라이딩 윈도우 초기 적용 (ribbon + 쉐브론 + 핀 일괄)
-        updateSlidingWindow(cameraPos: cameraPos)
 
         // 진행 추적 시작 + HUD 표시
         startPathProgressTracking()
@@ -590,51 +600,6 @@ class ARNavigationLogic {
         }
     }
 
-    // 30m 슬라이딩 윈도우: 카메라 XZ 평면 거리 기준으로 ribbon·쉐브론·목적지 핀의 가시성을 일괄 갱신.
-    // ribbon은 windowPoints로 동적 재생성, 쉐브론은 pointIndex 범위 hidden 토글, 핀은 단일 점 평면 거리 비교 hidden 토글.
-    private func updateSlidingWindow(cameraPos: simd_float3) {
-        guard let rootNode = pathRootNode, !smoothedPoints.isEmpty else { return }
-
-        // 카메라 XZ 위치와 가장 가까운 smooth point → window 시작점
-        let camXZ = simd_float2(cameraPos.x, cameraPos.z)
-        var startIdx = 0
-        var nearestDist: Float = .infinity
-        for i in 0..<smoothedPoints.count {
-            let p = smoothedPoints[i]
-            let d = simd_distance(camXZ, simd_float2(p.x, p.z))
-            if d < nearestDist { nearestDist = d; startIdx = i }
-        }
-
-        // startIdx부터 30m 누적까지 endIdx 탐색
-        var endIdx = startIdx
-        var cumDist: Float = 0
-        for i in startIdx..<smoothedPoints.count - 1 {
-            let p1 = smoothedPoints[i], p2 = smoothedPoints[i + 1]
-            cumDist += sqrt((p2.x - p1.x) * (p2.x - p1.x) + (p2.z - p1.z) * (p2.z - p1.z))
-            endIdx = i + 1
-            if cumDist >= renderWindowDistance { break }
-        }
-
-        guard endIdx > startIdx else { return }
-        let windowPoints = Array(smoothedPoints[startIdx...endIdx])
-        guard windowPoints.count >= 2 else { return }
-
-        rootNode.childNode(withName: "ribbonContainer", recursively: false)?.removeFromParentNode()
-        rootNode.addChildNode(buildRibbonNode(points: windowPoints))
-
-        for (chevron, pointIdx) in allChevronNodes {
-            chevron.isHidden = pointIdx < startIdx || pointIdx > endIdx
-        }
-
-        // 목적지 핀: 카메라와의 XZ 평면 거리 기준으로 가시성 결정
-        if let pin = destinationPinNode, let dest = destinationARPosition {
-            let dx = cameraPos.x - dest.x
-            let dz = cameraPos.z - dest.z
-            let planarDist = sqrt(dx * dx + dz * dz)
-            pin.isHidden = planarDist > renderWindowDistance
-        }
-    }
-
     // MARK: - 경로 진행 추적
 
     private func startPathProgressTracking() {
@@ -683,17 +648,7 @@ class ARNavigationLogic {
             }
         }
 
-        // 2. 30m 슬라이딩 윈도우 업데이트 (1m 이동마다)
-        if let lastPos = lastWindowUpdatePosition {
-            let ddx = cameraPos.x - lastPos.x
-            let ddz = cameraPos.z - lastPos.z
-            if sqrt(ddx * ddx + ddz * ddz) >= windowUpdateMoveDelta {
-                updateSlidingWindow(cameraPos: cameraPos)
-                lastWindowUpdatePosition = cameraPos
-            }
-        }
-
-        // 3. HUD 갱신
+        // 2. HUD 갱신
         if currentTargetWaypointIndex >= smoothedPoints.count {
             // 도착
             pathProgressTimer?.invalidate()
@@ -730,7 +685,6 @@ class ARNavigationLogic {
         pathRootNode = nil
         allChevronNodes.removeAll()
         destinationPinNode = nil
-        lastWindowUpdatePosition = nil
         allSteps = []
         allARPoints = []
         smoothedPoints = []
@@ -890,12 +844,12 @@ class ARNavigationLogic {
         pathRootNode = nil
         allChevronNodes.removeAll()
         destinationPinNode = nil
-        lastWindowUpdatePosition = nil
         currentTargetWaypointIndex = 0
         matchedARPose = nil
         localizedPose = nil
         destinationARPosition = nil
         hasNotifiedArrival = false
+        lastStartSnapDistance = nil
 
         hasActiveFloorTransition = false
         isFloorTransitionRestart = true
@@ -921,6 +875,35 @@ class ARNavigationLogic {
     }
 
     // MARK: - 헬퍼
+
+    /// UIImage의 imageOrientation을 실제 픽셀에 redraw하여 .up 정방향 UIImage 반환.
+    /// PNG는 EXIF orientation을 지원하지 않으므로 pngData() 호출 전에 baking 필수.
+    private func bakeOrientation(_ image: UIImage) -> UIImage {
+        let inOri = image.imageOrientation.rawValue
+        let inSize = image.size
+        let inCG = image.cgImage.map { "\($0.width)x\($0.height)" } ?? "nil"
+        let inPNG = image.pngData()?.count ?? -1
+
+        if image.imageOrientation == .up {
+            print("[BAKE] skip (already .up) orientation=\(inOri) size=\(Int(inSize.width))x\(Int(inSize.height)) cg=\(inCG) png=\(inPNG)B")
+            return image
+        }
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = image.scale
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: image.size, format: format)
+        let baked = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: image.size))
+        }
+
+        let outOri = baked.imageOrientation.rawValue
+        let outSize = baked.size
+        let outCG = baked.cgImage.map { "\($0.width)x\($0.height)" } ?? "nil"
+        let outPNG = baked.pngData()?.count ?? -1
+        print("[BAKE] in: ori=\(inOri) size=\(Int(inSize.width))x\(Int(inSize.height)) cg=\(inCG) png=\(inPNG)B → out: ori=\(outOri) size=\(Int(outSize.width))x\(Int(outSize.height)) cg=\(outCG) png=\(outPNG)B")
+        return baked
+    }
 
     private func computeRemainingDistance(cameraPos: simd_float3) -> Float {
         guard !smoothedPoints.isEmpty else { return 0 }
