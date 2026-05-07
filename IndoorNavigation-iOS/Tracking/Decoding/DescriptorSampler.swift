@@ -49,7 +49,7 @@ final class DescriptorSampler {
 
         let cell = Float(config.cellSize)
 
-        // 결과 array
+        // 결과 array (contiguous: strides = [dim, 1] — MLMultiArray 기본)
         let array: MLMultiArray
         do {
             array = try MLMultiArray(shape: [NSNumber(value: n), NSNumber(value: dim)], dataType: .float16)
@@ -57,6 +57,9 @@ final class DescriptorSampler {
             print("[DescSample] MLMultiArray alloc failed: \(error)")
             return Self.makeEmpty(dim: dim)
         }
+        // dataPointer 직접 Float16 쓰기 — NSNumber 박싱 회피 (~N×256 박싱 → 0).
+        // MLMultiArray 는 새로 alloc 시 contiguous 이므로 (i*dim + c) 인덱싱 안전.
+        let outPtr = array.dataPointer.bindMemory(to: Float16.self, capacity: n * dim)
 
         var sampled = [Float](repeating: 0, count: dim)
 
@@ -90,17 +93,16 @@ final class DescriptorSampler {
                 sampled[c] = v00 * w00 + v10 * w10 + v01 * w01 + v11 * w11
             }
 
-            // L2 정규화
-            var norm: Float = 0
-            for c in 0..<dim { norm += sampled[c] * sampled[c] }
-            let inv = 1.0 / sqrt(max(norm, 1e-12))
-            for c in 0..<dim { sampled[c] *= inv }
+            // L2 정규화 (Accelerate)
+            var sumSq: Float = 0
+            vDSP_svesq(sampled, 1, &sumSq, vDSP_Length(dim))
+            var inv = Float(1.0 / sqrt(max(sumSq, 1e-12)))
+            vDSP_vsmul(sampled, 1, &inv, &sampled, 1, vDSP_Length(dim))
 
-            // Float16 으로 quantize 후 array 에 저장
+            // Float16 직접 쓰기 (NSNumber 박싱 회피)
             let rowBase = i * dim
             for c in 0..<dim {
-                let f16 = Float16(sampled[c])
-                array[rowBase + c] = NSNumber(value: Float(f16))
+                outPtr[rowBase + c] = Float16(sampled[c])
             }
         }
 
@@ -109,8 +111,16 @@ final class DescriptorSampler {
 
     // MARK: - Helpers
 
+    /// MLMultiArray → Float32 buffer. strides 기반 인덱싱이 안전하도록
+    /// 실제 메모리 element 수만큼 변환한다 (Core ML/ANE 의 padded layout 대응).
     private func float32Buffer(from arr: MLMultiArray) -> [Float] {
-        let count = arr.count
+        let shape = arr.shape.map { $0.intValue }
+        let strides = arr.strides.map { $0.intValue }
+        var maxIdx = 0
+        for d in 0..<shape.count where shape[d] > 0 {
+            maxIdx += (shape[d] - 1) * strides[d]
+        }
+        let count = maxIdx + 1
         var result = [Float](repeating: 0, count: count)
 
         switch arr.dataType {
