@@ -129,6 +129,21 @@ final class SuperPointExtractorML: SuperPointExtracting {
     /// 추론 1회 소요 시간 (ms) 콜백. 호출자(ARNavigationLogic)가 ring buffer 에 누적.
     var onInferenceTimeMs: ((Double) -> Void)?
 
+    /// 단계별 시간 프로파일링 (Phase 7-1 STEP 1 진단용).
+    /// 4구간 (preprocess / prediction / decode / sample) 누적 후 `phaseLogWindow` 프레임마다
+    /// 평균 + min + max 를 console 로그로 출력해 후처리 vs 추론 병목을 가린다.
+    private struct PhaseSample {
+        let pre: Double
+        let pred: Double
+        let dec: Double
+        let samp: Double
+        let total: Double
+        let kpCount: Int
+    }
+    private var phaseSamples: [PhaseSample] = []
+    private let phaseLogWindow = 5
+    private var phaseFrameSeq = 0
+
     init(config: Config = Config()) throws {
         self.config = config
         let mlConfig = MLModelConfiguration()
@@ -184,6 +199,7 @@ final class SuperPointExtractorML: SuperPointExtracting {
             print("[SuperPoint] preprocess failed")
             return empty
         }
+        let t1 = CACurrentMediaTime()
 
         let semiDesc: (semi: MLMultiArray, desc: MLMultiArray)
         do {
@@ -192,12 +208,21 @@ final class SuperPointExtractorML: SuperPointExtracting {
             print("[SuperPoint] prediction failed: \(error)")
             return empty
         }
+        let t2 = CACurrentMediaTime()
 
         let keypoints = decoder.decode(semi: semiDesc.semi)
-        let descriptors = sampler.sample(descMap: semiDesc.desc, keypoints: keypoints)
+        let t3 = CACurrentMediaTime()
 
-        let elapsedMs = (CACurrentMediaTime() - t0) * 1000.0
-        onInferenceTimeMs?(elapsedMs)
+        let descriptors = sampler.sample(descMap: semiDesc.desc, keypoints: keypoints)
+        let t4 = CACurrentMediaTime()
+
+        let preMs = (t1 - t0) * 1000.0
+        let predMs = (t2 - t1) * 1000.0
+        let decMs = (t3 - t2) * 1000.0
+        let sampMs = (t4 - t3) * 1000.0
+        let totalMs = (t4 - t0) * 1000.0
+        recordPhase(pre: preMs, pred: predMs, dec: decMs, samp: sampMs, total: totalMs, kpCount: keypoints.count)
+        onInferenceTimeMs?(totalMs)
 
         return SuperPointFrame(
             intrinsics: intrinsics,
@@ -206,6 +231,38 @@ final class SuperPointExtractorML: SuperPointExtracting {
             descriptors: descriptors,
             inputSize: inputSize
         )
+    }
+
+    /// 4구간 시간 누적 + window 평균 console 로그 출력. 첫 프레임은 콜드 스파이크라 별도 표시.
+    private func recordPhase(pre: Double, pred: Double, dec: Double, samp: Double, total: Double, kpCount: Int) {
+        phaseFrameSeq += 1
+        let s = PhaseSample(pre: pre, pred: pred, dec: dec, samp: samp, total: total, kpCount: kpCount)
+        if phaseFrameSeq == 1 {
+            // 콜드 첫 프레임 — 워밍업 후에도 ANE 컴파일/캐시 영향 가능성.
+            print(String(
+                format: "[SuperPoint][cold] pre=%.1f pred=%.1f dec=%.1f samp=%.1f total=%.1f ms (kp=%d)",
+                pre, pred, dec, samp, total, kpCount
+            ))
+            return
+        }
+        phaseSamples.append(s)
+        guard phaseSamples.count >= phaseLogWindow else { return }
+        let n = Double(phaseSamples.count)
+        let sumPre = phaseSamples.reduce(0.0) { $0 + $1.pre }
+        let sumPred = phaseSamples.reduce(0.0) { $0 + $1.pred }
+        let sumDec = phaseSamples.reduce(0.0) { $0 + $1.dec }
+        let sumSamp = phaseSamples.reduce(0.0) { $0 + $1.samp }
+        let sumTotal = phaseSamples.reduce(0.0) { $0 + $1.total }
+        let maxTotal = phaseSamples.map { $0.total }.max() ?? 0
+        let minTotal = phaseSamples.map { $0.total }.min() ?? 0
+        let avgKp = phaseSamples.reduce(0) { $0 + $1.kpCount } / phaseSamples.count
+        print(String(
+            format: "[SuperPoint][avg×%d] pre=%.1f pred=%.1f dec=%.1f samp=%.1f total=%.1f (min=%.1f max=%.1f) kp=%d",
+            phaseSamples.count,
+            sumPre / n, sumPred / n, sumDec / n, sumSamp / n, sumTotal / n,
+            minTotal, maxTotal, avgKp
+        ))
+        phaseSamples.removeAll(keepingCapacity: true)
     }
 
     // MARK: - 자동 생성 클래스 어댑터
