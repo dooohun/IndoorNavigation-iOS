@@ -106,6 +106,23 @@ class ARNavigationLogic {
     private weak var superPointDebug: SuperPointDebugController?
     #endif
 
+    // MARK: - Phase 8 mock matching (mock bundle 호환성 검증)
+    /// 서버 endpoint 결정 전 mock JSON bundle 로드. extract 결과와 매칭해 호환성 검증.
+    private var localizationBundle: LocalizationBundle?
+    /// keyframe 별 base64 디코딩된 descriptor bytes 캐시 (반복 디코딩 회피).
+    private var keyframeDescriptorCache: [Data] = []
+    /// 매 프레임 매칭 결과 누적 → window 평균 console 로그.
+    private struct MatchSample {
+        let bestKfIdx: Int
+        let bestMatched: Int
+        let bestAvgScore: Float
+        let perKfMatched: [Int]
+    }
+    private var matchSamples: [MatchSample] = []
+    private let matchLogWindow = 5
+    /// cosine similarity threshold (정규화 vector 기준 0.7 = 매우 유사).
+    private let matchScoreThreshold: Float = 0.7
+
     // MARK: - 외부 노출
 
     func setGuidanceDelegate(_ delegate: GuidanceDirectorDelegate) {
@@ -143,6 +160,18 @@ class ARNavigationLogic {
             let stub = SuperPointExtractorStub()
             stub.warmUp()
             superPointExtractor = stub
+        }
+
+        // Phase 8 mock bundle 로드 — 매 프레임 매칭 호환성 검증용. 실패해도 추론은 계속.
+        do {
+            let bundle = try MockBundleProvider().loadBundle()
+            localizationBundle = bundle
+            keyframeDescriptorCache = bundle.keyframes.map { kf in
+                Data(base64Encoded: kf.descriptorsB64) ?? Data()
+            }
+            print("[MockBundle] loaded \(bundle.keyframes.count) keyframes (intrinsics \(bundle.manifest.intrinsics.width)×\(bundle.manifest.intrinsics.height))")
+        } catch {
+            print("[MockBundle] load failed: \(error) — 매칭 비활성")
         }
     }
 
@@ -190,9 +219,66 @@ class ARNavigationLogic {
             timestamp: frame.timestamp
         )
 
+        matchAgainstMockBundle(result)
+
         #if DEBUG
         superPointDebug?.receiveFrame(result)
         #endif
+    }
+
+    /// 추출 결과를 mock bundle 의 모든 keyframe 과 cosine similarity 매칭. best keyframe
+    /// 선택 후 window 평균을 console 로그로 출력 (매핑 환경 안/밖에서 매칭률 비교용).
+    private func matchAgainstMockBundle(_ frame: SuperPointFrame) {
+        guard let bundle = localizationBundle, !keyframeDescriptorCache.isEmpty else { return }
+        guard frame.descriptors.shape.count == 2,
+              frame.descriptors.shape[0].intValue > 0 else { return }
+        let queryCount = frame.descriptors.shape[0].intValue
+
+        var perKfStats: [(idx: Int, stats: DescriptorMatcher.Stats)] = []
+        for (kfIdx, kf) in bundle.keyframes.enumerated() {
+            let refBytes = keyframeDescriptorCache[kfIdx]
+            let n = kf.keypoints.count
+            guard n > 0, refBytes.count == n * 256 * MemoryLayout<Float16>.size else { continue }
+            let matches = DescriptorMatcher.matchTop1(
+                query: frame.descriptors,
+                referenceBytes: refBytes,
+                referenceCount: n,
+                threshold: matchScoreThreshold
+            )
+            let stats = DescriptorMatcher.stats(matches: matches, queryCount: queryCount)
+            perKfStats.append((idx: kfIdx, stats: stats))
+        }
+        guard !perKfStats.isEmpty else { return }
+        let best = perKfStats.max { $0.stats.matchedCount < $1.stats.matchedCount }!
+        let sample = MatchSample(
+            bestKfIdx: best.idx,
+            bestMatched: best.stats.matchedCount,
+            bestAvgScore: best.stats.avgScore,
+            perKfMatched: perKfStats.map { $0.stats.matchedCount }
+        )
+        recordMatchSample(sample, queryCount: queryCount)
+    }
+
+    private func recordMatchSample(_ sample: MatchSample, queryCount: Int) {
+        matchSamples.append(sample)
+        guard matchSamples.count >= matchLogWindow else { return }
+        // window 평균
+        let n = matchSamples.count
+        let avgBestMatched = matchSamples.reduce(0) { $0 + $1.bestMatched } / n
+        let avgBestScore = matchSamples.reduce(0.0) { $0 + Double($1.bestAvgScore) } / Double(n)
+        let kfFreq = Dictionary(grouping: matchSamples, by: { $0.bestKfIdx }).mapValues { $0.count }
+        let mostBestKf = kfFreq.max { $0.value < $1.value }?.key ?? -1
+        let perKfCount = matchSamples.first?.perKfMatched.count ?? 0
+        var perKfAvg: [Int] = []
+        for i in 0..<perKfCount {
+            let s = matchSamples.reduce(0) { $0 + $1.perKfMatched[i] }
+            perKfAvg.append(s / n)
+        }
+        print(String(
+            format: "[Match][avg×%d] best_kf=%d matched=%d/%d score=%.2f per_kf=%@",
+            n, mostBestKf, avgBestMatched, queryCount, avgBestScore, perKfAvg.description
+        ))
+        matchSamples.removeAll(keepingCapacity: true)
     }
 
     // MARK: - 다중 프레임 캡처 후 Localize
