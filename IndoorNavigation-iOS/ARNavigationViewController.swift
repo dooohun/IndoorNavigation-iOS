@@ -38,6 +38,11 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     private var headingOverlayView: HeadingAlignmentOverlayView!
     private var turnCardView: TurnCardView!
 
+    // Phase 7: SuperPoint 디버그 시각화 (DEBUG 빌드 전용)
+    #if DEBUG
+    private var superPointDebug: SuperPointDebugController?
+    #endif
+
     private var logic: ARNavigationLogic!
 
     override func viewDidLoad() {
@@ -62,6 +67,14 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         logic.arSession = sceneView.session
         logic.scene = sceneView.scene
         logic.setGuidanceDelegate(self)
+
+        // Phase 7: SuperPoint extractor + 디버그 시각화 (DEBUG 빌드 전용)
+        #if DEBUG
+        let debugController = SuperPointDebugController(hostView: self.view)
+        self.superPointDebug = debugController
+        logic.attachSuperPointDebug(debugController)
+        #endif
+        logic.setupSuperPointExtractor()
     }
 
     // MARK: - UI 세팅
@@ -542,6 +555,14 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         logic.stopArrivalCheck()
         logic.stopPathProgressTracking()
         sceneView.session.pause()
+    }
+
+    // MARK: - ARSessionDelegate (Phase 7)
+
+    /// 매 ARFrame마다 SuperPoint 추론 cadence를 평가하고 통과 시 extractor 호출.
+    /// 무거운 처리는 logic.processARFrame 내부에서 cadence 게이트로 차단된다.
+    func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        logic.processARFrame(frame)
     }
 }
 

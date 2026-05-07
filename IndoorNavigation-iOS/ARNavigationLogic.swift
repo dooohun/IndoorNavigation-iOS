@@ -91,10 +91,108 @@ class ARNavigationLogic {
     /// drawPathNodes에서 RDP 단순화 결과 점 개수. tickPathProgress의 step index 비례 환산에 사용.
     private var simplifiedPointCount: Int = 0
 
+    // MARK: - SuperPoint (Phase 7)
+
+    /// SuperPoint 추출기. 기본은 ML 구현(SuperPointExtractorML), DEBUG 빌드에서 UserDefaults
+    /// `useSuperPointStub == true` 면 stub 으로 폴백. ML init 실패 시에도 stub 폴백.
+    private var superPointExtractor: SuperPointExtracting?
+    /// 추론 빈도 제어 (정지/걷기/회전 + thermal throttle).
+    private let cadenceController = InferenceCadenceController()
+    /// 최근 추론 시간(ms) ring buffer (capacity 100). DEBUG 빌드에서 mean/p95 산출에 사용.
+    private var inferenceTimesMs: [Double] = []
+    private let inferenceTimesCapacity: Int = 100
+    #if DEBUG
+    /// 디버그 시각화 컨트롤러 (옵셔널 weak). 본 모듈은 디버그 폴더 타입을 단방향 의존만 — receiveFrame 호출만 한다.
+    private weak var superPointDebug: SuperPointDebugController?
+    #endif
+
     // MARK: - 외부 노출
 
     func setGuidanceDelegate(_ delegate: GuidanceDirectorDelegate) {
         guidanceDirector.delegate = delegate
+    }
+
+    /// SuperPoint extractor 인스턴스화 + warmUp. ViewController에서 viewDidLoad 끝에 호출.
+    /// 기본 경로: SuperPointExtractorML (Core ML 추론). DEBUG 빌드에서 UserDefaults
+    /// `useSuperPointStub` 가 true 면 stub 으로 강제 폴백. ML init 실패 시에도 stub 폴백.
+    func setupSuperPointExtractor() {
+        let useStub: Bool = {
+            #if DEBUG
+            return UserDefaults.standard.bool(forKey: "useSuperPointStub")
+            #else
+            return false
+            #endif
+        }()
+
+        if useStub {
+            print("[SuperPoint] using stub (UserDefaults override)")
+            let stub = SuperPointExtractorStub()
+            stub.warmUp()
+            superPointExtractor = stub
+            return
+        }
+
+        do {
+            let ml = try SuperPointExtractorML()
+            ml.onInferenceTimeMs = { [weak self] ms in self?.recordInferenceTime(ms) }
+            ml.warmUp()
+            superPointExtractor = ml
+            print("[SuperPoint] using ML extractor")
+        } catch {
+            print("[SuperPoint] ML init failed (\(error)) — fallback to stub")
+            let stub = SuperPointExtractorStub()
+            stub.warmUp()
+            superPointExtractor = stub
+        }
+    }
+
+    /// SuperPointExtractorML 의 onInferenceTimeMs 콜백으로부터 호출. 최근 100개만 유지.
+    /// DEBUG 빌드에서는 mean/p95 ms 를 디버그 컨트롤러에 전달한다.
+    private func recordInferenceTime(_ ms: Double) {
+        inferenceTimesMs.append(ms)
+        if inferenceTimesMs.count > inferenceTimesCapacity {
+            inferenceTimesMs.removeFirst(inferenceTimesMs.count - inferenceTimesCapacity)
+        }
+        #if DEBUG
+        let times = inferenceTimesMs
+        guard !times.isEmpty else { return }
+        let mean = times.reduce(0, +) / Double(times.count)
+        let sorted = times.sorted()
+        let pIdx = min(sorted.count - 1, Int(ceil(Double(sorted.count) * 0.95)) - 1)
+        let p95 = sorted[max(0, pIdx)]
+        superPointDebug?.updateInferenceTime(meanMs: mean, p95Ms: p95)
+        #endif
+    }
+
+    #if DEBUG
+    /// 디버그 시각화 컨트롤러 연결 (DEBUG 빌드 전용).
+    func attachSuperPointDebug(_ debug: SuperPointDebugController) {
+        superPointDebug = debug
+    }
+    #endif
+
+    /// ARSessionDelegate.session(_:didUpdate:) 에서 매 프레임 호출.
+    /// cadence 통과 시에만 extract 수행하고, DEBUG 빌드에서 디버그 오버레이로 결과 전달.
+    func processARFrame(_ frame: ARFrame) {
+        guard let extractor = superPointExtractor else { return }
+
+        let thermal = ProcessInfo.processInfo.thermalState
+        guard cadenceController.shouldRunInference(
+            cameraTransform: frame.camera.transform,
+            timestamp: frame.timestamp,
+            thermalState: thermal
+        ) else { return }
+
+        let intrinsics = frame.camera.intrinsics
+        let result = extractor.extract(
+            image: frame.capturedImage,
+            intrinsics: intrinsics,
+            timestamp: frame.timestamp
+        )
+
+        #if DEBUG
+        superPointDebug?.receiveFrame(result)
+        #endif
     }
 
     // MARK: - 다중 프레임 캡처 후 Localize
