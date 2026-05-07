@@ -38,4 +38,4 @@ __pycache__/
 *.pyc
 *.egg-info/
 
-IndoorNavigation-iOS/Resources/*.mlpackage
+**/*.mlpackage
