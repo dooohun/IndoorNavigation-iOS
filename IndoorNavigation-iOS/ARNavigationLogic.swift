@@ -213,10 +213,15 @@ class ARNavigationLogic {
         ) else { return }
 
         let intrinsics = frame.camera.intrinsics
+        // 디바이스 자세 → SuperPoint 입력 orientation 결정. ARFrame raw 는 항상 landscape 라
+        // 사용자가 폰 portrait 면 90° CW 회전 후 가로 띠 crop 으로 upright 입력을 만든다.
+        let deviceIsLandscape = UIDevice.current.orientation.isLandscape
+        let orientation: InputOrientation = deviceIsLandscape ? .landscape : .portrait
         let result = extractor.extract(
             image: frame.capturedImage,
             intrinsics: intrinsics,
-            timestamp: frame.timestamp
+            timestamp: frame.timestamp,
+            orientation: orientation
         )
 
         matchAgainstMockBundle(result)

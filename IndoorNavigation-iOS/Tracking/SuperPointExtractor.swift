@@ -5,8 +5,16 @@ import QuartzCore
 import simd
 
 protocol SuperPointExtracting: AnyObject {
-    func extract(image: CVPixelBuffer, intrinsics: simd_float3x3, timestamp: TimeInterval) -> SuperPointFrame
+    /// orientation: 디바이스 자세 (landscape/portrait). Preprocessor 가 회전·crop 결정에 사용.
+    func extract(image: CVPixelBuffer, intrinsics: simd_float3x3, timestamp: TimeInterval, orientation: InputOrientation) -> SuperPointFrame
     func warmUp()
+}
+
+extension SuperPointExtracting {
+    /// 호환성 — orientation 미지정 시 landscape 기본.
+    func extract(image: CVPixelBuffer, intrinsics: simd_float3x3, timestamp: TimeInterval) -> SuperPointFrame {
+        return extract(image: image, intrinsics: intrinsics, timestamp: timestamp, orientation: .landscape)
+    }
 }
 
 // MARK: - Stub (mlmodel 미가용 fallback)
@@ -31,7 +39,9 @@ final class SuperPointExtractorStub: SuperPointExtracting {
         print("[SuperPoint] warmUp (stub, no model loaded)")
     }
 
-    func extract(image: CVPixelBuffer, intrinsics: simd_float3x3, timestamp: TimeInterval) -> SuperPointFrame {
+    func extract(image: CVPixelBuffer, intrinsics: simd_float3x3, timestamp: TimeInterval, orientation: InputOrientation) -> SuperPointFrame {
+        // stub 은 orientation 무관 (격자 더미). 인자만 받고 무시.
+        _ = orientation
         var keypoints: [SIMD3<Float>] = []
         keypoints.reserveCapacity(config.gridRows * config.gridCols)
 
@@ -183,7 +193,7 @@ final class SuperPointExtractorML: SuperPointExtracting {
         }
     }
 
-    func extract(image: CVPixelBuffer, intrinsics: simd_float3x3, timestamp: TimeInterval) -> SuperPointFrame {
+    func extract(image: CVPixelBuffer, intrinsics: simd_float3x3, timestamp: TimeInterval, orientation: InputOrientation) -> SuperPointFrame {
         let inputSize = CGSize(width: config.inputWidth, height: config.inputHeight)
         let emptyDesc = (try? MLMultiArray(shape: [0, 256], dataType: .float16)) ??
             (try! MLMultiArray(shape: [0, 256], dataType: .float16))
@@ -197,7 +207,7 @@ final class SuperPointExtractorML: SuperPointExtracting {
 
         let t0 = CACurrentMediaTime()
 
-        guard let grayBuf = preprocessor.toGrayscaleBuffer(image) else {
+        guard let grayBuf = preprocessor.toGrayscaleBuffer(image, orientation: orientation) else {
             print("[SuperPoint] preprocess failed")
             return empty
         }
