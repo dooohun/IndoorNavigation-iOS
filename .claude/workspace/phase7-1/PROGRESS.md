@@ -34,6 +34,13 @@
 
 - ✅ **리뷰 PASS_WITH_NOTES** (2026-05-07): CRITICAL 이슈 없음. 정합성·메모리·안정성·범위 모두 통과
   - WARNING 6개 항목은 모두 V-2 실측 후 결정 가능한 후속 최적화 (블로커 아님). 자세한 내용은 본 문서 "WARNING / 후속 PR 후보" 섹션 참조
+- ✅ **실기기 V-1 PASS / V-2 PARTIAL** (2026-05-07): 키포인트가 실제 코너에 군집(육안 검증). 추론 시간 평균 270ms — DoD 100ms 미달이나 사용 가능 수준
+- ✅ **MLMultiArray padded layout 버그 픽스** (2026-05-07): 실기기 첫 실행 시 `Index out of range` 크래시. `float32Buffer(from:)` 의 buffer 크기를 `arr.count` → strides 기반 max-idx 로 변경
+- ✅ **디코더·샘플러 가속** (2026-05-07): 시작 2840ms → 270ms (10.5배 단축, 발열 사이클 차단)
+  - NMS separable max-pool Swift 4중 루프 → `vImageMax_PlanarF` (kernel 9, kvImageTruncateKernel)
+  - softmax 4800 cell × 65 expf → cell당 vDSP_maxv/vsadd/vvexpf/sve/vsmul (SIMD 일괄)
+  - DescriptorSampler MLMultiArray 박싱 → `dataPointer.bindMemory<Float16>` 직접 쓰기 + L2 정규화 vDSP_svesq/vsmul
+- ✅ **`extract()` 단계별 시간 프로파일링 추가** (2026-05-07): pre/pred/dec/samp 4구간 측정 + 5프레임 평균 console 로그
 
 ## 진행 중
 
@@ -56,16 +63,20 @@ _(다음 단계: 사용자 실기기 검증)_
 - [ ] V-3 (descriptor 규약): 임플리멘터 신규 단위 테스트 — 실기기에서 `xcodebuild test` 통과 확인
 - [ ] V-7 (stub 토글): `UserDefaults.standard.set(true, forKey: "useSuperPointStub")` 후 격자 출력 회귀 확인
 
-### WARNING / 후속 PR 후보 (본 PR 외 — 리뷰어 권고)
+### WARNING 항목 진척
 
-| # | 위치 | 내용 | 권장 시점 |
-|---|------|------|----------|
-| W-1 | `SuperPointExtractor.swift:171-172` | `emptyDesc` 매번 사전 생성. lazy 로 변경 가능 (미미) | 후속 정리 PR |
-| W-2 | `DescriptorSampler.swift:103`, `SuperPointExtractor.swift:81` | Float16→Float→NSNumber 박싱 (~131K회/프레임). `dataPointer.bindMemory(to: Float16.self)` 직접 쓰기 권장 | V-2에서 핫스팟 확인 시 |
-| W-3 | `SuperPointHeatmapDecoder.swift:75-100` | softmax 4800 cell × 65 expf 단순 루프. vForce `vvexpf` 벡터화 가능 | V-2 100ms 미달 시 |
-| W-4 | `ARNavigationLogic.swift:177` | `inferenceTimesMs.removeFirst(N)` O(N) 시프트. 원형 버퍼 패턴 권장 | 스타일 정리 |
-| W-5 | `SuperPointExtractor.swift:130` | stub은 `onInferenceTimeMs` 콜백 없음 → stub 모드에서 HUD 시간 표시 안 됨 | stub/ML 비교 측정 필요 시 |
-| W-6 | `PixelBufferPreprocessor.swift:39` | `srcPlaneIndex = (formatType == ...) ? 0 : 0` 양 분기 동일값 | 스타일 정리 |
+| # | 위치 | 내용 | 상태 |
+|---|------|------|------|
+| W-1 | `SuperPointExtractor.swift` | `emptyDesc` 매번 사전 생성 | 미적용 (효과 미미) |
+| W-2 | `DescriptorSampler.swift`, stub | Float16→Float→NSNumber 박싱 | ✅ ML 경로 해결 (직접 쓰기 + vDSP). stub 박싱은 의도 보존 |
+| W-3 | `SuperPointHeatmapDecoder.swift` | softmax 4800 cell × 65 expf 단순 루프 | ✅ 해결 (vDSP/vForce 벡터화) |
+| W-4 | `ARNavigationLogic.swift` | `inferenceTimesMs.removeFirst(N)` O(N) 시프트 | 미적용 (capacity 100 영향 미미) |
+| W-5 | `SuperPointExtractor.swift` | stub은 `onInferenceTimeMs` 콜백 없음 | 미적용 (stub/ML 비교 측정 필요 시 검토) |
+| W-6 | `PixelBufferPreprocessor.swift` | `srcPlaneIndex` 양 분기 동일값 | 미적용 (스타일) |
+
+신규 추가된 가속 항목:
+- **NMS 2D max-pool**: Swift 4중 루프 → `vImageMax_PlanarF` (단일 호출, 가장 큰 효과 ~2400ms 절감)
+- **`float32Buffer` padded layout 대응**: `arr.count` → strides 기반 max-idx (실기기 OOB 크래시 픽스)
 
 ### 추가 후속 후보
 
@@ -99,3 +110,8 @@ _(다음 단계: 사용자 실기기 검증)_
 | 2026-05-07 | `.gitignore` `**/*.mlpackage` 룰로 강화 (mlpackage 위치 변경 대응) | unstage + 라이선스 보호 |
 | 2026-05-07 | Swift 측 실 추출기 + 단위 테스트 구현 완료, `xcodebuild build` SUCCEEDED | 임플리멘터 산출 |
 | 2026-05-07 | 리뷰 **PASS_WITH_NOTES** — CRITICAL 0, WARNING 6 (전부 후속 후보) | 리뷰어 산출 |
+| 2026-05-07 | MLMultiArray padded layout 대응 (`float32Buffer` strides 기반) | 실기기 첫 실행 OOB 크래시 픽스 |
+| 2026-05-07 | `extract()` 4구간 시간 프로파일링 추가 (cold + 5프레임 평균 console 로그) | 병목 진단 — dec 90% 차지 확인 |
+| 2026-05-07 | 디코더 NMS → `vImageMax_PlanarF` (~2400ms → ~30ms 추정) | dec 압도적 hotspot 해소 |
+| 2026-05-07 | 디코더 softmax → vDSP/vForce 벡터화 + 샘플러 박싱 제거 | 추가 ~180ms 절감, 합계 270ms 도달 |
+| 2026-05-07 | V-1 PASS, V-2 PARTIAL (270ms, DoD 미달이나 머지 가능) | 실기기 측정 — 발열 체감 없음 |
