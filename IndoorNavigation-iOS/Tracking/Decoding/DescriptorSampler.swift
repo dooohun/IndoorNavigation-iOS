@@ -8,8 +8,8 @@ import simd
 final class DescriptorSampler {
 
     struct Config {
-        var inputWidth: Int = 480
-        var inputHeight: Int = 640
+        var inputWidth: Int = 960
+        var inputHeight: Int = 540
         var cellSize: Int = 8
         var descriptorDim: Int = 256
     }

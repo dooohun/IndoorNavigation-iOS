@@ -3,16 +3,19 @@ import CoreVideo
 import Accelerate
 
 /// ARFrame `capturedImage` (YUV biplanar 420f) 를 SuperPoint 추론 입력 그레이스케일
-/// 480×640 OneComponent8 CVPixelBuffer 로 변환한다.
+/// 640×480 OneComponent8 CVPixelBuffer 로 변환한다.
 ///
-/// Phase 7-1 V-1 범위: 단순 stretch 리사이즈만 수행. 비율 보정·디바이스 회전 보정은
-/// 본 PR 제외 (V-1 결과 보고 후속 결정 — Phase 7 범위 제외 항목).
+/// 입력 사이즈는 ARFrame raw 비율(4:3 가로)과 일치하도록 640×480(4:3) 으로 정의 — 비례
+/// 보존 + 정보 손실 0 + SuperPoint 학습 분포(가로) 와 일치. src·dst 비율이 다르면
+/// src 에서 dst 비율과 일치하는 가운데 영역만 center crop 후 다운스케일 (현재는 둘 다
+/// 4:3 이라 crop 0).
 ///
+/// 회전 보정은 본 PR 범위 외. 서버 매핑 orientation 합의 후 후속 PR 에서 결정.
 /// 풀 사전 alloc 으로 매 프레임 buffer 생성 비용을 줄인다.
 final class PixelBufferPreprocessor {
 
-    static let outputWidth: Int = 480
-    static let outputHeight: Int = 640
+    static let outputWidth: Int = 960
+    static let outputHeight: Int = 540
 
     private var pool: CVPixelBufferPool?
 
@@ -20,9 +23,9 @@ final class PixelBufferPreprocessor {
         self.pool = Self.makePool(width: Self.outputWidth, height: Self.outputHeight)
     }
 
-    /// YUV biplanar Y plane → 480×640 OneComponent8 CVPixelBuffer.
+    /// YUV biplanar Y plane → `outputWidth × outputHeight` OneComponent8 CVPixelBuffer.
     /// 실패 시 nil 반환. 호출자는 nil 시 추론을 skip 해야 한다.
-    func toGrayscale480x640(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+    func toGrayscaleBuffer(_ source: CVPixelBuffer) -> CVPixelBuffer? {
         let formatType = CVPixelBufferGetPixelFormatType(source)
         // ARKit capturedImage 는 일반적으로 420YpCbCr8BiPlanarFullRange (875704422).
         // FullRange / VideoRange 모두 Y plane 자체는 OneComponent8 로 동일하게 사용 가능.
@@ -80,11 +83,35 @@ final class PixelBufferPreprocessor {
         guard let dstAddr = CVPixelBufferGetBaseAddress(dstBuffer) else { return nil }
         let dstBytesPerRow = CVPixelBufferGetBytesPerRow(dstBuffer)
 
+        // src 에서 dst 비율과 일치하는 영역만 center crop. 비례 보존 → SuperPoint
+        // detector/descriptor 가 학습 분포(정상 비율) 와 일관되게 응답하도록 함.
+        let dstAspect = Double(Self.outputWidth) / Double(Self.outputHeight)   // 0.75 (3:4)
+        let srcAspect = Double(srcWidth) / Double(srcHeight)                   // 예: 1.333 (4:3)
+        let roiX: Int
+        let roiY: Int
+        let roiW: Int
+        let roiH: Int
+        if srcAspect > dstAspect {
+            // src 가 가로로 더 김 → 좌우 자르기
+            roiH = srcHeight
+            roiW = Int((Double(srcHeight) * dstAspect).rounded())
+            roiX = (srcWidth - roiW) / 2
+            roiY = 0
+        } else {
+            // src 가 세로로 더 김 → 위/아래 자르기
+            roiW = srcWidth
+            roiH = Int((Double(srcWidth) / dstAspect).rounded())
+            roiX = 0
+            roiY = (srcHeight - roiH) / 2
+        }
+        // ROI 시작 주소 (Planar8: 1 byte/pixel)
+        let roiAddr = srcAddr.advanced(by: roiY * srcBytesPerRow + roiX)
+
         var srcVImage = vImage_Buffer(
-            data: srcAddr,
-            height: vImagePixelCount(srcHeight),
-            width: vImagePixelCount(srcWidth),
-            rowBytes: srcBytesPerRow
+            data: roiAddr,
+            height: vImagePixelCount(roiH),
+            width: vImagePixelCount(roiW),
+            rowBytes: srcBytesPerRow            // ROI 는 src 의 부분뷰이므로 rowBytes 그대로
         )
         var dstVImage = vImage_Buffer(
             data: dstAddr,
@@ -93,7 +120,7 @@ final class PixelBufferPreprocessor {
             rowBytes: dstBytesPerRow
         )
 
-        // 단순 stretch 스케일 (Lanczos 등 high-q 옵션은 Phase 7 범위 외).
+        // ROI → dst 비율 유지 다운스케일.
         let err = vImageScale_Planar8(&srcVImage, &dstVImage, nil, vImage_Flags(kvImageNoFlags))
         if err != kvImageNoError {
             print("[Preprocess] vImageScale_Planar8 failed (err=\(err))")

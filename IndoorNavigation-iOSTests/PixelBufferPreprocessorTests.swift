@@ -55,17 +55,17 @@ struct PixelBufferPreprocessorTests {
 
     // MARK: - 1) 출력 dimension·format 검증
 
-    @Test("1920×1440 YUV 입력 → 480×640 OneComponent8 출력")
+    @Test("1920×1440 YUV 입력 → outputWidth×outputHeight OneComponent8 출력")
     func dimensionsAndFormat() {
         let preproc = PixelBufferPreprocessor()
         let src = makeYUV1920x1440()
 
-        guard let dst = preproc.toGrayscale480x640(src) else {
-            Issue.record("toGrayscale480x640 returned nil")
+        guard let dst = preproc.toGrayscaleBuffer(src) else {
+            Issue.record("toGrayscaleBuffer returned nil")
             return
         }
-        #expect(CVPixelBufferGetWidth(dst) == 480)
-        #expect(CVPixelBufferGetHeight(dst) == 640)
+        #expect(CVPixelBufferGetWidth(dst) == PixelBufferPreprocessor.outputWidth)
+        #expect(CVPixelBufferGetHeight(dst) == PixelBufferPreprocessor.outputHeight)
         #expect(CVPixelBufferGetPixelFormatType(dst) == kCVPixelFormatType_OneComponent8)
     }
 
@@ -76,8 +76,8 @@ struct PixelBufferPreprocessorTests {
         let preproc = PixelBufferPreprocessor()
         let src = makeYUV1920x1440()
 
-        guard let dst = preproc.toGrayscale480x640(src) else {
-            Issue.record("toGrayscale480x640 returned nil")
+        guard let dst = preproc.toGrayscaleBuffer(src) else {
+            Issue.record("toGrayscaleBuffer returned nil")
             return
         }
         CVPixelBufferLockBaseAddress(dst, .readOnly)
@@ -90,10 +90,11 @@ struct PixelBufferPreprocessorTests {
         let bpr = CVPixelBufferGetBytesPerRow(dst)
         let ptr = base.assumingMemoryBound(to: UInt8.self)
 
-        // 가운데 픽셀(240, 320)
-        let cx = 240, cy = 320
+        // 출력 가운데 픽셀
+        let cx = PixelBufferPreprocessor.outputWidth / 2
+        let cy = PixelBufferPreprocessor.outputHeight / 2
         let v = ptr[cy * bpr + cx]
-        // 입력 그라데이션 가운데 ≈ 127~128, vImage 단순 stretch 로 ±5 내 통과 기대.
+        // 입력 가로 그라데이션 가운데 ≈ 127~128, 비율 유지 다운스케일로 ±5 내 통과 기대.
         #expect(abs(Int(v) - 128) <= 5,
                 "expected ≈128, got \(v)")
     }

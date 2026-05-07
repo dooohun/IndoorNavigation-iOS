@@ -29,22 +29,35 @@ final class SuperPointKeypointOverlayView: UIView {
         pointsLayer.frame = bounds
     }
 
+    /// landscape 추출 좌표(u, v) 를 portrait 화면에 90° CW 회전 매핑.
+    /// SuperPoint 입력이 ARFrame raw(가로) 비율 그대로 들어가므로 keypoint 도 landscape
+    /// 좌표계. 사용자 폰이 portrait + 후면 카메라일 때 ARSCNView 가 영상을 90° CW
+    /// 회전해서 보여주는 것과 일치하도록 같은 회전을 overlay 에도 적용.
+    /// 회전 후 좌표계: rotatedW = inputSize.height, rotatedH = inputSize.width.
+    /// 매핑: rx = (inputSize.height - kp.y), ry = kp.x.
     func updateKeypoints(_ keypoints: [SIMD3<Float>], inputSize: CGSize) {
         self.inputSize = inputSize
         let path = UIBezierPath()
         let radius: CGFloat = 2.5
 
-        let sx = bounds.width / inputSize.width
-        let sy = bounds.height / inputSize.height
-        let scale = max(sx, sy)
-        let drawnW = inputSize.width * scale
-        let drawnH = inputSize.height * scale
+        // 회전 후 가상 입력 사이즈 (portrait)
+        let rotatedW = inputSize.height
+        let rotatedH = inputSize.width
+
+        let sx = bounds.width / rotatedW
+        let sy = bounds.height / rotatedH
+        let scale = max(sx, sy)            // aspect-fill (ARSCNView 기본과 동일)
+        let drawnW = rotatedW * scale
+        let drawnH = rotatedH * scale
         let dx = (bounds.width - drawnW) / 2
         let dy = (bounds.height - drawnH) / 2
 
         for kp in keypoints {
-            let x = CGFloat(kp.x) * scale + dx
-            let y = CGFloat(kp.y) * scale + dy
+            // 90° CW 회전: (u, v) in landscape → (H - v, u) in portrait coord
+            let rx = inputSize.height - CGFloat(kp.y)
+            let ry = CGFloat(kp.x)
+            let x = rx * scale + dx
+            let y = ry * scale + dy
             path.append(UIBezierPath(arcCenter: CGPoint(x: x, y: y),
                                      radius: radius, startAngle: 0,
                                      endAngle: 2 * .pi, clockwise: true))

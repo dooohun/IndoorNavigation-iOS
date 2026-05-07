@@ -102,8 +102,13 @@ def load_weights(model: SuperPointNet, weights_path: Path) -> None:
 
 
 def convert(model: SuperPointNet, height: int, width: int, output_path: Path) -> None:
+    # 8의 배수가 아니면 PyTorch maxpool 의 floor 동작으로 출력 grid 가 H/8 의 floor 가 됨
+    # (예: 540 → grid_h = 67, → effective heatmap 67×8 = 536). 호출자가 인지 후 진행 가능하도록
+    # 경고만 하고 변환은 허용.
     if height % 8 != 0 or width % 8 != 0:
-        raise ValueError(f"height/width 는 8의 배수여야 함 (입력: {width}×{height})")
+        eff_h = (height // 8) * 8
+        eff_w = (width // 8) * 8
+        print(f"[warn] {width}×{height} 가 8의 배수가 아님. effective heatmap 영역: {eff_w}×{eff_h}")
 
     example = torch.zeros(1, 1, height, width)
     with torch.no_grad():

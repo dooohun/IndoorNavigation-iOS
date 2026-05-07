@@ -113,11 +113,12 @@ private struct SeededRNG {
 final class SuperPointExtractorML: SuperPointExtracting {
 
     struct Config {
-        var inputWidth: Int = 480
-        var inputHeight: Int = 640
-        var scoreThreshold: Float = 0.005
+        var inputWidth: Int = 960
+        var inputHeight: Int = 540
+        var scoreThreshold: Float = 0.0005
         var nmsRadiusPx: Int = 4
-        var maxKeypoints: Int = 512
+        var maxKeypoints: Int = 1024
+        var removeBordersPx: Int = 4
     }
 
     private let config: Config
@@ -157,7 +158,8 @@ final class SuperPointExtractorML: SuperPointExtracting {
             dustbinChannelIndex: 64,
             scoreThreshold: config.scoreThreshold,
             nmsRadiusPx: config.nmsRadiusPx,
-            maxKeypoints: config.maxKeypoints
+            maxKeypoints: config.maxKeypoints,
+            removeBordersPx: config.removeBordersPx
         ))
         self.sampler = DescriptorSampler(config: DescriptorSampler.Config(
             inputWidth: config.inputWidth,
@@ -195,7 +197,7 @@ final class SuperPointExtractorML: SuperPointExtracting {
 
         let t0 = CACurrentMediaTime()
 
-        guard let grayBuf = preprocessor.toGrayscale480x640(image) else {
+        guard let grayBuf = preprocessor.toGrayscaleBuffer(image) else {
             print("[SuperPoint] preprocess failed")
             return empty
         }

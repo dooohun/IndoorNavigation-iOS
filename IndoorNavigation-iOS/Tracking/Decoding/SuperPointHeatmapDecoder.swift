@@ -20,26 +20,29 @@ import Accelerate
 final class SuperPointHeatmapDecoder {
 
     struct Config {
-        var inputWidth: Int = 480
-        var inputHeight: Int = 640
+        /// 모델 입력 logical 사이즈 (외부 표기/매핑용). effective heatmap 영역은
+        /// 항상 gridH*cell × gridW*cell 로 동적 결정 (입력이 cell 의 배수가 아니면
+        /// 마지막 partial cell 잘림 — PyTorch maxpool floor 동작과 일치).
+        var inputWidth: Int = 960
+        var inputHeight: Int = 540
         var cellSize: Int = 8
         var dustbinChannelIndex: Int = 64
-        var scoreThreshold: Float = 0.005
+        var scoreThreshold: Float = 0.0005
         var nmsRadiusPx: Int = 4
-        var maxKeypoints: Int = 512
+        var maxKeypoints: Int = 1024
+        /// 가장자리 픽셀 제거 폭 (서버 lightglue SuperPoint 의 remove_borders 와 일치).
+        var removeBordersPx: Int = 4
     }
 
     private let config: Config
 
     init(config: Config = Config()) {
         self.config = config
-        precondition(config.inputWidth % config.cellSize == 0)
-        precondition(config.inputHeight % config.cellSize == 0)
     }
 
     /// `semi` MLMultiArray → keypoints. shape 미스매치 시 빈 배열 반환.
     func decode(semi: MLMultiArray) -> [SIMD3<Float>] {
-        // 기대 shape: [1, 65, H/8, W/8]
+        // 기대 shape: [1, 65, gridH, gridW]
         let shape = semi.shape.map { $0.intValue }
         guard shape.count == 4 else {
             print("[Decode] semi shape rank mismatch: \(shape)")
@@ -49,11 +52,12 @@ final class SuperPointHeatmapDecoder {
         let gridH = shape[2]
         let gridW = shape[3]
         let cell = config.cellSize
-        let outH = config.inputHeight
-        let outW = config.inputWidth
-        guard gridH * cell == outH, gridW * cell == outW,
-              totalChannels == config.dustbinChannelIndex + 1 else {
-            print("[Decode] semi shape mismatch: \(shape) vs expected (1, \(config.dustbinChannelIndex + 1), \(outH / cell), \(outW / cell))")
+        // effective heatmap 영역 (모델 출력 grid 기반). config.inputHeight/Width 와
+        // 일치하지 않을 수 있음 — PyTorch maxpool floor 로 인한 partial cell 잘림.
+        let outH = gridH * cell
+        let outW = gridW * cell
+        guard totalChannels == config.dustbinChannelIndex + 1 else {
+            print("[Decode] dustbin channel mismatch: shape=\(shape), expected channels=\(config.dustbinChannelIndex + 1)")
             return []
         }
 
@@ -124,15 +128,20 @@ final class SuperPointHeatmapDecoder {
         let r = max(0, config.nmsRadiusPx)
         let maxMap = separableMaxPool(heat: heat, width: outW, height: outH, radius: r)
 
-        // 6. 후보 추출 (본인 == max 이고 threshold 통과)
+        // 6. 후보 추출 (본인 == max 이고 threshold 통과, removeBorders 영역 제외)
         struct Candidate { let u: Int; let v: Int; let score: Float }
         var candidates: [Candidate] = []
         candidates.reserveCapacity(2048)
 
         let thr = config.scoreThreshold
-        for y in 0..<outH {
+        let border = max(0, config.removeBordersPx)
+        let yMin = border
+        let yMax = max(border, outH - border)
+        let xMin = border
+        let xMax = max(border, outW - border)
+        for y in yMin..<yMax {
             let rowBase = y * outW
-            for x in 0..<outW {
+            for x in xMin..<xMax {
                 let s = heat[rowBase + x]
                 if s < thr { continue }
                 if s != maxMap[rowBase + x] { continue }
