@@ -180,6 +180,11 @@ class NetworkManager {
     let baseURL = "http://218.150.183.198:8080/api/v1"
     let slamBaseURL = "http://218.150.183.198:8080/api/slam/v3"
 
+    /// 테스트용 DI 포인트. 기존 메서드들은 `URLSession.shared` 를 직접 쓰지만,
+    /// Phase 8 B2 신규 3 메서드(localizeV3 / pathfinding / featurePointsLookup)는 본 프로퍼티를 통해
+    /// `URLProtocol` 모킹을 주입한 커스텀 세션으로 갈아끼울 수 있다.
+    var session: URLSession = .shared
+
     // MARK: - 1. Localize
 
     func localize(buildingId: String?, mapId: String?, images: [UIImage], completion: @escaping (Result<SLAMLocalizeResponse, Error>) -> Void) {
@@ -427,6 +432,77 @@ class NetworkManager {
             } catch {
                 log("ERR", "파싱 실패:", error)
                 completion(.failure(Self.makeError("응답 파싱 실패")))
+            }
+        }.resume()
+    }
+
+    // MARK: - 7. SuperPoint Localize V3
+
+    /// `POST /api/v1/buildings/{buildingId}/localize/v3` — multipart 이미지 업로드.
+    /// 응답: `LocalizeV3Response`. 신규 3 메서드는 DI session property 사용.
+    func localizeV3(buildingId: String,
+                    images: [UIImage],
+                    completion: @escaping (Result<LocalizeV3Response, Error>) -> Void) {
+        // TODO(서버답): endpoint path '/buildings/{id}/localize/v3' 가정 — slamBaseURL/v3 와 baseURL/v3 중 확인 필요
+        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/localize/v3") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+
+        let boundary = "Boundary-\(UUID().uuidString)"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+
+        func appendField(_ name: String, _ value: String) {
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+            body.append(value.data(using: .utf8)!)
+            body.append("\r\n".data(using: .utf8)!)
+        }
+
+        appendField("building_id", buildingId)
+
+        // TODO(서버답): multipart 필드명 'images', 권장 개수, 해상도 미정
+        for (index, image) in images.enumerated() {
+            guard let imageData = image.jpegData(compressionQuality: 0.5) else { continue }
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"images\"; filename=\"image\(index).jpg\"\r\n".data(using: .utf8)!)
+            body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+            body.append(imageData)
+            body.append("\r\n".data(using: .utf8)!)
+        }
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        request.httpBody = body
+
+        log("REQ", "POST", url.absoluteString)
+        log("REQ", "이미지 \(images.count)장, 바디 크기: \(body.count) bytes")
+
+        session.dataTask(with: request) { data, response, error in
+            if let error = error {
+                log("ERR", "네트워크 오류:", error)
+                completion(.failure(Self.networkError(error)))
+                return
+            }
+            let http = response as? HTTPURLResponse
+            let statusCode = http?.statusCode ?? 0
+            let responseBody = data.flatMap { String(data: $0, encoding: .utf8) } ?? "(빈 응답)"
+
+            log("RES", "HTTP \(statusCode)")
+            log("RES", "바디:", responseBody)
+
+            let data = data ?? Data()
+            guard (200..<300).contains(statusCode) else {
+                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
+                return
+            }
+            do {
+                let result = try JSONDecoder().decode(LocalizeV3Response.self, from: data)
+                log("RES", "localizeV3 성공: floorLevel=\(result.floorLevel), confidence=\(result.confidence)")
+                completion(.success(result))
+            } catch {
+                log("ERR", "파싱 실패:", error)
+                completion(.failure(Self.makeError("응답 파싱 실패\n\(responseBody)")))
             }
         }.resume()
     }
