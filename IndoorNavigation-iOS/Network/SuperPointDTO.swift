@@ -97,3 +97,74 @@ struct PathfindingResponse: Codable {
     let floorTransitions: [FloorTransition]
     // TODO(서버답): routeMetadata 자유 스키마 — 필요 시 [String: AnyCodable] 추가
 }
+
+// MARK: - 3. Feature Points Lookup
+
+struct LookupQuery: Codable {
+    let floorLevel: Int
+    let x: Double
+    let y: Double
+    let z: Double
+    let viewDirection: [Double]?  // 가정: [x, y, z]. TODO(서버답) — swagger example 은 [0] 단일 element
+}
+
+struct LookupOptions: Codable {
+    let radiusM: Double?
+    let maxKeyframesPerQuery: Int?
+    let viewConeDeg: Double?
+    let format: String?           // 기본 "json_b64"
+}
+
+struct LookupRequest: Codable {
+    let queries: [LookupQuery]
+    let options: LookupOptions?
+}
+
+struct KeyframeIntrinsics: Codable {
+    let fx: Double
+    let fy: Double
+    let cx: Double
+    let cy: Double
+    let width: Int
+    let height: Int
+}
+
+struct LookupKeyframe: Codable {
+    let kfId: String
+    let scanId: String
+    let floorLevel: Int
+    let rtabmapNodeId: Int
+    let pose: [[Double]]              // 4×4. 마지막 열 = 카메라 위치, 3번째 열 = forward
+    let intrinsics: KeyframeIntrinsics
+    let matchedQueryIndices: [Int]
+    let distancesM: [Double]
+    let keypointCount: Int
+    let keypoints: String              // base64 (N,2) f32
+    let descriptors: String            // base64 (N,256) f16
+    let world3d: String                // base64 (N,3) f32 — NaN 행 포함 가능
+    let globalDescriptor: String       // base64 (384,) f16 — DINOv2
+}
+
+struct LookupModel: Codable {
+    let extractor: String              // "superpoint_v1"
+    let matcher: String                // "superpoint_lightglue"
+    let descriptorDim: Int             // 256
+    let maxKeypoints: Int              // 1024
+    let descriptorDtype: String        // "float16"
+    let globalDescriptorDim: Int       // 384
+    let globalDescriptorExtractor: String  // "dinov2"
+}
+
+struct LookupStats: Codable {
+    let queryCount: Int
+    let keyframeCount: Int
+    let totalKeypoints: Int
+    let byteSize: Int
+}
+
+struct LookupResponse: Codable {
+    let buildingId: String
+    let keyframes: [LookupKeyframe]
+    let model: LookupModel
+    let stats: LookupStats
+}
