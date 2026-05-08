@@ -766,15 +766,25 @@ class ARNavigationLogic {
         )
 
         // 2. 모든 keyframe 매칭 → best (matched count max)
+        let queryKpCount = queryFrame.keypoints.count
+        let queryDescShape = queryFrame.descriptors.shape
+        let querySize = queryFrame.inputSize
+        print("[LightGlue][입력] query kp=\(queryKpCount), desc shape=\(queryDescShape), size=\(querySize), bundle_intr=(\(bundle.manifest.intrinsics.width)×\(bundle.manifest.intrinsics.height))")
         var perKfMatches: [(idx: Int, matches: [LightGlueMatcherEngine.Match])] = []
         for (kfIdx, kf) in bundle.keyframes.enumerated() {
             guard !kf.keypoints.isEmpty else { continue }
-            guard let m = try? engine.match(
-                query: queryFrame,
-                targetKeyframe: kf,
-                targetIntrinsics: bundle.manifest.intrinsics
-            ) else { continue }
-            perKfMatches.append((idx: kfIdx, matches: m))
+            do {
+                let m = try engine.match(
+                    query: queryFrame,
+                    targetKeyframe: kf,
+                    targetIntrinsics: bundle.manifest.intrinsics
+                )
+                print("[LightGlue][매칭] kf=\(kfIdx) (kp=\(kf.keypoints.count)) → matches=\(m.count)")
+                perKfMatches.append((idx: kfIdx, matches: m))
+            } catch {
+                print("[LightGlue][매칭] kf=\(kfIdx) → ERROR: \(error)")
+                continue
+            }
         }
         guard let best = perKfMatches.max(by: { $0.matches.count < $1.matches.count }),
               !best.matches.isEmpty else {
