@@ -66,7 +66,10 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         logic.delegate = self
         logic.arSession = sceneView.session
         logic.scene = sceneView.scene
-        logic.setGuidanceDelegate(self)
+        // Phase 8: setGuidanceDelegate 호출 제거 — headingOverlayView/turnCardView 가 IUO 인데
+        //          setupHeadingOverlay/setupTurnCard 미호출이라 nil. delegate 메서드 호출 시 강제 언래핑 크래시.
+        //          GuidanceDirector 인스턴스는 보존(향후 Phase 5 부활 가능성). delegate 미등록 → no-op.
+        // TODO(phase8+): GuidanceDirector 인스턴스 자체 옵셔널화 또는 폐기.
 
         // Phase 7: SuperPoint extractor + 디버그 시각화 (DEBUG 빌드 전용)
         #if DEBUG
