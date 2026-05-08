@@ -243,3 +243,143 @@ extension PathfindingResponse {
         }
     }
 }
+
+// MARK: - Lookup → LocalizationBundle 어댑터
+
+/// `LookupResponse → LocalizationBundle` 변환 중 발생하는 어댑팅 오류.
+/// NetworkBundleProvider 가 fetch 결과를 검증·매핑할 때 throw.
+enum LookupAdaptationError: Error, CustomStringConvertible {
+    case adaptationFailed(reason: String)
+
+    var description: String {
+        switch self {
+        case .adaptationFailed(let reason):
+            return "lookup → bundle 변환 실패: \(reason)"
+        }
+    }
+}
+
+extension LookupResponse {
+
+    /// `LookupResponse` 를 기존 `LocalizationBundle` (mock 디코딩 구조와 동일) 로 어댑팅.
+    /// - Parameters:
+    ///   - scanIdOverride: nil 이면 첫 keyframe.scanId 사용
+    ///   - floorIdOverride: nil 이면 빈 문자열 (TODO 서버답)
+    ///   - destination: manifest.destination 에 주입
+    /// - Throws: `LookupAdaptationError.adaptationFailed`
+    func toLocalizationBundle(
+        scanIdOverride: String? = nil,
+        floorIdOverride: String? = nil,
+        destination: String = ""
+    ) throws -> LocalizationBundle {
+        guard let firstKf = keyframes.first else {
+            throw LookupAdaptationError.adaptationFailed(reason: "empty keyframes")
+        }
+
+        // intrinsics 동질성 가드 — 모든 keyframe 이 동일 intrinsics 라고 가정
+        // TODO(서버답): keyframe 별 intrinsics 다를 가능성 시 schema 협의
+        let firstIntr = firstKf.intrinsics
+        for kf in keyframes.dropFirst() {
+            let i = kf.intrinsics
+            if i.fx != firstIntr.fx || i.fy != firstIntr.fy ||
+               i.cx != firstIntr.cx || i.cy != firstIntr.cy ||
+               i.width != firstIntr.width || i.height != firstIntr.height {
+                throw LookupAdaptationError.adaptationFailed(reason: "heterogeneous intrinsics")
+            }
+        }
+
+        let manifest = BundleManifest(
+            version: "lookup-v1",
+            scanId: scanIdOverride ?? firstKf.scanId,
+            // TODO(서버답): floorId 매핑 (lookup 응답에는 floorId 없음 — floorLevel 만)
+            floorId: floorIdOverride ?? "",
+            floorLevel: firstKf.floorLevel,
+            destination: destination,
+            intrinsics: BundleIntrinsics(
+                fx: firstIntr.fx,
+                fy: firstIntr.fy,
+                cx: firstIntr.cx,
+                cy: firstIntr.cy,
+                width: firstIntr.width,
+                height: firstIntr.height
+            ),
+            // TODO(서버답): lookup 응답에 local_transform 추가 시 교체. 현재는 mock 값 hardcode.
+            localTransform3x4: [
+                [0, 0, 1, 0],
+                [-1, 0, 0, 0],
+                [0, -1, 0, 0]
+            ],
+            keyframeCount: keyframes.count
+        )
+
+        let bundleKfs: [BundleKeyframe] = try keyframes.enumerated().map { (idx, kf) in
+            let count = kf.keypointCount
+            let keypoints = try Self.decodeKeypointsBase64(kf.keypoints, count: count)
+            let world3d = try Self.decodeWorld3dBase64(kf.world3d, count: count)
+            return BundleKeyframe(
+                index: idx,
+                pose4x4: kf.pose,
+                keypoints: keypoints,
+                descriptorsB64: kf.descriptors,
+                world3d: world3d,
+                globalDescriptorB64: kf.globalDescriptor
+            )
+        }
+
+        return LocalizationBundle(manifest: manifest, keyframes: bundleKfs)
+    }
+
+    /// (N, 2) FP32 little-endian base64 → [[Float]] (N×2).
+    /// byte 길이 == count*2*4 가 아니면 throw.
+    fileprivate static func decodeKeypointsBase64(_ b64: String, count: Int) throws -> [[Float]] {
+        guard let data = Data(base64Encoded: b64) else {
+            throw LookupAdaptationError.adaptationFailed(reason: "keypoints base64 decode failed")
+        }
+        let expected = count * 2 * MemoryLayout<Float32>.size
+        guard data.count == expected else {
+            throw LookupAdaptationError.adaptationFailed(
+                reason: "keypoints size mismatch: got \(data.count) expected \(expected)"
+            )
+        }
+        var result = [[Float]]()
+        result.reserveCapacity(count)
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            let ptr = raw.bindMemory(to: Float32.self)
+            for i in 0..<count {
+                result.append([ptr[i * 2], ptr[i * 2 + 1]])
+            }
+        }
+        return result
+    }
+
+    /// (N, 3) FP32 little-endian base64 → [[Float]?] (N행). NaN 행 → nil.
+    /// byte 길이 == count*3*4 가 아니면 throw.
+    /// TODO(서버답): NaN 인코딩 형식 확인 — 현재 row 의 모든 컴포넌트가 NaN 이면 nil 처리
+    fileprivate static func decodeWorld3dBase64(_ b64: String, count: Int) throws -> [[Float]?] {
+        guard let data = Data(base64Encoded: b64) else {
+            throw LookupAdaptationError.adaptationFailed(reason: "world3d base64 decode failed")
+        }
+        let expected = count * 3 * MemoryLayout<Float32>.size
+        guard data.count == expected else {
+            throw LookupAdaptationError.adaptationFailed(
+                reason: "world3d size mismatch: got \(data.count) expected \(expected)"
+            )
+        }
+        var result = [[Float]?]()
+        result.reserveCapacity(count)
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            let ptr = raw.bindMemory(to: Float32.self)
+            for i in 0..<count {
+                let x = ptr[i * 3]
+                let y = ptr[i * 3 + 1]
+                let z = ptr[i * 3 + 2]
+                if x.isNaN || y.isNaN || z.isNaN {
+                    result.append(nil)
+                } else {
+                    result.append([x, y, z])
+                }
+            }
+        }
+        return result
+    }
+}
