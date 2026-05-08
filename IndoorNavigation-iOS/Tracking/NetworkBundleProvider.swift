@@ -40,10 +40,18 @@ final class NetworkBundleProvider: BundleProviding {
 
     // MARK: - 의존성 / 상태
 
+    /// 단일 lookup query 입력. floorLevel + (x, y, z) 좌표.
+    struct QueryPoint {
+        let floorLevel: Int
+        let x: Double
+        let y: Double
+        let z: Double
+    }
+
     private let buildingId: String
-    private let floorLevel: Int
-    private let queryPosition: SIMD3<Double>
+    private let queryPoints: [QueryPoint]
     private let radiusM: Double
+    private let maxKeyframesPerQuery: Int
     private let networkManager: NetworkManager
     private var cached: LocalizationBundle?
     private let queue = DispatchQueue(label: "NetworkBundleProvider.cache")
@@ -52,19 +60,19 @@ final class NetworkBundleProvider: BundleProviding {
 
     /// - Parameters:
     ///   - buildingId: lookup endpoint path 의 buildingId (UUID)
-    ///   - floorLevel: 쿼리 층
-    ///   - queryPosition: 쿼리 좌표 (서버 매핑 좌표계, m)
-    ///   - radiusM: keyframe 검색 반경 (기본 100m). TODO(서버답): 실측 byteSize 보고 조정
-    ///   - networkManager: 의존성 주입 (테스트 시 교체 가능 — 단 현재는 .shared 만 사용)
+    ///   - queryPoints: 다수 query 좌표 (경로 따라 N개 보내면 dedup 해서 영역 keyframe 묶어옴)
+    ///   - radiusM: keyframe 검색 반경 (기본 5m, multi-query 라 작게). TODO(서버답): 실측 byteSize 보고 조정
+    ///   - maxKeyframesPerQuery: query 당 최대 keyframe (서버 cap 16). 기본 5.
+    ///   - networkManager: 의존성 주입
     init(buildingId: String,
-         floorLevel: Int,
-         queryPosition: SIMD3<Double>,
-         radiusM: Double = 100.0,
+         queryPoints: [QueryPoint],
+         radiusM: Double = 5.0,
+         maxKeyframesPerQuery: Int = 5,
          networkManager: NetworkManager = .shared) {
         self.buildingId = buildingId
-        self.floorLevel = floorLevel
-        self.queryPosition = queryPosition
+        self.queryPoints = queryPoints
         self.radiusM = radiusM
+        self.maxKeyframesPerQuery = maxKeyframesPerQuery
         self.networkManager = networkManager
     }
 
@@ -72,20 +80,16 @@ final class NetworkBundleProvider: BundleProviding {
 
     /// 서버 lookup 호출 → 어댑팅 → 캐시 저장. completion 은 main 스레드.
     func fetch(completion: @escaping (Result<LocalizationBundle, Error>) -> Void) {
-        let query = LookupQuery(
-            floorLevel: floorLevel,
-            x: queryPosition.x,
-            y: queryPosition.y,
-            z: queryPosition.z,
-            viewDirection: nil
-        )
+        let queries = queryPoints.map {
+            LookupQuery(floorLevel: $0.floorLevel, x: $0.x, y: $0.y, z: $0.z, viewDirection: nil)
+        }
         let options = LookupOptions(
             radiusM: radiusM,
-            maxKeyframesPerQuery: nil,
+            maxKeyframesPerQuery: maxKeyframesPerQuery,
             viewConeDeg: nil,
             format: "json_b64"
         )
-        let req = LookupRequest(queries: [query], options: options)
+        let req = LookupRequest(queries: queries, options: options)
 
         networkManager.featurePointsLookup(buildingId: buildingId, request: req) { [weak self] result in
             DispatchQueue.main.async {

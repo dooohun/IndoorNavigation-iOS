@@ -220,8 +220,7 @@ struct NetworkBundleProviderTests {
     func loadBundle_beforeFetchThrows() {
         let provider = NetworkBundleProvider(
             buildingId: "x",
-            floorLevel: 0,
-            queryPosition: SIMD3<Double>(0, 0, 0)
+            queryPoints: [NetworkBundleProvider.QueryPoint(floorLevel: 0, x: 0, y: 0, z: 0)]
         )
         #expect(throws: NetworkBundleProvider.NetworkBundleError.self) {
             _ = try provider.loadBundle()

@@ -887,34 +887,8 @@ class ARNavigationLogic {
         localizedFloorLevel = response.pose.floorLevel
         localizedScanId = response.mapId  // B4 인계: PathfindingRequest.startScanId (Optional)
 
-        // 추적용 lookup — V3 응답 좌표 기준 사용자 주변 keyframe pack 받음.
-        // useLightGlueMatcher ON 시에만 호출. 추적 cadence (별도 트랙)에서 활용.
-        // TODO(S3+): 본 호출 결과 받기 전에 pathfinding 호출됨 — 비동기. 추적 시작 시점에 keyframe 사용 가능.
-        if Self.useLightGlueMatcher,
-           let floorLevel = response.pose.floorLevel {
-            let provider = NetworkBundleProvider(
-                buildingId: self.buildingId,
-                floorLevel: floorLevel,
-                queryPosition: SIMD3<Double>(Double(translation.x), Double(translation.y), Double(translation.z)),
-                radiusM: 30.0  // 사용자 주변 30m (좁게 — 패턴 B 실시간 보정 스타일)
-            )
-            self.networkBundleProvider = provider
-            print("[NetworkBundle] V3 측위 후 lookup — 좌표 (\(translation.x), \(translation.y), \(translation.z)), floorLevel \(floorLevel), radius 30m")
-            provider.fetch { [weak self] result in
-                guard let self = self else { return }
-                switch result {
-                case .success(let bundle):
-                    self.localizationBundle = bundle
-                    self.keyframeDescriptorCache = bundle.keyframes.map { kf in
-                        Data(base64Encoded: kf.descriptorsB64) ?? Data()
-                    }
-                    print("[NetworkBundle] loaded \(bundle.keyframes.count) keyframes (사용자 주변)")
-                    self.startTracking()
-                case .failure(let error):
-                    print("[NetworkBundle] fetch failed: \(error) — 기존 mock_bundle 유지")
-                }
-            }
-        }
+        // 추적용 lookup 은 pathfinding 응답 받은 후 — steps 좌표 multi-query 로 경로 전체 keyframe 받음.
+        // pathfinding 호출은 startV3Pathfinding 에서 (아래 분기). 응답 분기에서 lookup 트리거.
 
         delegate?.showScanComplete()
 
@@ -928,9 +902,7 @@ class ARNavigationLogic {
             delegate?.setLoading(false)
             drawPathNodes(steps: steps)
         } else {
-            // pathfinding 제거: POI displayPoint(self.goal) 좌표로 단순 직선 안내.
-            // 사용자 위치 + 목적지 = step 2개 — drawPathNodes 의 count>=2 가드 통과.
-            // 추적은 추후 클라 LightGlue cadence 로 매 주기 절대 측위 (별도 트랙).
+            // 1) 직선 안내 표시 (즉시) — 사용자 위치 + 목적지
             delegate?.showRouteCalculating(false)
             delegate?.setLoading(false)
             delegate?.updateStatus("\(destinationName) 방향으로 이동하세요.", color: .white)
@@ -949,6 +921,14 @@ class ARNavigationLogic {
             )
             drawPathNodes(steps: [userStep, destStep])
             print("[Direct] 직선 안내: user=(\(pose.x ?? 0), \(pose.y ?? 0), \(pose.z ?? 0)) → goal=(\(self.goal.x), \(self.goal.y), \(self.goal.z ?? 0))")
+
+            // 2) pathfinding 호출 (데이터용) — 응답 steps 좌표를 lookup multi-query 로 활용.
+            //    응답 받으면 startV3Pathfinding 안에서 NetworkBundleProvider multi-query 호출.
+            if Self.useLightGlueMatcher {
+                startV3Pathfinding(scanId: response.mapId,
+                                   startFloorLevel: response.pose.floorLevel,
+                                   translation: translation)
+            }
         }
     }
 
@@ -1073,37 +1053,75 @@ class ARNavigationLogic {
                 guard let self = self else { return }
                 switch result {
                 case .success(let resp):
-                    self.delegate?.setLoading(false)
-                    self.delegate?.showRouteCalculating(false)
                     let steps = resp.toPathSteps()
-                    // TODO(서버답): V3 pathfinding 응답에 snapDistance 추가 시 채우기
                     self.lastStartSnapDistance = nil
                     print("[V3-PATH] steps=\(steps.count), totalDistance=\(resp.totalDistance)m, floorTransitions=\(resp.floorTransitions.count)")
-                    if !steps.isEmpty {
-                        self.delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
-                        self.drawPathNodes(steps: steps)
-                    } else {
-                        self.delegate?.showScanFailed(message: "경로를 찾지 못했어요.\n다시 한번 스캔해 주세요.")
-                        self.delegate?.setLocateButtonVisible(true)
-                    }
+                    // 데이터용 — drawPathNodes 호출 X (직선 안내는 handleLocalizeV3Success 에서 이미 표시).
+                    // steps[].position 좌표를 lookup multi-query 로 사용 → 경로 전체 영역 keyframe pack 받음.
+                    self.fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
                 case .failure(let err):
-                    // START_SCAN_NOT_FOUND 시 startScanId 빼고 startFloorLevel + 좌표만으로 자동 재시도
+                    // START_SCAN_NOT_FOUND / SNAP_DISTANCE_EXCEEDED 시 startScanId 빼고 좌표만으로 재시도
                     let msg = String(describing: err)
                     if !retriedWithoutScanId, scanId != nil, startFloorLevel != nil,
                        msg.contains("START_SCAN_NOT_FOUND") {
-                        print("[V3-PATH] startScanId inactive — retry without scanId (floorLevel+coords)")
+                        print("[V3-PATH] startScanId inactive — retry without scanId")
                         self.startV3Pathfinding(scanId: nil,
                                                 startFloorLevel: startFloorLevel,
                                                 translation: translation,
                                                 retriedWithoutScanId: true)
                         return
                     }
-                    self.delegate?.setLoading(false)
-                    self.delegate?.showRouteCalculating(false)
-                    // TODO(B5+): STAIRS 선택 시 PATH_NOT_FOUND → ELEVATOR 재시도
-                    self.delegate?.showScanFailed(message: "경로 탐색에 실패했어요.\n다시 한번 스캔해 주세요.")
-                    self.delegate?.setLocateButtonVisible(true)
+                    // pathfinding 실패해도 사용자 좌표 1점으로 lookup fallback — 추적 측위는 가능하게
+                    print("[V3-PATH] 실패 (\(msg)) — 사용자 좌표 단일 query 로 lookup fallback")
+                    self.fetchBundleForPath(steps: [], fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
                 }
+            }
+        }
+    }
+
+    /// pathfinding 응답 steps 좌표 multi-query (또는 fallback 단일 query) 로 lookup 호출.
+    /// 받은 keyframe pack 으로 추적 측위 시작.
+    private func fetchBundleForPath(steps: [PathStep], fallbackTranslation: simd_float3, fallbackFloorLevel: Int?) {
+        // query 좌표 결정: steps 가 충분하면 그것, 아니면 사용자 좌표 1개
+        var queryPoints: [NetworkBundleProvider.QueryPoint] = []
+        if !steps.isEmpty {
+            for step in steps {
+                guard let pos = step.position else { continue }
+                queryPoints.append(NetworkBundleProvider.QueryPoint(
+                    floorLevel: step.floorLevel ?? (fallbackFloorLevel ?? 1),
+                    x: pos.x ?? 0, y: pos.y ?? 0, z: pos.z ?? 0
+                ))
+            }
+        }
+        if queryPoints.isEmpty {
+            queryPoints.append(NetworkBundleProvider.QueryPoint(
+                floorLevel: fallbackFloorLevel ?? 1,
+                x: Double(fallbackTranslation.x),
+                y: Double(fallbackTranslation.y),
+                z: Double(fallbackTranslation.z)
+            ))
+        }
+        // 서버 cap: queries 64, maxKeyframesPerQuery 16, dedup 후 128. radius 5m 권장 (패턴 A).
+        let provider = NetworkBundleProvider(
+            buildingId: self.buildingId,
+            queryPoints: queryPoints,
+            radiusM: 5.0,
+            maxKeyframesPerQuery: 5
+        )
+        self.networkBundleProvider = provider
+        print("[NetworkBundle] pathfinding 후 multi-query lookup — queries=\(queryPoints.count), radius 5m")
+        provider.fetch { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success(let bundle):
+                self.localizationBundle = bundle
+                self.keyframeDescriptorCache = bundle.keyframes.map { kf in
+                    Data(base64Encoded: kf.descriptorsB64) ?? Data()
+                }
+                print("[NetworkBundle] loaded \(bundle.keyframes.count) keyframes (경로 전체 영역)")
+                self.startTracking()
+            case .failure(let error):
+                print("[NetworkBundle] fetch failed: \(error) — 추적 미시작, 직선 안내 + ARKit pose 만")
             }
         }
     }
