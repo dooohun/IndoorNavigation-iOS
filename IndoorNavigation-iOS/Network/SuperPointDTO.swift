@@ -30,8 +30,13 @@ struct LocalizeV3Request {
 
 /// Localize V3 응답의 pose. 서버 swagger 가 `additionalProperties: true` 자유 schema —
 /// 들어올 가능성 있는 필드 모두 Optional 로 보존하여 어떤 형식이든 디코딩 실패하지 않게.
+/// 실측 (2026-05-08): 서버는 `x/y/z + qx/qy/qz/qw + floorLevel` 채움. tx/ty/tz/matrix 는 빈 채로 옴.
 struct LocalizeV3Pose: Codable {
-    // 추정 A: tx/ty/tz + 쿼터니언 (qx/qy/qz/qw)
+    // 실측 형식: x/y/z + 쿼터니언 (qx/qy/qz/qw)
+    let x: Double?
+    let y: Double?
+    let z: Double?
+    // 변형 가정 보존: tx/ty/tz (다른 endpoint 또는 향후 변경 대비)
     let tx: Double?
     let ty: Double?
     let tz: Double?
@@ -39,9 +44,9 @@ struct LocalizeV3Pose: Codable {
     let qy: Double?
     let qz: Double?
     let qw: Double?
-    // TODO(서버답): 4×4 행렬로 오면 fallback
+    // 4×4 행렬 형식 fallback
     let matrix: [[Double]]?
-    // 서버 응답에 floorLevel/floorId 가 LocalizeResponse 본체에 없음 → pose object 안에 들어있을 가능성. 없으면 nil.
+    // pose object 안에 floorLevel/floorId 채워짐 (실측 확인).
     let floorLevel: Int?
     let floorId: String?
 }
@@ -177,9 +182,8 @@ struct LookupResponse: Codable {
 // MARK: - LocalizeV3Pose helpers
 
 extension LocalizeV3Pose {
-    /// pose 를 4×4 변환 행렬로 변환. matrix 우선, 없으면 tx/ty/tz + 쿼터니언 조합으로 합성.
+    /// pose 를 4×4 변환 행렬로 변환. matrix 우선, 없으면 (x/y/z 또는 tx/ty/tz) + 쿼터니언 조합.
     /// 둘 다 없으면 nil.
-    // TODO(서버답): matrix row-major 가정 — 서버 답 받으면 수정
     func toMatrix4x4() -> simd_float4x4? {
         if let m = matrix, m.count == 4, m.allSatisfy({ $0.count == 4 }) {
             return simd_float4x4(rows: [
@@ -189,17 +193,24 @@ extension LocalizeV3Pose {
                 SIMD4<Float>(Float(m[3][0]), Float(m[3][1]), Float(m[3][2]), Float(m[3][3])),
             ])
         }
-        if let tx, let ty, let tz, let qx, let qy, let qz, let qw {
+        // x/y/z (실측 형식) 우선, 없으면 tx/ty/tz fallback
+        let px = x ?? tx
+        let py = y ?? ty
+        let pz = z ?? tz
+        if let px, let py, let pz, let qx, let qy, let qz, let qw {
             let q = simd_quatf(ix: Float(qx), iy: Float(qy), iz: Float(qz), r: Float(qw))
             var m = simd_float4x4(q)
-            m.columns.3 = SIMD4<Float>(Float(tx), Float(ty), Float(tz), 1)
+            m.columns.3 = SIMD4<Float>(Float(px), Float(py), Float(pz), 1)
             return m
         }
         return nil
     }
 
-    /// translation 만 별도 추출 (tx/ty/tz 우선, 없으면 matrix 의 마지막 열).
+    /// translation 추출. x/y/z (실측 형식) 우선, 없으면 tx/ty/tz, 마지막으로 matrix 마지막 열.
     var translation: simd_float3? {
+        if let x, let y, let z {
+            return simd_float3(Float(x), Float(y), Float(z))
+        }
         if let tx, let ty, let tz {
             return simd_float3(Float(tx), Float(ty), Float(tz))
         }

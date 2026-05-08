@@ -300,6 +300,7 @@ struct SuperPointDTOTests {
     @Test("LocalizeV3Pose helpers: tx/ty/tz + qx/qy/qz/qw 만 → toMatrix4x4 마지막 열 = translation")
     func localizeV3Pose_QuaternionOnly_returnsMatrix() throws {
         let pose = LocalizeV3Pose(
+            x: nil, y: nil, z: nil,
             tx: 1.5, ty: 2.5, tz: 3.5,
             qx: 0.0, qy: 0.0, qz: 0.0, qw: 1.0,
             matrix: nil,
@@ -336,6 +337,7 @@ struct SuperPointDTOTests {
             [0.0, 0.0, 0.0, 1.0],
         ]
         let pose = LocalizeV3Pose(
+            x: nil, y: nil, z: nil,
             tx: nil, ty: nil, tz: nil,
             qx: nil, qy: nil, qz: nil, qw: nil,
             matrix: mat,
@@ -376,6 +378,7 @@ struct SuperPointDTOTests {
     @Test("LocalizeV3Pose helpers: 모두 nil → toMatrix4x4/translation/rotationQuaternion nil")
     func localizeV3Pose_BothNil_returnsNil() throws {
         let pose = LocalizeV3Pose(
+            x: nil, y: nil, z: nil,
             tx: nil, ty: nil, tz: nil,
             qx: nil, qy: nil, qz: nil, qw: nil,
             matrix: nil,
@@ -393,6 +396,7 @@ struct SuperPointDTOTests {
         // 90° yaw (Y axis) 회전: half-angle = 45°
         let halfAngle: Double = .pi / 4
         let pose = LocalizeV3Pose(
+            x: nil, y: nil, z: nil,
             tx: 10.0, ty: 0.0, tz: -5.0,
             qx: 0.0, qy: sin(halfAngle), qz: 0.0, qw: cos(halfAngle),
             matrix: nil,
