@@ -354,10 +354,11 @@ class ARNavigationLogic {
         guard frame.descriptors.shape.count == 2,
               frame.descriptors.shape[0].intValue > 0 else { return }
 
-        // S3 분기 — LightGlue 토글 ON + 엔진 ready 일 때 LightGlue 매처 경로로.
-        // 실패(엔진 nil) 시 DescriptorMatcher fallback 으로 자연스럽게 떨어진다.
-        if Self.useLightGlueMatcher, let engine = lightGlueMatcher {
-            matchAgainstMockBundleLightGlue(frame, bundle: bundle, engine: engine)
+        // S3 분기 — LightGlue 토글 ON 시 매 프레임 매칭은 SKIP.
+        // 사유: 5 keyframe × LightGlue 추론(~100ms) = main 스레드 ~500ms 점유로 UI/캡처 차단.
+        // 매 프레임 LightGlue 매칭은 진단 로그용이었고 측위는 runClientLocalize 트리거 시점에만 수행.
+        // 향후 추적 측위(매 cadence) 본격 도입 시 background 큐로 옮겨 다시 활성화 (TODO S3+).
+        if Self.useLightGlueMatcher {
             return
         }
 
