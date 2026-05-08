@@ -122,6 +122,10 @@ class ARNavigationLogic {
     private let matchLogWindow = 5
     /// cosine similarity threshold (정규화 vector 기준 0.7 = 매우 유사).
     private let matchScoreThreshold: Float = 0.7
+    /// PnP solver. best keyframe 의 매칭으로 6DoF pose 추정.
+    private let pnpSolver: PnPSolving = DLTPnPSolver()
+    /// PnP 최소 매칭 점 수 (DLT 이론상 6, 실용은 더 많을수록 안정).
+    private let pnpMinPairs: Int = 6
 
     // MARK: - 외부 노출
 
@@ -239,7 +243,7 @@ class ARNavigationLogic {
               frame.descriptors.shape[0].intValue > 0 else { return }
         let queryCount = frame.descriptors.shape[0].intValue
 
-        var perKfStats: [(idx: Int, stats: DescriptorMatcher.Stats)] = []
+        var perKfStats: [(idx: Int, stats: DescriptorMatcher.Stats, matches: [DescriptorMatcher.Match?])] = []
         for (kfIdx, kf) in bundle.keyframes.enumerated() {
             let refBytes = keyframeDescriptorCache[kfIdx]
             let n = kf.keypoints.count
@@ -251,7 +255,7 @@ class ARNavigationLogic {
                 threshold: matchScoreThreshold
             )
             let stats = DescriptorMatcher.stats(matches: matches, queryCount: queryCount)
-            perKfStats.append((idx: kfIdx, stats: stats))
+            perKfStats.append((idx: kfIdx, stats: stats, matches: matches))
         }
         guard !perKfStats.isEmpty else { return }
         let best = perKfStats.max { $0.stats.matchedCount < $1.stats.matchedCount }!
@@ -262,6 +266,52 @@ class ARNavigationLogic {
             perKfMatched: perKfStats.map { $0.stats.matchedCount }
         )
         recordMatchSample(sample, queryCount: queryCount)
+
+        // best keyframe 의 매칭으로 2D-3D 쌍 추출 + PnP 시도. 매핑 영역 안에 있을 때만 의미 있음.
+        attemptPnP(frame: frame, bundle: bundle, bestKfIdx: best.idx, bestMatches: best.matches)
+    }
+
+    /// best keyframe 매칭에서 valid 2D-3D 쌍을 추출 + DLTPnPSolver 호출. 결과 즉시 console 로그.
+    private func attemptPnP(
+        frame: SuperPointFrame,
+        bundle: LocalizationBundle,
+        bestKfIdx: Int,
+        bestMatches: [DescriptorMatcher.Match?]
+    ) {
+        let bestKf = bundle.keyframes[bestKfIdx]
+        let pairs = MatchedPointExtractor.extract(
+            matches: bestMatches,
+            queryKeypoints: frame.keypoints,
+            bundleKeyframe: bestKf
+        )
+        guard pairs.count >= pnpMinPairs else { return }
+
+        // 매핑 시점 카메라 intrinsics (서버 manifest). 클라가 동일 사이즈(960×540)로 SuperPoint
+        // 추출했으므로 좌표계 일치한다고 가정 — 정확한 클라 K(스케일·회전 보정) 는 단계 5 에서.
+        let m = bundle.manifest.intrinsics
+        let K = simd_float3x3(rows: [
+            SIMD3<Float>(Float(m.fx), 0, Float(m.cx)),
+            SIMD3<Float>(0, Float(m.fy), Float(m.cy)),
+            SIMD3<Float>(0, 0, 1),
+        ])
+
+        guard let pose = pnpSolver.solve(
+            objectPoints: pairs.map { $0.worldPoint },
+            imagePoints: pairs.map { $0.imagePoint },
+            intrinsics: K
+        ) else {
+            print("[Pose] kf=\(bestKfIdx) pairs=\(pairs.count) — PnP solve 실패")
+            return
+        }
+
+        let t = pose.translation
+        // R 의 yaw 추정 (대략): atan2(R[2,0], R[0,0]) — debugging 용.
+        let yawDeg = atan2(pose.rotation[2, 0], pose.rotation[0, 0]) * 180.0 / .pi
+        print(String(
+            format: "[Pose] kf=%d pairs=%d reproj=%.1fpx t=(%.2f, %.2f, %.2f) yaw=%.0f°",
+            bestKfIdx, pairs.count, pose.reprojectionError,
+            t.x, t.y, t.z, yawDeg
+        ))
     }
 
     private func recordMatchSample(_ sample: MatchSample, queryCount: Int) {
