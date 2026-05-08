@@ -302,7 +302,8 @@ struct SuperPointDTOTests {
         let pose = LocalizeV3Pose(
             tx: 1.5, ty: 2.5, tz: 3.5,
             qx: 0.0, qy: 0.0, qz: 0.0, qw: 1.0,
-            matrix: nil
+            matrix: nil,
+            floorLevel: nil, floorId: nil
         )
         let m = try #require(pose.toMatrix4x4())
         // 마지막 열 = translation (column-major simd_float4x4)
@@ -337,7 +338,8 @@ struct SuperPointDTOTests {
         let pose = LocalizeV3Pose(
             tx: nil, ty: nil, tz: nil,
             qx: nil, qy: nil, qz: nil, qw: nil,
-            matrix: mat
+            matrix: mat,
+            floorLevel: nil, floorId: nil
         )
         let m = try #require(pose.toMatrix4x4())
         // simd_float4x4(rows:) 는 row-major 입력 → column-major 저장
@@ -376,7 +378,8 @@ struct SuperPointDTOTests {
         let pose = LocalizeV3Pose(
             tx: nil, ty: nil, tz: nil,
             qx: nil, qy: nil, qz: nil, qw: nil,
-            matrix: nil
+            matrix: nil,
+            floorLevel: nil, floorId: nil
         )
         #expect(pose.toMatrix4x4() == nil)
         #expect(pose.translation == nil)
@@ -392,7 +395,8 @@ struct SuperPointDTOTests {
         let pose = LocalizeV3Pose(
             tx: 10.0, ty: 0.0, tz: -5.0,
             qx: 0.0, qy: sin(halfAngle), qz: 0.0, qw: cos(halfAngle),
-            matrix: nil
+            matrix: nil,
+            floorLevel: nil, floorId: nil
         )
         let m = try #require(pose.toMatrix4x4())
         // translation 정상 적용
