@@ -28,6 +28,9 @@ class ARNavigationLogic {
     // FIXME: 서버 복구 후 false로 전환
     static let useMockData: Bool = false
 
+    // V3 측위 토글. false면 기존 SLAMv3(/api/slam/v3/localize) 사용.
+    static let useV3Localize: Bool = true
+
     weak var delegate: ARNavigationLogicDelegate?
     weak var arSession: ARSession?
     weak var scene: SCNScene?
@@ -52,6 +55,7 @@ class ARNavigationLogic {
     private var localizedPose: Pose?
     private var localizedFloorId: String?
     private var localizedFloorLevel: Int?
+    private var localizedScanId: String?  // V3 응답 mapId — B4 PathfindingRequest.startScanId 인계용
     private var capturedImages: [UIImage] = []
     private var capturedARPoses: [simd_float4x4] = []
     private var captureTimer: Timer?
@@ -395,6 +399,7 @@ class ARNavigationLogic {
         currentTargetWaypointIndex = 0
         matchedARPose = nil
         localizedPose = nil
+        localizedScanId = nil
         destinationARPosition = nil
         lastStartSnapDistance = nil
 
@@ -447,6 +452,15 @@ class ARNavigationLogic {
     }
 
     private func sendToServer() {
+        if Self.useV3Localize {
+            sendToServerV3()
+        } else {
+            sendToServerLegacy()
+        }
+    }
+
+    /// 기존 SLAMv3(/api/slam/v3/localize) 흐름. useV3Localize=false 폴백 경로.
+    private func sendToServerLegacy() {
         guard !capturedImages.isEmpty else {
             delegate?.setLoading(false)
             delegate?.setScanningOverlay(visible: false)
@@ -462,6 +476,32 @@ class ARNavigationLogic {
                 switch result {
                 case .success(let response):
                     self.handleLocalizeSuccess(response: response)
+                case .failure:
+                    self.delegate?.setLoading(false)
+                    self.delegate?.showScanFailed(message: "서버 연결에 실패했어요.\n다시 한번 스캔해 주세요.")
+                    self.delegate?.setLocateButtonVisible(true)
+                }
+            }
+        }
+    }
+
+    /// V3 측위 흐름 — multipart 업로드 + LocalizeV3Response 핸들링.
+    private func sendToServerV3() {
+        guard !capturedImages.isEmpty else {
+            delegate?.setLoading(false)
+            delegate?.setScanningOverlay(visible: false)
+            delegate?.showScanFailed(message: "캡처된 이미지가 없어요.\n다시 시도해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+
+        NetworkManager.shared.localizeV3(buildingId: buildingId, images: capturedImages) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.delegate?.setScanningOverlay(visible: false)
+                switch result {
+                case .success(let response):
+                    self.handleLocalizeV3Success(response: response)
                 case .failure:
                     self.delegate?.setLoading(false)
                     self.delegate?.showScanFailed(message: "서버 연결에 실패했어요.\n다시 한번 스캔해 주세요.")
@@ -507,6 +547,63 @@ class ARNavigationLogic {
             delegate?.showRouteCalculating(true)
             let activeFloorId = response.floorId ?? self.floorId
             startCoordinateRoute(pose: pose, floorId: activeFloorId)
+        }
+    }
+
+    /// V3 측위 응답 핸들러 — handleLocalizeSuccess 와 같은 후속 흐름(showScanComplete + 층 전환 분기 + startCoordinateRoute) 사용.
+    /// 응답 형식이 다르므로 별도 메서드로 분리.
+    private func handleLocalizeV3Success(response: LocalizeV3Response) {
+        // TODO(서버답): confidence 임계값 미정 → 0.3 잠정
+        guard response.confidence >= 0.3 else {
+            delegate?.setLoading(false)
+            delegate?.showScanFailed(message: "위치 인식 신뢰도가 낮아요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+
+        // TODO(서버답): pose 변환 방향 — camera→world 가정 (SLAMv3와 동일)
+        guard let _ = response.pose.toMatrix4x4(),
+              let translation = response.pose.translation,
+              let quat = response.pose.rotationQuaternion else {
+            delegate?.setLoading(false)
+            delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+
+        let matchedIndex = response.matchedImageIndex
+        guard matchedIndex >= 0, matchedIndex < capturedARPoses.count else {
+            delegate?.setLoading(false)
+            delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+        matchedARPose = capturedARPoses[matchedIndex]
+
+        let pose = Pose(
+            x: Double(translation.x), y: Double(translation.y), z: Double(translation.z),
+            qx: Double(quat.imag.x), qy: Double(quat.imag.y), qz: Double(quat.imag.z), qw: Double(quat.real)
+        )
+        localizedPose = pose
+        localizedFloorId = response.floorId
+        localizedFloorLevel = response.floorLevel
+        localizedScanId = response.mapId  // B4 인계: PathfindingRequest.startScanId
+
+        delegate?.showScanComplete()
+
+        // TODO(B4): response.mapId → PathfindingRequest.startScanId, translation → startX/Y/Z
+        if isFloorTransitionRestart {
+            // 잔여 경로 재렌더링 (서버 pathfinding 호출 생략)
+            delegate?.showRouteCalculating(false)
+            delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
+            let steps = pendingRemainingSteps
+            pendingRemainingSteps = []
+            isFloorTransitionRestart = false
+            delegate?.setLoading(false)
+            drawPathNodes(steps: steps)
+        } else {
+            delegate?.showRouteCalculating(true)
+            startCoordinateRoute(pose: pose, floorId: response.floorId)
         }
     }
 
