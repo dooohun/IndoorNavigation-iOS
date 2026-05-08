@@ -988,7 +988,7 @@ class ARNavigationLogic {
 
     // NOTE(B4): floorTransitions[] 는 detectFloorTransition 이 step 변화로 자동 처리 — 별도 매핑 불요.
     // 키워드 미스매치 발견 시 detectFloorTransition 의 stairsKeywords/elevatorKeywords 보강.
-    private func startV3Pathfinding(scanId: String?, startFloorLevel: Int?, translation: simd_float3) {
+    private func startV3Pathfinding(scanId: String?, startFloorLevel: Int?, translation: simd_float3, retriedWithoutScanId: Bool = false) {
         // 서버 PathfindingRequest: startScanId 우선, 없으면 startFloorLevel — 둘 다 nil 이면 422 START_NOT_SPECIFIED
         guard scanId != nil || startFloorLevel != nil else {
             delegate?.setLoading(false)
@@ -1011,10 +1011,10 @@ class ARNavigationLogic {
         NetworkManager.shared.pathfinding(buildingId: buildingId, request: req) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.delegate?.setLoading(false)
-                self.delegate?.showRouteCalculating(false)
                 switch result {
                 case .success(let resp):
+                    self.delegate?.setLoading(false)
+                    self.delegate?.showRouteCalculating(false)
                     let steps = resp.toPathSteps()
                     // TODO(서버답): V3 pathfinding 응답에 snapDistance 추가 시 채우기
                     self.lastStartSnapDistance = nil
@@ -1026,7 +1026,20 @@ class ARNavigationLogic {
                         self.delegate?.showScanFailed(message: "경로를 찾지 못했어요.\n다시 한번 스캔해 주세요.")
                         self.delegate?.setLocateButtonVisible(true)
                     }
-                case .failure:
+                case .failure(let err):
+                    // START_SCAN_NOT_FOUND 시 startScanId 빼고 startFloorLevel + 좌표만으로 자동 재시도
+                    let msg = String(describing: err)
+                    if !retriedWithoutScanId, scanId != nil, startFloorLevel != nil,
+                       msg.contains("START_SCAN_NOT_FOUND") {
+                        print("[V3-PATH] startScanId inactive — retry without scanId (floorLevel+coords)")
+                        self.startV3Pathfinding(scanId: nil,
+                                                startFloorLevel: startFloorLevel,
+                                                translation: translation,
+                                                retriedWithoutScanId: true)
+                        return
+                    }
+                    self.delegate?.setLoading(false)
+                    self.delegate?.showRouteCalculating(false)
                     // TODO(B5+): STAIRS 선택 시 PATH_NOT_FOUND → ELEVATOR 재시도
                     self.delegate?.showScanFailed(message: "경로 탐색에 실패했어요.\n다시 한번 스캔해 주세요.")
                     self.delegate?.setLocateButtonVisible(true)
