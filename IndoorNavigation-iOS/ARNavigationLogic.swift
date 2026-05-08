@@ -634,6 +634,9 @@ class ARNavigationLogic {
     private func sendToServer() {
         if Self.useV3Localize {
             sendToServerV3()
+        } else if Self.useLightGlueMatcher {
+            // S3 — 클라 단독 측위. 서버 호출 없이 LightGlue + RANSAC PnP 로 self-localize.
+            runClientLocalize()
         } else {
             sendToServerLegacy()
         }
@@ -689,6 +692,102 @@ class ARNavigationLogic {
                 }
             }
         }
+    }
+
+    /// S3 — 클라 단독 측위 (서버 호출 없이 LightGlue + RANSAC PnP 로 self-localize).
+    /// 캡처된 5장 중 1장(현재 ARFrame) 만 사용. 매칭 + PnP 성공 시 handleClientLocalizeSuccess 로 후속 흐름.
+    /// TODO(S3): 5장 캡처 중 1장만 사용 — 5장 평균 또는 inlier 최대 선택 향후 개선
+    /// TODO(S3): best keyframe 선택 — globalDescriptor cosine prefilter (NetworkBundle 100+ keyframe 시 필수)
+    private func runClientLocalize() {
+        guard !capturedImages.isEmpty else {
+            delegate?.setLoading(false)
+            delegate?.setScanningOverlay(visible: false)
+            delegate?.showScanFailed(message: "캡처된 이미지가 없어요.\n다시 시도해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+
+        delegate?.setScanningOverlay(visible: false)
+
+        guard let frame = arSession?.currentFrame,
+              let extractor = superPointExtractor else {
+            delegate?.setLoading(false)
+            delegate?.showScanFailed(message: "AR 세션이 준비되지 않았어요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+
+        guard let bundle = localizationBundle, !bundle.keyframes.isEmpty else {
+            delegate?.setLoading(false)
+            delegate?.showScanFailed(message: "매핑 데이터가 준비되지 않았어요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+
+        guard let engine = lightGlueMatcher else {
+            delegate?.setLoading(false)
+            delegate?.showScanFailed(message: "매처가 준비되지 않았어요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+
+        // 1. 현재 ARFrame 으로 SuperPoint 추출 (processARFrame 패턴 동일)
+        let deviceIsLandscape = UIDevice.current.orientation.isLandscape
+        let orientation: InputOrientation = deviceIsLandscape ? .landscape : .portrait
+        let queryFrame = extractor.extract(
+            image: frame.capturedImage,
+            intrinsics: frame.camera.intrinsics,
+            timestamp: frame.timestamp,
+            orientation: orientation
+        )
+
+        // 2. 모든 keyframe 매칭 → best (matched count max)
+        var perKfMatches: [(idx: Int, matches: [LightGlueMatcherEngine.Match])] = []
+        for (kfIdx, kf) in bundle.keyframes.enumerated() {
+            guard !kf.keypoints.isEmpty else { continue }
+            guard let m = try? engine.match(
+                query: queryFrame,
+                targetKeyframe: kf,
+                targetIntrinsics: bundle.manifest.intrinsics
+            ) else { continue }
+            perKfMatches.append((idx: kfIdx, matches: m))
+        }
+        guard let best = perKfMatches.max(by: { $0.matches.count < $1.matches.count }),
+              !best.matches.isEmpty else {
+            delegate?.setLoading(false)
+            delegate?.showScanFailed(message: "주변 환경을 인식하지 못했어요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+
+        // 3. PnP 풀이
+        guard let pnp = attemptPnPLightGlue(
+            frame: queryFrame,
+            bundle: bundle,
+            bestKfIdx: best.idx,
+            lightGlueMatches: best.matches
+        ) else {
+            delegate?.setLoading(false)
+            delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+
+        // 4. PoseEstimate → Pose (Codable) 어댑터.
+        // TODO(S3): Pose 회전 어댑터 — RansacPnPSolver pose.rotation 좌표계 방향
+        //          (camera→world vs world→camera) 확인. V3 와 동일 가정.
+        let t = pnp.pose.translation
+        let q = simd_quatf(pnp.pose.rotation)
+        let pose = Pose(
+            x: Double(t.x), y: Double(t.y), z: Double(t.z),
+            qx: Double(q.imag.x), qy: Double(q.imag.y), qz: Double(q.imag.z), qw: Double(q.real)
+        )
+
+        // TODO(S3): floorId/floorLevel 결정 — bundle.manifest 의존, 매핑 시점과 다른 층 측위 시 부정확
+        let floorLevel = bundle.manifest.floorLevel
+        let scanId = bundle.manifest.scanId
+
+        handleClientLocalizeSuccess(pose: pose, scanId: scanId, floorLevel: floorLevel)
     }
 
     private func handleLocalizeSuccess(response: SLAMLocalizeResponse) {
@@ -789,6 +888,51 @@ class ARNavigationLogic {
                                    translation: translation)
             } else {
                 startCoordinateRoute(pose: pose, floorId: response.pose.floorId ?? self.floorId)
+            }
+        }
+    }
+
+    /// S3 — 클라 단독 측위 성공 핸들러. handleLocalizeV3Success 와 동일 후속 흐름
+    /// (showScanComplete + 층 전환 분기 + V3 또는 좌표 경로). pose 변환은 runClientLocalize 에서 완료.
+    private func handleClientLocalizeSuccess(pose: Pose, scanId: String?, floorLevel: Int?) {
+        guard let lastARPose = capturedARPoses.last else {
+            delegate?.setLoading(false)
+            delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+        matchedARPose = lastARPose
+
+        localizedPose = pose
+        localizedFloorId = self.localizationBundle?.manifest.floorId ?? self.floorId
+        localizedFloorLevel = floorLevel ?? self.localizationBundle?.manifest.floorLevel
+        localizedScanId = scanId
+
+        delegate?.showScanComplete()
+
+        if isFloorTransitionRestart {
+            // 잔여 경로 재렌더링 (서버 pathfinding 호출 생략)
+            delegate?.showRouteCalculating(false)
+            delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
+            let steps = pendingRemainingSteps
+            pendingRemainingSteps = []
+            isFloorTransitionRestart = false
+            delegate?.setLoading(false)
+            drawPathNodes(steps: steps)
+        } else {
+            delegate?.showRouteCalculating(true)
+            let activeFloorId = self.localizationBundle?.manifest.floorId ?? self.floorId
+            if Self.useV3Pathfinding {
+                let translation = simd_float3(
+                    Float(pose.x ?? 0),
+                    Float(pose.y ?? 0),
+                    Float(pose.z ?? 0)
+                )
+                startV3Pathfinding(scanId: scanId,
+                                   startFloorLevel: floorLevel,
+                                   translation: translation)
+            } else {
+                startCoordinateRoute(pose: pose, floorId: activeFloorId)
             }
         }
     }
