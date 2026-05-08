@@ -34,6 +34,16 @@ class ARNavigationLogic {
     // V3 pathfinding 토글. 현재 useV3Localize 와 짝. legacy 분리가 필요해질 때만 false.
     static let useV3Pathfinding: Bool = true
 
+    // S3 — LightGlue 매처 토글. DEBUG 한정. useV3Localize 와 독립.
+    // 둘 다 true 면 V3 우선. 클라 단독 측위 검증은 useV3Localize=false + useLightGlueMatcher=true.
+    static let useLightGlueMatcher: Bool = {
+        #if DEBUG
+        return UserDefaults.standard.bool(forKey: "useLightGlueMatcher")
+        #else
+        return false
+        #endif
+    }()
+
     weak var delegate: ARNavigationLogicDelegate?
     weak var arSession: ARSession?
     weak var scene: SCNScene?
@@ -143,6 +153,18 @@ class ARNavigationLogic {
     )
     /// PnP 최소 매칭 점 수 (DLT 이론상 6, 실용은 더 많을수록 안정).
     private let pnpMinPairs: Int = 6
+
+    /// LightGlue 매칭 엔진 — 토글 ON 시에만 init. mlpackage 미배치/load 실패 시 nil → fallback.
+    private lazy var lightGlueMatcher: LightGlueMatcherEngine? = {
+        do {
+            let e = try LightGlueMatcherEngine()
+            print("[LightGlue] engine ready")
+            return e
+        } catch {
+            print("[LightGlue] init failed: \(error) — DescriptorMatcher fallback")
+            return nil
+        }
+    }()
 
     // MARK: - 외부 노출
 
@@ -318,6 +340,14 @@ class ARNavigationLogic {
         guard let bundle = localizationBundle, !keyframeDescriptorCache.isEmpty else { return }
         guard frame.descriptors.shape.count == 2,
               frame.descriptors.shape[0].intValue > 0 else { return }
+
+        // S3 분기 — LightGlue 토글 ON + 엔진 ready 일 때 LightGlue 매처 경로로.
+        // 실패(엔진 nil) 시 DescriptorMatcher fallback 으로 자연스럽게 떨어진다.
+        if Self.useLightGlueMatcher, let engine = lightGlueMatcher {
+            matchAgainstMockBundleLightGlue(frame, bundle: bundle, engine: engine)
+            return
+        }
+
         let queryCount = frame.descriptors.shape[0].intValue
 
         var perKfStats: [(idx: Int, stats: DescriptorMatcher.Stats, matches: [DescriptorMatcher.Match?])] = []
@@ -395,6 +425,111 @@ class ARNavigationLogic {
             bestKfIdx, pairs.count, pose.reprojectionError,
             t.x, t.y, t.z, yawDeg
         ))
+    }
+
+    // MARK: - S3 LightGlue 매칭 + 클라 단독 측위
+
+    /// LightGlue 엔진으로 모든 keyframe 매칭 → best 선정 + window 평균 console 로그.
+    /// DescriptorMatcher 경로(matchAgainstMockBundle)와 1:1 미러. PnP 는 본 메서드에서 호출하지 않는다
+    /// — 매 프레임 700ms 추론은 비현실적이므로 측위 트리거는 캡처 시점(runClientLocalize) 1회만.
+    private func matchAgainstMockBundleLightGlue(
+        _ frame: SuperPointFrame,
+        bundle: LocalizationBundle,
+        engine: LightGlueMatcherEngine
+    ) {
+        let queryCount = frame.keypoints.count
+        guard queryCount > 0 else { return }
+
+        var perKfStats: [(idx: Int, matched: Int, avgScore: Float)] = []
+        for (kfIdx, kf) in bundle.keyframes.enumerated() {
+            guard !kf.keypoints.isEmpty else { continue }
+            guard let matches = try? engine.match(
+                query: frame,
+                targetKeyframe: kf,
+                targetIntrinsics: bundle.manifest.intrinsics
+            ) else { continue }
+            let matched = matches.count
+            let avg: Float = matched > 0 ? matches.reduce(0.0) { $0 + $1.score } / Float(matched) : 0
+            perKfStats.append((idx: kfIdx, matched: matched, avgScore: avg))
+        }
+        guard !perKfStats.isEmpty else { return }
+        let best = perKfStats.max { $0.matched < $1.matched }!
+        let sample = MatchSample(
+            bestKfIdx: best.idx,
+            bestMatched: best.matched,
+            bestAvgScore: best.avgScore,
+            perKfMatched: perKfStats.map { $0.matched }
+        )
+        recordMatchSampleLightGlue(sample, queryCount: queryCount)
+    }
+
+    /// LightGlue 매칭 결과 + best keyframe → MatchedPointPair 추출 → RANSAC PnP 풀이.
+    /// 성공 시 (pose, kfIdx) 반환, 실패 시 nil. attemptPnP 패턴 복제 (반환형만 (PoseEstimate, Int)? 로 변경).
+    /// TODO(S3): PnP reprojectionError 임계 게이팅 — 실측 후 임계 확정.
+    private func attemptPnPLightGlue(
+        frame: SuperPointFrame,
+        bundle: LocalizationBundle,
+        bestKfIdx: Int,
+        lightGlueMatches: [LightGlueMatcherEngine.Match]
+    ) -> (pose: PoseEstimate, kfIdx: Int)? {
+        let bestKf = bundle.keyframes[bestKfIdx]
+        let pairs = MatchedPointExtractor.extract(
+            lightGlueMatches: lightGlueMatches,
+            queryKeypoints: frame.keypoints,
+            bundleKeyframe: bestKf
+        )
+        guard pairs.count >= pnpMinPairs else {
+            print("[LightGlue][PnP] kf=\(bestKfIdx) pairs=\(pairs.count) < min=\(pnpMinPairs) — skip")
+            return nil
+        }
+
+        // 매핑 시점 카메라 intrinsics (서버 manifest). attemptPnP 동일 패턴.
+        let m = bundle.manifest.intrinsics
+        let K = simd_float3x3(rows: [
+            SIMD3<Float>(Float(m.fx), 0, Float(m.cx)),
+            SIMD3<Float>(0, Float(m.fy), Float(m.cy)),
+            SIMD3<Float>(0, 0, 1),
+        ])
+
+        guard let pose = pnpSolver.solve(
+            objectPoints: pairs.map { $0.worldPoint },
+            imagePoints: pairs.map { $0.imagePoint },
+            intrinsics: K
+        ) else {
+            print("[LightGlue][PnP] kf=\(bestKfIdx) pairs=\(pairs.count) — PnP solve 실패")
+            return nil
+        }
+
+        let t = pose.translation
+        let yawDeg = atan2(pose.rotation[2, 0], pose.rotation[0, 0]) * 180.0 / .pi
+        print(String(
+            format: "[LightGlue][PnP] kf=%d pairs=%d reproj=%.1fpx t=(%.2f, %.2f, %.2f) yaw=%.0f°",
+            bestKfIdx, pairs.count, pose.reprojectionError,
+            t.x, t.y, t.z, yawDeg
+        ))
+        return (pose, bestKfIdx)
+    }
+
+    /// LightGlue 매칭 window 평균 로그 (recordMatchSample 동일 흐름, 로그 prefix 만 분리).
+    private func recordMatchSampleLightGlue(_ sample: MatchSample, queryCount: Int) {
+        matchSamples.append(sample)
+        guard matchSamples.count >= matchLogWindow else { return }
+        let n = matchSamples.count
+        let avgBestMatched = matchSamples.reduce(0) { $0 + $1.bestMatched } / n
+        let avgBestScore = matchSamples.reduce(0.0) { $0 + Double($1.bestAvgScore) } / Double(n)
+        let kfFreq = Dictionary(grouping: matchSamples, by: { $0.bestKfIdx }).mapValues { $0.count }
+        let mostBestKf = kfFreq.max { $0.value < $1.value }?.key ?? -1
+        let perKfCount = matchSamples.first?.perKfMatched.count ?? 0
+        var perKfAvg: [Int] = []
+        for i in 0..<perKfCount {
+            let s = matchSamples.reduce(0) { $0 + $1.perKfMatched[i] }
+            perKfAvg.append(s / n)
+        }
+        print(String(
+            format: "[LightGlue][avg×%d] best_kf=%d matched=%d/%d score=%.2f per_kf=%@",
+            n, mostBestKf, avgBestMatched, queryCount, avgBestScore, perKfAvg.description
+        ))
+        matchSamples.removeAll(keepingCapacity: true)
     }
 
     private func recordMatchSample(_ sample: MatchSample, queryCount: Int) {
