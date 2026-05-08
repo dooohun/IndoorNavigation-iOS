@@ -1,6 +1,65 @@
-# Phase 8 진행 상태 (2026-05-08 박제)
+# Phase 8 진행 상태 (2026-05-08 박제 / S3 갱신)
 
 후속 세션은 본 문서로 부터 시작하면 됨. 현재까지 작업 누적 + 결정 분기 + 추천 진로 정리.
+
+## S3 — LightGlue iOS 통합 + 클라 단독 측위 흐름 (✅ 구현 완료)
+
+C 트랙 LightGlue Core ML 변환 (S1) + 단위 테스트 (S2) 완료 후 S3 에서 ARNavigationLogic 통합.
+
+### 누적 커밋
+
+```
+182c560 feat(phase8-s3): 클라 단독 측위 트리거 + V3-style 후속 흐름     ← S3 #3
+9ca3014 feat(phase8-s3): LightGlue 매처 토글 + 매 프레임 분기            ← S3 #2
+5a366e0 feat(phase8-s3): MatchedPointExtractor LightGlue 어댑터 추가     ← S3 #1
+```
+
+### 변경 사항
+
+- `MatchedPointPair.swift` — LightGlue 어댑터 오버로드 추가 (DescriptorMatcher 어댑터 보존)
+- `ARNavigationLogic.swift`
+  - `useLightGlueMatcher` static let (DEBUG 한정) — `useV3Localize` 와 독립 토글
+  - `lightGlueMatcher` lazy property — mlpackage 미배치 시 nil → fallback 안전망
+  - `matchAgainstMockBundle` 진입에 분기 추가 (LightGlue 경로 별도 호출)
+  - `matchAgainstMockBundleLightGlue` / `recordMatchSampleLightGlue` 신규 (DescriptorMatcher 1:1 미러)
+  - `attemptPnPLightGlue` 신규 (반환형 (PoseEstimate, Int)? — 클라 측위 인계용)
+  - `sendToServer` 분기에 `runClientLocalize` 트랙 추가
+  - `runClientLocalize` 신규 — SP 추출 → 전체 keyframe LightGlue 매칭 → best → PnP → Pose 어댑터
+  - `handleClientLocalizeSuccess` 신규 — handleLocalizeV3Success 와 동일 후속 흐름
+- `MatchedPointExtractorTests.swift` — LightGlue 케이스 3개 추가 (compact / nil world / index bounds)
+
+### 결정사항
+
+- **매처 통합 = A (분기 + 어댑터)** — 안전망. DescriptorMatcher fallback 보존
+- **측위 트리거 = Y (캡처 시점 1회)** — 매 프레임 700ms 추론 비현실. ARKit 이 1회 측위 후 추적
+- `useV3Localize` 별도 토글 유지 (디버그 편의)
+- 후속 흐름은 `handleClientLocalizeSuccess` 신규 (V3 패턴 복제)
+
+### 테스트
+
+- `MatchedPointExtractorTests` 8/8 PASS (3 신규 + 5 기존)
+- 빌드 통과 (warning 만; 기존 코드 경고 — CLAPACK deprecation, Pods)
+
+### TODO 마커 (S3 후속 작업)
+
+- TODO(S3): 5장 캡처 중 1장만 사용 → 5장 평균 또는 inlier 최대 선택 향후 개선 (`runClientLocalize`)
+- TODO(S3): floorId/floorLevel 결정 — bundle.manifest 의존 (`runClientLocalize`)
+- TODO(S3): PnP reprojectionError 임계 게이팅 — 실측 후 임계 확정 (`attemptPnPLightGlue`)
+- TODO(S3): best keyframe 선택 — globalDescriptor cosine prefilter (NetworkBundle 100+ keyframe 시 필수)
+- TODO(S3): Pose 회전 어댑터 — RansacPnPSolver pose.rotation 좌표계 방향 확인 (`runClientLocalize`)
+
+### 사용법
+
+```
+useV3Localize = false (코드)
++ defaults write <bundle> useLightGlueMatcher -bool YES
+```
+
+→ 캡처 5장 후 클라 단독 측위 (서버 호출 없이) → 매칭/PnP 결과로 경로 렌더링.
+
+`useV3Localize = true` 면 V3 우선 (S3 트랙은 활성화 안 됨 — 안전).
+
+---
 
 ---
 
