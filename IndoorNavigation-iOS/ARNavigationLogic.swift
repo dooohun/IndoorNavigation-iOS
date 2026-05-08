@@ -906,19 +906,27 @@ class ARNavigationLogic {
             delegate?.setLoading(false)
             drawPathNodes(steps: steps)
         } else {
-            // pathfinding 제거: POI displayPoint(self.goal) 좌표로 단순 목적지 핀만 표시.
+            // pathfinding 제거: POI displayPoint(self.goal) 좌표로 단순 직선 안내.
+            // 사용자 위치 + 목적지 = step 2개 — drawPathNodes 의 count>=2 가드 통과.
             // 추적은 추후 클라 LightGlue cadence 로 매 주기 절대 측위 (별도 트랙).
             delegate?.showRouteCalculating(false)
             delegate?.setLoading(false)
             delegate?.updateStatus("\(destinationName) 방향으로 이동하세요.", color: .white)
-            let destStep = PathStep(
+            let floorLevel = response.pose.floorLevel ?? self.localizedFloorLevel
+            let userStep = PathStep(
                 stepNumber: 0,
-                floorLevel: response.pose.floorLevel ?? self.localizedFloorLevel,
+                floorLevel: floorLevel,
+                position: Position(x: pose.x ?? 0, y: pose.y ?? 0, z: pose.z),
+                instruction: "현재 위치"
+            )
+            let destStep = PathStep(
+                stepNumber: 1,
+                floorLevel: floorLevel,
                 position: Position(x: self.goal.x, y: self.goal.y, z: self.goal.z ?? 0),
                 instruction: destinationName
             )
-            drawPathNodes(steps: [destStep])
-            print("[Direct] 목적지 핀 표시: name=\(destinationName), goal=(\(self.goal.x), \(self.goal.y), \(self.goal.z ?? 0))")
+            drawPathNodes(steps: [userStep, destStep])
+            print("[Direct] 직선 안내: user=(\(pose.x ?? 0), \(pose.y ?? 0), \(pose.z ?? 0)) → goal=(\(self.goal.x), \(self.goal.y), \(self.goal.z ?? 0))")
         }
     }
 
