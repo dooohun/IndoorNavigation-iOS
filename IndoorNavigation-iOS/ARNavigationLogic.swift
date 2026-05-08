@@ -120,10 +120,19 @@ class ARNavigationLogic {
     }
     private var matchSamples: [MatchSample] = []
     private let matchLogWindow = 5
-    /// cosine similarity threshold (정규화 vector 기준 0.7 = 매우 유사).
+    /// cosine similarity 절대 임계 (정규화 vector 기준 0.7 = 매우 유사).
     private let matchScoreThreshold: Float = 0.7
-    /// PnP solver. best keyframe 의 매칭으로 6DoF pose 추정.
-    private let pnpSolver: PnPSolving = DLTPnPSolver()
+    /// Lowe's ratio test — top-1 / top-2 가 본 값보다 커야 매칭 인정.
+    /// 1.3 = best 가 second 보다 30% 이상 우월해야. false positive 강력 제거.
+    private let matchRatio: Float = 1.3
+    /// PnP solver — RANSAC 으로 outlier 매칭에 면역. iter 100, inlier 임계 20px (intrinsics
+    /// 불일치 미세 reproj 차이 흡수 — 단계 5 클라 K 정확화 전 잠정), 최소 inlier 8.
+    /// 단순 DLT 단독은 outlier 1~2 개에도 reproj 폭주하므로 실측에서 무용지물 (관찰됨).
+    private let pnpSolver: PnPSolving = RansacPnPSolver(
+        iterations: 100,
+        inlierThresholdPx: 20.0,
+        minInliers: 8
+    )
     /// PnP 최소 매칭 점 수 (DLT 이론상 6, 실용은 더 많을수록 안정).
     private let pnpMinPairs: Int = 6
 
@@ -252,7 +261,8 @@ class ARNavigationLogic {
                 query: frame.descriptors,
                 referenceBytes: refBytes,
                 referenceCount: n,
-                threshold: matchScoreThreshold
+                threshold: matchScoreThreshold,
+                ratio: matchRatio
             )
             let stats = DescriptorMatcher.stats(matches: matches, queryCount: queryCount)
             perKfStats.append((idx: kfIdx, stats: stats, matches: matches))

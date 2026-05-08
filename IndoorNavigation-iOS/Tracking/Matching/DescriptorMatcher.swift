@@ -36,20 +36,23 @@ final class DescriptorMatcher {
     }
 
     /// query (Q, 256) 와 reference (R, 256) 의 cosine similarity 계산.
-    /// 각 query 의 top-1 reference 매칭 + 점수 임계 적용 결과를 반환.
+    /// 각 query 의 top-1 reference 매칭 + (선택) Lowe's ratio test 적용 결과 반환.
     ///
     /// - Parameters:
-    ///   - query: 클라 SuperPoint descriptors (Q × 256 FP16). DescriptorSampler 산출물.
+    ///   - query: 클라 SuperPoint descriptors (Q × 256 FP16).
     ///   - referenceBytes: bundle keyframe descriptors raw bytes (R × 256 FP16).
-    ///       BundleKeyframe.descriptorsB64 → Data(base64Encoded:) 로 디코딩한 결과.
     ///   - referenceCount: R (keypoint 수).
-    ///   - threshold: top-1 점수 임계 (0..1). 미달 시 매칭 X.
-    /// - Returns: 각 query 별 best match (threshold 미달이면 nil) 배열.
+    ///   - threshold: top-1 점수 절대 임계 (0..1). 미달 시 매칭 X.
+    ///   - ratio: Lowe's ratio test — top-1 / top-2 가 본 값보다 커야 매칭 인정.
+    ///       1.0 = 효과 없음 (모든 best 통과). 1.3 = best 가 second 보다 30% 이상
+    ///       우월해야 — false positive 강력 제거. 1.5+ 더 엄격.
+    /// - Returns: 각 query 별 best match (실패 시 nil) 배열.
     static func matchTop1(
         query: MLMultiArray,
         referenceBytes: Data,
         referenceCount: Int,
-        threshold: Float = 0.7
+        threshold: Float = 0.7,
+        ratio: Float = 1.0
     ) -> [Match?] {
         let dim = 256
         guard query.shape.count == 2,
@@ -104,18 +107,34 @@ final class DescriptorMatcher {
             }
         }
 
-        // 3. 각 query row 의 max 위치 + 점수
+        // 3. 각 query row 의 top-1 + top-2 위치/점수 (ratio test 위해 top-2 필요)
         var matches: [Match?] = []
         matches.reserveCapacity(q)
         sim.withUnsafeBufferPointer { simPtr in
+            let base = simPtr.baseAddress!
             for qi in 0..<q {
                 let rowBase = qi * r
-                var maxIdx: vDSP_Length = 0
-                var maxVal: Float = 0
-                vDSP_maxvi(simPtr.baseAddress!.advanced(by: rowBase), 1,
-                           &maxVal, &maxIdx, vDSP_Length(r))
-                if maxVal >= threshold {
-                    matches.append(Match(queryIdx: qi, refIdx: Int(maxIdx), score: maxVal))
+                var max1: Float = -.infinity
+                var max2: Float = -.infinity
+                var maxIdx1: Int = -1
+                for ri in 0..<r {
+                    let s = base[rowBase + ri]
+                    if s > max1 {
+                        max2 = max1
+                        max1 = s
+                        maxIdx1 = ri
+                    } else if s > max2 {
+                        max2 = s
+                    }
+                }
+                guard max1 >= threshold, maxIdx1 >= 0 else {
+                    matches.append(nil)
+                    continue
+                }
+                // Lowe's ratio test: top-1 / top-2 > ratio (top-2 ~ 0 이면 무조건 통과)
+                let ratioOK: Bool = (max2 <= 1e-6) || (max1 / max2 >= ratio)
+                if ratioOK {
+                    matches.append(Match(queryIdx: qi, refIdx: maxIdx1, score: max1))
                 } else {
                     matches.append(nil)
                 }
