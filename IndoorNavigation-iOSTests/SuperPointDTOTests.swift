@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import simd
 @testable import IndoorNavigation_iOS
 
 /// Phase 8 B1 — SuperPointDTO 의 인코딩/디코딩 단위 테스트.
@@ -296,5 +297,150 @@ struct SuperPointDTOTests {
         #expect(decoded.keyframes[0].kfId == "kf-x")
         #expect(decoded.model.descriptorDim == 256)
         #expect(decoded.stats.queryCount == 0)
+    }
+
+    // MARK: - 8. LocalizeV3Pose helpers — quaternion only
+
+    @Test("LocalizeV3Pose helpers: tx/ty/tz + qx/qy/qz/qw 만 → toMatrix4x4 마지막 열 = translation")
+    func localizeV3Pose_QuaternionOnly_returnsMatrix() throws {
+        let pose = LocalizeV3Pose(
+            tx: 1.5, ty: 2.5, tz: 3.5,
+            qx: 0.0, qy: 0.0, qz: 0.0, qw: 1.0,
+            matrix: nil
+        )
+        let m = try #require(pose.toMatrix4x4())
+        // 마지막 열 = translation (column-major simd_float4x4)
+        #expect(abs(m.columns.3.x - 1.5) < 1e-5)
+        #expect(abs(m.columns.3.y - 2.5) < 1e-5)
+        #expect(abs(m.columns.3.z - 3.5) < 1e-5)
+        #expect(abs(m.columns.3.w - 1.0) < 1e-5)
+        // identity quaternion → 좌측 3×3 = identity
+        #expect(abs(m.columns.0.x - 1.0) < 1e-5)
+        #expect(abs(m.columns.1.y - 1.0) < 1e-5)
+        #expect(abs(m.columns.2.z - 1.0) < 1e-5)
+
+        let t = try #require(pose.translation)
+        #expect(t.x == 1.5)
+        #expect(t.y == 2.5)
+        #expect(t.z == 3.5)
+
+        let q = try #require(pose.rotationQuaternion)
+        #expect(abs(q.real - 1.0) < 1e-5)
+    }
+
+    // MARK: - 9. LocalizeV3Pose helpers — matrix only
+
+    @Test("LocalizeV3Pose helpers: matrix 만 → simd_float4x4 element-wise 일치")
+    func localizeV3Pose_MatrixOnly_returnsMatrix() throws {
+        let mat: [[Double]] = [
+            [1.0, 0.0, 0.0, 7.0],
+            [0.0, 1.0, 0.0, 8.0],
+            [0.0, 0.0, 1.0, 9.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+        let pose = LocalizeV3Pose(
+            tx: nil, ty: nil, tz: nil,
+            qx: nil, qy: nil, qz: nil, qw: nil,
+            matrix: mat
+        )
+        let m = try #require(pose.toMatrix4x4())
+        // simd_float4x4(rows:) 는 row-major 입력 → column-major 저장
+        // 입력 row r, col c → m.columns[c][r]
+        for r in 0..<4 {
+            for c in 0..<4 {
+                let expected = Float(mat[r][c])
+                let column: SIMD4<Float>
+                switch c {
+                case 0: column = m.columns.0
+                case 1: column = m.columns.1
+                case 2: column = m.columns.2
+                default: column = m.columns.3
+                }
+                let actual: Float
+                switch r {
+                case 0: actual = column.x
+                case 1: actual = column.y
+                case 2: actual = column.z
+                default: actual = column.w
+                }
+                #expect(abs(actual - expected) < 1e-5)
+            }
+        }
+
+        let t = try #require(pose.translation)
+        #expect(t.x == 7.0)
+        #expect(t.y == 8.0)
+        #expect(t.z == 9.0)
+    }
+
+    // MARK: - 10. LocalizeV3Pose helpers — both nil
+
+    @Test("LocalizeV3Pose helpers: 모두 nil → toMatrix4x4/translation/rotationQuaternion nil")
+    func localizeV3Pose_BothNil_returnsNil() throws {
+        let pose = LocalizeV3Pose(
+            tx: nil, ty: nil, tz: nil,
+            qx: nil, qy: nil, qz: nil, qw: nil,
+            matrix: nil
+        )
+        #expect(pose.toMatrix4x4() == nil)
+        #expect(pose.translation == nil)
+        #expect(pose.rotationQuaternion == nil)
+    }
+
+    // MARK: - 11. LocalizeV3Pose helpers — quaternion priority if matrix nil
+
+    @Test("LocalizeV3Pose helpers: matrix nil + quat 채워짐 → 정상 변환")
+    func localizeV3Pose_QuaternionPriorityIfMatrixNil() throws {
+        // 90° yaw (Y axis) 회전: half-angle = 45°
+        let halfAngle: Double = .pi / 4
+        let pose = LocalizeV3Pose(
+            tx: 10.0, ty: 0.0, tz: -5.0,
+            qx: 0.0, qy: sin(halfAngle), qz: 0.0, qw: cos(halfAngle),
+            matrix: nil
+        )
+        let m = try #require(pose.toMatrix4x4())
+        // translation 정상 적용
+        #expect(abs(m.columns.3.x - 10.0) < 1e-5)
+        #expect(abs(m.columns.3.z - (-5.0)) < 1e-5)
+        // 90° yaw 회전 후 R[0,0] ≈ 0
+        #expect(abs(m.columns.0.x) < 1e-4)
+
+        let q = try #require(pose.rotationQuaternion)
+        #expect(abs(q.imag.y - Float(sin(halfAngle))) < 1e-5)
+        #expect(abs(q.real - Float(cos(halfAngle))) < 1e-5)
+    }
+
+    // MARK: - 12. LocalizeV3Response — 잠정 픽스처 디코딩 (서버답 대기)
+
+    // TODO(서버답): 실제 응답 형식 받아오면 본 테스트 의 픽스처 갱신
+    @Test("LocalizeV3Response: 잠정 픽스처 (quaternion form) 디코딩 + helpers 통합")
+    func localizeV3Response_decodeFromJSON_quaternionForm() throws {
+        let json = """
+        {
+          "pose": {
+            "tx": 12.0, "ty": 1.5, "tz": -3.0,
+            "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0
+          },
+          "confidence": 0.92,
+          "mapId": "scan-uuid-fixture",
+          "numMatches": 200,
+          "matchedImageIndex": 2,
+          "floorId": "floor-uuid-fixture",
+          "floorLevel": 5
+        }
+        """.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(LocalizeV3Response.self, from: json)
+        #expect(response.confidence == 0.92)
+        #expect(response.mapId == "scan-uuid-fixture")
+        #expect(response.matchedImageIndex == 2)
+        #expect(response.floorLevel == 5)
+
+        // helpers 가 디코딩 결과로부터 정상 동작하는지
+        let t = try #require(response.pose.translation)
+        #expect(t.x == 12.0)
+        #expect(t.z == -3.0)
+        let m = try #require(response.pose.toMatrix4x4())
+        #expect(abs(m.columns.3.y - 1.5) < 1e-5)
     }
 }
