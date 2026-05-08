@@ -487,11 +487,15 @@ class ARNavigationLogic {
         lightGlueMatches: [LightGlueMatcherEngine.Match]
     ) -> (pose: PoseEstimate, kfIdx: Int)? {
         let bestKf = bundle.keyframes[bestKfIdx]
+        // 단계별 진단: raw matches → NaN/bounds filter → final pairs
+        let rawCount = lightGlueMatches.count
+        let kfWorld3dValid = bestKf.world3d.compactMap { $0 }.count
         let pairs = MatchedPointExtractor.extract(
             lightGlueMatches: lightGlueMatches,
             queryKeypoints: frame.keypoints,
             bundleKeyframe: bestKf
         )
+        print("[LightGlue][진단] kf=\(bestKfIdx) raw_matches=\(rawCount), kf_world3d_valid=\(kfWorld3dValid)/\(bestKf.world3d.count), final_pairs=\(pairs.count)")
         guard pairs.count >= pnpMinPairs else {
             print("[LightGlue][PnP] kf=\(bestKfIdx) pairs=\(pairs.count) < min=\(pnpMinPairs) — skip")
             return nil
