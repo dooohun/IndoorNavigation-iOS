@@ -44,4 +44,34 @@ enum MatchedPointExtractor {
         }
         return pairs
     }
+
+    /// LightGlue 매처 결과 어댑터. `LightGlueMatcherEngine.match(...)` 가 nil 없는 compact
+    /// `[Match]` 를 반환하므로 DescriptorMatcher 어댑터(option array)와 별도 오버로드.
+    /// nil world_3d / 인덱스 범위 가드는 동일하게 적용.
+    static func extract(
+        lightGlueMatches: [LightGlueMatcherEngine.Match],
+        queryKeypoints: [SIMD3<Float>],
+        bundleKeyframe: BundleKeyframe
+    ) -> [MatchedPointPair] {
+        var pairs: [MatchedPointPair] = []
+        pairs.reserveCapacity(lightGlueMatches.count)
+        let kfWorld = bundleKeyframe.world3d
+
+        for m in lightGlueMatches {
+            let qi = m.queryIdx
+            guard qi >= 0, qi < queryKeypoints.count,
+                  m.refIdx >= 0, m.refIdx < kfWorld.count,
+                  let w = kfWorld[m.refIdx] else { continue }
+            guard w.count == 3 else { continue }
+
+            let kp = queryKeypoints[qi]
+            // SuperPointFrame.keypoints 는 SIMD3<Float>(u, v, score). PnP 에는 (u, v) 만 사용.
+            pairs.append(MatchedPointPair(
+                imagePoint: SIMD2<Float>(kp.x, kp.y),
+                worldPoint: SIMD3<Float>(w[0], w[1], w[2]),
+                matchScore: m.score
+            ))
+        }
+        return pairs
+    }
 }
