@@ -560,6 +560,61 @@ class NetworkManager {
         }.resume()
     }
 
+    // MARK: - 9. Feature Points Lookup
+
+    /// `POST /api/v1/buildings/{buildingId}/feature-points/lookup` — keyframe 청크 조회.
+    /// 첫 호출 시 서버 cache build 가 30~60초 걸릴 수 있어 timeout 90s.
+    /// 응답: `LookupResponse` (keyframes 페이로드는 base64 — 디코드는 호출 측 책임).
+    func featurePointsLookup(buildingId: String,
+                             request requestDto: LookupRequest,
+                             completion: @escaping (Result<LookupResponse, Error>) -> Void) {
+        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/feature-points/lookup") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // TODO(서버답): 첫 호출 cache build 30s~1분 — timeout 90s 설정. 진행률 polling endpoint 확인
+        request.timeoutInterval = 90
+
+        do {
+            let bodyData = try JSONEncoder().encode(requestDto)
+            request.httpBody = bodyData
+            log("REQ", "POST", url.absoluteString)
+            log("REQ", "바디:", String(data: bodyData, encoding: .utf8) ?? "")
+        } catch {
+            completion(.failure(error))
+            return
+        }
+
+        session.dataTask(with: request) { data, response, error in
+            if let error = error {
+                log("ERR", "네트워크 오류:", error)
+                completion(.failure(Self.networkError(error)))
+                return
+            }
+            let http = response as? HTTPURLResponse
+            let statusCode = http?.statusCode ?? 0
+            let responseBody = data.flatMap { String(data: $0, encoding: .utf8) } ?? "(빈 응답)"
+
+            log("RES", "HTTP \(statusCode)")
+            // 페이로드는 base64 — 너무 길어 본문 전체 로깅은 생략
+
+            let data = data ?? Data()
+            guard (200..<300).contains(statusCode) else {
+                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
+                return
+            }
+            do {
+                let result = try JSONDecoder().decode(LookupResponse.self, from: data)
+                // TODO(서버답): keyframes byteSize 클 때 (~64MB) 스트리밍 디코드 검토
+                log("RES", "keyframes \(result.keyframes.count)개, 총 \(result.stats.byteSize) bytes")
+                completion(.success(result))
+            } catch {
+                log("ERR", "파싱 실패:", error)
+                completion(.failure(Self.makeError("응답 파싱 실패\n\(responseBody)")))
+            }
+        }.resume()
+    }
+
     // MARK: - 에러 헬퍼
 
     private static func networkError(_ error: Error) -> Error {
