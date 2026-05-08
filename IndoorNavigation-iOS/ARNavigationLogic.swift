@@ -237,6 +237,24 @@ class ARNavigationLogic {
             orientation: orientation
         )
 
+        #if DEBUG
+        if let debug = superPointDebug {
+            debug.frameDumper.consumeIfRequested(
+                frame: result,
+                arPose: frame.camera.transform
+            ) { res in
+                switch res {
+                case .success(let url):
+                    print("[Dumper] ok: \(url.path)")
+                    debug.notifyDumpResult(success: true)
+                case .failure(let err):
+                    print("[Dumper] fail: \(err)")
+                    debug.notifyDumpResult(success: false)
+                }
+            }
+        }
+        #endif
+
         matchAgainstMockBundle(result)
 
         #if DEBUG
