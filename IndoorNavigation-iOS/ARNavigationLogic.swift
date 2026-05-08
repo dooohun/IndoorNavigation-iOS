@@ -177,6 +177,21 @@ class ARNavigationLogic {
     /// 도착 임계 (m). TODO(A1).
     private let trackingArrivalThresholdM: Float = 1.0
 
+    // Phase 8 keyframe 단계 추적 (A 트랙 재설계)
+    /// 진행 방향 정렬된 후보 — 인덱스 0 이 시작쪽(목적지로부터 먼 점), 마지막 인덱스가 목적지쪽(가장 가까운 점).
+    /// tick 마다 best 까지 prefix drop — "지워나감" 모델.
+    private var trackingKeyframeCandidates: [BundleKeyframe] = []
+    /// 단일 흰색 원형 바닥 마커. 다음 keyframe 위치를 표시.
+    private var checkpointNode: SCNNode?
+    /// 직전 tick best — 변화 추적 로그용.
+    private var lastBestKeyframeIndex: Int?
+    /// fetchBundleForPath 시점에 보관한 query 좌표열. 새 lookup 트리거 시 다음 좌표 결정용.
+    private var pathQueryPoints: [NetworkBundleProvider.QueryPoint] = []
+    /// 다음 query 좌표 커서. triggerNewLookup 호출 시 +1.
+    private var consumedQueryPointIndex: Int = 0
+    /// trial counter — 화면 더블탭으로 측위 재시작 시 +1, 로그 prefix 용.
+    private var trialNumber: Int = 0
+
     /// LightGlue 매칭 엔진 — 토글 ON 시에만 init. mlpackage 미배치/load 실패 시 nil → fallback.
     private lazy var lightGlueMatcher: LightGlueMatcherEngine? = {
         do {
@@ -556,6 +571,61 @@ class ARNavigationLogic {
 
     // MARK: - 다중 프레임 캡처 후 Localize
 
+    /// 새 trial(측위) 시작 시 잔여 상태/노드/타이머 일괄 정리. idempotent — 여러 번 호출해도 안전.
+    /// 화면 더블탭으로 측위 재시작 시에도 재사용.
+    private func resetForNewTrial() {
+        // SCNNode 제거
+        pathRootNode?.removeFromParentNode()
+        pathRootNode = nil
+        checkpointNode?.removeFromParentNode()
+        checkpointNode = nil
+        destinationPinNode = nil
+        allChevronNodes.removeAll()
+
+        // timer 정지
+        pathProgressTimer?.invalidate()
+        pathProgressTimer = nil
+        arrivalCheckTimer?.invalidate()
+        arrivalCheckTimer = nil
+        trackingTimer?.invalidate()
+        trackingTimer = nil
+        captureTimer?.invalidate()
+        captureTimer = nil
+
+        // 상태 클리어
+        allSteps = []
+        allARPoints = []
+        smoothedPoints = []
+        simplifiedPointCount = 0
+        currentTargetWaypointIndex = 0
+        matchedARPose = nil
+        localizedPose = nil
+        localizedScanId = nil
+        destinationARPosition = nil
+        lastStartSnapDistance = nil
+        hasNotifiedArrival = false
+        isTrackingTickInFlight = false
+        trackingKeyframeCandidates = []
+        lastBestKeyframeIndex = nil
+        pathQueryPoints = []
+        consumedQueryPointIndex = 0
+
+        // bundle 클리어
+        localizationBundle = nil
+        keyframeDescriptorCache = []
+        networkBundleProvider = nil
+
+        // capture 버퍼 클리어
+        capturedImages = []
+        capturedARPoses = []
+
+        // GuidanceDirector 도 reset (Phase 5 dead path 지만 호출 부수효과 없게)
+        guidanceDirector.reset()
+
+        // mock bundle fallback 재로드 — 추적용 NetworkBundle 은 V3 응답 후 갱신.
+        loadMockBundleFallback()
+    }
+
     func startLocalizationFlow() {
         if Self.useMockData {
             runMockFlow()
@@ -567,34 +637,10 @@ class ARNavigationLogic {
             return
         }
 
-        // 직전 시도 잔여 상태 정리 (재진입 안전성)
-        pathRootNode?.removeFromParentNode()
-        pathRootNode = nil
-        allChevronNodes.removeAll()
-        destinationPinNode = nil
-        allSteps = []
-        allARPoints = []
-        smoothedPoints = []
-        simplifiedPointCount = 0
-        currentTargetWaypointIndex = 0
-        matchedARPose = nil
-        localizedPose = nil
-        localizedScanId = nil
-        destinationARPosition = nil
-        lastStartSnapDistance = nil
+        trialNumber += 1
+        print("[Trial #\(trialNumber)] startLocalizationFlow")
+        resetForNewTrial()
 
-        pathProgressTimer?.invalidate()
-        pathProgressTimer = nil
-        guidanceDirector.reset()
-        arrivalCheckTimer?.invalidate()
-        arrivalCheckTimer = nil
-        hasNotifiedArrival = false
-        trackingTimer?.invalidate()
-        trackingTimer = nil
-        isTrackingTickInFlight = false
-
-        capturedImages = []
-        capturedARPoses = []
         delegate?.setLocateButtonVisible(false)
         delegate?.setLoading(true)
         delegate?.setScanningOverlay(visible: true)
@@ -833,13 +879,13 @@ class ARNavigationLogic {
 
         if isFloorTransitionRestart {
             // 잔여 경로 재렌더링 (서버 pathfinding 호출 생략)
+            // TODO(Phase 3): Phase 8 keyframe 단계 추적 모델에서 층 전환 잔여 경로 재시작 미지원.
+            //                drawPathNodes 폐기 — legacy dead path.
             delegate?.showRouteCalculating(false)
             delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
-            let steps = pendingRemainingSteps
             pendingRemainingSteps = []
             isFloorTransitionRestart = false
             delegate?.setLoading(false)
-            drawPathNodes(steps: steps)
         } else {
             delegate?.showRouteCalculating(true)
             let activeFloorId = response.floorId ?? self.floorId
@@ -894,36 +940,19 @@ class ARNavigationLogic {
 
         if isFloorTransitionRestart {
             // 잔여 경로 재렌더링 (서버 pathfinding 호출 생략)
+            // TODO(Phase 3): Phase 8 keyframe 단계 추적 모델에서 층 전환 잔여 경로 재시작 미지원.
+            //                drawPathNodes 폐기 — 추후 trackingKeyframeCandidates 재구성 흐름으로 대체.
             delegate?.showRouteCalculating(false)
             delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
-            let steps = pendingRemainingSteps
             pendingRemainingSteps = []
             isFloorTransitionRestart = false
             delegate?.setLoading(false)
-            drawPathNodes(steps: steps)
         } else {
-            // 1) 직선 안내 표시 (즉시) — 사용자 위치 + 목적지
+            // 직선 안내 폐기 — Phase 8 keyframe 단계 추적 모델 (checkpoint 1개 + tick drop) 로 대체.
             delegate?.showRouteCalculating(false)
             delegate?.setLoading(false)
             delegate?.updateStatus("\(destinationName) 방향으로 이동하세요.", color: .white)
-            let floorLevel = response.pose.floorLevel ?? self.localizedFloorLevel
-            let userStep = PathStep(
-                stepNumber: 0,
-                floorLevel: floorLevel,
-                position: Position(x: pose.x ?? 0, y: pose.y ?? 0, z: pose.z ?? 0),
-                instruction: "현재 위치"
-            )
-            let destStep = PathStep(
-                stepNumber: 1,
-                floorLevel: floorLevel,
-                position: Position(x: self.goal.x, y: self.goal.y, z: self.goal.z ?? 0),
-                instruction: destinationName
-            )
-            drawPathNodes(steps: [userStep, destStep])
-            print("[Direct] 직선 안내: user=(\(pose.x ?? 0), \(pose.y ?? 0), \(pose.z ?? 0)) → goal=(\(self.goal.x), \(self.goal.y), \(self.goal.z ?? 0))")
-
-            // 2) pathfinding 호출 (데이터용) — 응답 steps 좌표를 lookup multi-query 로 활용.
-            //    응답 받으면 startV3Pathfinding 안에서 NetworkBundleProvider multi-query 호출.
+            delegate?.setHUDVisible(true)
             if Self.useLightGlueMatcher {
                 startV3Pathfinding(scanId: response.mapId,
                                    startFloorLevel: response.pose.floorLevel,
@@ -952,16 +981,17 @@ class ARNavigationLogic {
 
         if isFloorTransitionRestart {
             // 잔여 경로 재렌더링 (서버 pathfinding 호출 생략)
+            // TODO(Phase 3): Phase 8 keyframe 단계 추적 모델에서 층 전환 잔여 경로 재시작 미지원.
+            //                drawPathNodes 폐기 — dead path.
             delegate?.showRouteCalculating(false)
             delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
-            let steps = pendingRemainingSteps
             pendingRemainingSteps = []
             isFloorTransitionRestart = false
             delegate?.setLoading(false)
-            drawPathNodes(steps: steps)
         } else {
             delegate?.showRouteCalculating(true)
             let activeFloorId = self.localizationBundle?.manifest.floorId ?? self.floorId
+            _ = activeFloorId  // legacy dead path 의 startCoordinateRoute 인자였음 (TODO 박제)
             if Self.useV3Pathfinding {
                 let translation = simd_float3(
                     Float(pose.x ?? 0),
@@ -972,7 +1002,8 @@ class ARNavigationLogic {
                                    startFloorLevel: floorLevel,
                                    translation: translation)
             } else {
-                startCoordinateRoute(pose: pose, floorId: activeFloorId)
+                // legacy 클라 단독 측위 폴백 — Phase 8 추적 모델에선 dead path.
+                // TODO(S3+): useV3Pathfinding=false 분기 자체 폐기 검토.
             }
         }
     }
@@ -980,33 +1011,14 @@ class ARNavigationLogic {
     // MARK: - 경로 탐색
 
     private func startCoordinateRoute(pose: Pose, floorId: String) {
-        let request = FloorCoordinateRouteRequest(
-            start: Coordinate(x: pose.x ?? 0.0, y: pose.y ?? 0.0, z: pose.z),
-            goal: self.goal
-        )
-
-        NetworkManager.shared.findRouteByCoordinates(buildingId: buildingId, floorId: floorId, request: request) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.delegate?.setLoading(false)
-                self.delegate?.showRouteCalculating(false)
-                switch result {
-                case .success(let response):
-                    self.lastStartSnapDistance = response.snapInfo?.startSnapDistanceM
-                    let steps = self.adaptRouteResponseToSteps(response: response)
-                    if !steps.isEmpty {
-                        self.delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
-                        self.drawPathNodes(steps: steps)
-                    } else {
-                        self.delegate?.showScanFailed(message: "경로를 찾지 못했어요.\n다시 한번 스캔해 주세요.")
-                        self.delegate?.setLocateButtonVisible(true)
-                    }
-                case .failure:
-                    self.delegate?.showScanFailed(message: "경로 탐색에 실패했어요.\n다시 한번 스캔해 주세요.")
-                    self.delegate?.setLocateButtonVisible(true)
-                }
-            }
-        }
+        // TODO(Phase 8): legacy 좌표 기반 경로 탐색 — Phase 8 keyframe 단계 추적 모델에서 dead path.
+        //                drawPathNodes 폐기로 본 함수 호출 결과 활용처 없음.
+        //                handleLocalizeSuccess (legacy SLAMv3) 분기에서만 호출되므로 useV3Localize=true 시 도달 불가.
+        //                NetworkManager.shared.findRouteByCoordinates 등 함수 본체는 보존 (재활용 가능).
+        _ = pose
+        _ = floorId
+        delegate?.setLoading(false)
+        delegate?.showRouteCalculating(false)
     }
 
     private func adaptRouteResponseToSteps(response: FloorCoordinateRouteResponse) -> [PathStep] {
@@ -1101,6 +1113,10 @@ class ARNavigationLogic {
                 z: Double(fallbackTranslation.z)
             ))
         }
+        // 새 lookup 트리거 시 다음 query 좌표 결정용 — pathfinding 응답 그대로 보관.
+        self.pathQueryPoints = queryPoints
+        self.consumedQueryPointIndex = 0
+
         // 서버 cap: queries 64, maxKeyframesPerQuery 16, dedup 후 128. radius 5m 권장 (패턴 A).
         let provider = NetworkBundleProvider(
             buildingId: self.buildingId,
@@ -1119,439 +1135,40 @@ class ARNavigationLogic {
                     Data(base64Encoded: kf.descriptorsB64) ?? Data()
                 }
                 print("[NetworkBundle] loaded \(bundle.keyframes.count) keyframes (경로 전체 영역)")
+                self.setupTrackingCandidates(bundle: bundle)
                 self.startTracking()
             case .failure(let error):
-                print("[NetworkBundle] fetch failed: \(error) — 추적 미시작, 직선 안내 + ARKit pose 만")
+                print("[NetworkBundle] fetch failed: \(error) — 추적 미시작, ARKit pose 만")
             }
         }
     }
 
-    // MARK: - AR 경로 렌더링
+    // MARK: - AR 경로 렌더링 (Phase 8 keyframe 단계 추적 모델로 대체)
+    //
+    // drawPathNodes / buildRibbonNode / createChevronNode / placeChevronArrows /
+    // createDestinationPin 함수들은 Phase 8 재설계로 모두 제거되었다.
+    //  - 새 모델: trackingKeyframeCandidates 후보열 + checkpointNode (단일 흰색 원형 마커) +
+    //            tick 마다 best 까지 prefix drop ("지워나감").
+    //  - simplifyXZ / rdpRecurse / perpendicularDistanceXZ / catmullRomSpline 등 보조 헬퍼는
+    //    아래 MARK 섹션에 보존 — 향후 keyframe 사이 보간 안내 등 재활용 여지.
+    //  - Phase 5 GuidanceDirector / chevron / ribbon / 목적지 핀 / 슬라이딩 윈도우 dead path —
+    //    호출만 끊었고 멤버 변수·인스턴스는 보존. 별도 트랙에서 정리.
 
-    private func drawPathNodes(steps: [PathStep]) {
-        // 기존 경로 정리
-        pathRootNode?.removeFromParentNode()
-        pathRootNode = nil
-        allChevronNodes.removeAll()
-        destinationPinNode = nil
+    // MARK: - 경로 진행 추적 (Phase 8 keyframe 단계 추적 모델로 대체 — body 무력화)
 
-        guard let arPose = matchedARPose, let pose = localizedPose else { return }
-
-        let serverPos = simd_float3(Float(pose.x ?? 0), Float(pose.y ?? 0), Float(pose.z ?? 0))
-        let quat = simd_quatf(ix: Float(pose.qx ?? 0), iy: Float(pose.qy ?? 0),
-                               iz: Float(pose.qz ?? 0), r: Float(pose.qw ?? 1))
-
-        let input = CoordinateTransformer.Input(
-            serverPosition: serverPos,
-            serverQuaternion: quat,
-            arCameraPose: arPose
-        )
-
-        // 카메라 높이에서 바닥 레벨 추정 (스마트폰 들고 있는 높이 ~1.5m)
-        let cameraY = arPose.columns.3.y
-        let floorY = cameraY - 1.7
-
-        // 서버 좌표를 AR 좌표로 변환 후 Y를 바닥 레벨로 고정
-        var arPoints: [simd_float3] = []
-        for step in steps {
-            guard let pos = step.position else { continue }
-            let serverPoint = simd_float3(Float(pos.x), Float(pos.y), Float(pos.z))
-            let arPos = CoordinateTransformer.transform(serverPoint: serverPoint, input: input)
-            arPoints.append(simd_float3(arPos.x, floorY, arPos.z))
-        }
-
-        if let firstAR = arPoints.first,
-           let frame = arSession?.currentFrame {
-            let cam = frame.camera.transform.columns.3
-            let dxz = sqrt((firstAR.x - cam.x) * (firstAR.x - cam.x) +
-                           (firstAR.z - cam.z) * (firstAR.z - cam.z))
-            let snapStr = lastStartSnapDistance.map { String(format: "%.2f", $0) } ?? "nil"
-            print(String(format: "[PATH-START] firstAR=(%.2f, %.2f, %.2f), camNow=(%.2f, %.2f), Δxz=%.2fm, snapStart=%@",
-                         firstAR.x, firstAR.y, firstAR.z, cam.x, cam.z, dxz, snapStr))
-        }
-
-        guard arPoints.count >= 2 else {
-            delegate?.showScanFailed(message: "경로 정보가 비어 있어요.\n다시 한번 스캔해 주세요.")
-            delegate?.setLocateButtonVisible(true)
-            return
-        }
-
-        // RDP 사전 단순화: 시각 경로·turn 판정 모두 동일 점열 기반
-        let simplifiedARPoints = simplifyXZ(points: arPoints, epsilon: pathSimplificationEpsilonM)
-        simplifiedPointCount = simplifiedARPoints.count
-        print(String(format: "[PATH-RDP] raw=%d → simplified=%d (ε=%.2fm)", arPoints.count, simplifiedARPoints.count, pathSimplificationEpsilonM))
-
-        // Catmull-Rom 스플라인으로 부드러운 경로 생성
-        let smoothPoints = catmullRomSpline(points: simplifiedARPoints, subdivisions: pathSubdivisions)
-
-        // 상태 보관
-        allSteps = steps
-        allARPoints = arPoints
-        smoothedPoints = smoothPoints
-
-        // 경로 부모 노드 생성
-        let rootNode = SCNNode()
-        rootNode.name = "pathRootNode"
-        rootNode.renderingOrder = -1
-        scene?.rootNode.addChildNode(rootNode)
-        pathRootNode = rootNode
-
-        currentTargetWaypointIndex = 1
-
-        // 전체 경로 ribbon 생성
-        rootNode.addChildNode(buildRibbonNode(points: smoothPoints))
-
-        // 경로 구간별 더블 쉐브론 화살표 배치
-        placeChevronArrows(on: smoothPoints, steps: steps, rootNode: rootNode)
-
-        // 목적지에 빨간 3D 핀 마커 배치
-        if let lastPoint = arPoints.last {
-            let pinNode = createDestinationPin(at: lastPoint)
-            rootNode.addChildNode(pinNode)
-            destinationPinNode = pinNode
-            destinationARPosition = lastPoint
-            startArrivalCheck()
-        }
-
-        // Phase 5: 방향 안내 director에 경로 전달
-        guidanceDirector.setRoute(smoothedPoints: smoothPoints)
-
-        // 진행 추적 시작 + HUD 표시
-        startPathProgressTracking()
-        delegate?.setHUDVisible(true)
-        delegate?.setLocateButtonVisible(false)
-    }
-
-    // MARK: - 연속 바닥 경로 Ribbon
-
-    private func buildRibbonNode(points: [simd_float3]) -> SCNNode {
-        let container = SCNNode()
-        container.name = "ribbonContainer"
-
-        guard points.count >= 2 else { return container }
-
-        // --- 연속 ribbon geometry ---
-        var vertices: [SCNVector3] = []
-        var normals: [SCNVector3] = []
-        var indices: [Int32] = []
-
-        let stripWidth: Float = 0.8
-        let yOffset: Float = 0.003
-
-        for (i, point) in points.enumerated() {
-            let prev = i > 0 ? points[i - 1] : points[i]
-            let next = i < points.count - 1 ? points[i + 1] : points[i]
-
-            var tx = next.x - prev.x
-            var tz = next.z - prev.z
-            let tLen = sqrt(tx * tx + tz * tz)
-            if tLen > 0.0001 { tx /= tLen; tz /= tLen }
-
-            // 수직(perp) 벡터: 진행 방향의 90° 회전
-            let px: Float = -tz
-            let pz: Float = tx
-            let half = stripWidth / 2
-            let y = point.y + yOffset
-
-            vertices.append(SCNVector3(point.x - px * half, y, point.z - pz * half))
-            vertices.append(SCNVector3(point.x + px * half, y, point.z + pz * half))
-            normals.append(SCNVector3(0, 1, 0))
-            normals.append(SCNVector3(0, 1, 0))
-
-            if i > 0 {
-                let base = Int32((i - 1) * 2)
-                indices.append(contentsOf: [base, base + 2, base + 1,
-                                            base + 1, base + 2, base + 3])
-            }
-        }
-
-        let vertexSource = SCNGeometrySource(vertices: vertices)
-        let normalSource = SCNGeometrySource(normals: normals)
-        let element = SCNGeometryElement(indices: indices, primitiveType: .triangles)
-        let geometry = SCNGeometry(sources: [vertexSource, normalSource], elements: [element])
-
-        let ribbonMaterial = SCNMaterial()
-        ribbonMaterial.diffuse.contents = UIColor.white.withAlphaComponent(0.55)
-        ribbonMaterial.lightingModel = .constant
-        ribbonMaterial.writesToDepthBuffer = false
-        ribbonMaterial.readsFromDepthBuffer = true   // 쉐브론이 ribbon 위에 정상 렌더링
-        ribbonMaterial.isDoubleSided = true
-        geometry.materials = [ribbonMaterial]
-
-        let ribbonNode = SCNNode(geometry: geometry)
-        ribbonNode.name = "ribbonNode"
-        container.addChildNode(ribbonNode)
-
-        // --- 방향 삼각형: arc-length 0.6m 간격 ---
-        let triangleSpacing: Float = 0.6
-        let triangleMaterial = SCNMaterial()
-        triangleMaterial.diffuse.contents = UIColor.white
-        triangleMaterial.lightingModel = .constant
-        triangleMaterial.writesToDepthBuffer = false
-        triangleMaterial.readsFromDepthBuffer = false
-        triangleMaterial.isDoubleSided = true
-
-        var coveredDist: Float = 0
-        var nextPlace: Float = triangleSpacing / 2
-
-        for i in 1..<points.count {
-            let p1 = points[i - 1]
-            let p2 = points[i]
-            let ddx = p2.x - p1.x
-            let ddz = p2.z - p1.z
-            let segLen = sqrt(ddx * ddx + ddz * ddz)
-            guard segLen > 0.0001 else { continue }
-
-            while coveredDist + segLen >= nextPlace {
-                let t = (nextPlace - coveredDist) / segLen
-                let tx = p1.x + t * ddx
-                let tz = p1.z + t * ddz
-                let ty = p1.y + 0.006
-
-                let pyramid = SCNPyramid(width: 0.25, height: 0.01, length: 0.35)
-                pyramid.materials = [triangleMaterial]
-                let triNode = SCNNode(geometry: pyramid)
-                triNode.position = SCNVector3(tx, ty, tz)
-                triNode.simdOrientation = simd_quatf(angle: atan2(ddx / segLen, ddz / segLen),
-                                                      axis: simd_float3(0, 1, 0))
-                container.addChildNode(triNode)
-                nextPlace += triangleSpacing
-            }
-
-            coveredDist += segLen
-        }
-
-        return container
-    }
-
-    // MARK: - 더블 쉐브론 화살표
-
-    private func createChevronNode() -> SCNNode {
-        let node = SCNNode()
-        node.name = "chevronArrow"
-
-        let bobNode = SCNNode()
-        node.addChildNode(bobNode)
-
-        let mat = SCNMaterial()
-        mat.diffuse.contents = UIColor(red: 0.1, green: 0.45, blue: 1.0, alpha: 1.0)
-        mat.lightingModel = .constant
-        mat.isDoubleSided = true
-
-        // ">>" 형태의 더블 쉐브론. 두 개의 V자(">")가 local +X(진행 방향)으로 in-line 분리되어 배치됨.
-        // V자 평면은 local XY에 펼쳐지며(수직/세움), tip은 +X. placeChevronArrows에서 yaw로 +X를 진행 방향에 정렬한 뒤
-        // 진행 방향에 수직인 수평축(world right) 기준 pitch를 적용하여 tip을 살짝 아래로 기울임.
-        // 사용자는 chevron이 진행 방향 너머로 똑바로 서서 보임.
-        let halfW: Float = 0.22     // 팔의 X방향 길이 (tip→base의 X 거리 절반)
-        let halfH: Float = 0.32     // 팔이 펼쳐진 Y방향 (V자 폭) 절반
-        let armLen: Float = sqrt((2 * halfW) * (2 * halfW) + halfH * halfH)
-        let armThick: Float = 0.085 // Y cross-section (수평 자세에서 두께)
-        let faceDepth: Float = 0.085// 팔 단면 깊이 (Z, 사각 단면)
-        let gap: Float = 0.30       // 두 V자의 X축 간격 (in-line 분리)
-
-        // 팔 방향: tip (xOff, 0, 0) → base (xOff - 2*halfW, ±halfH, 0).
-        // local Z축 회전으로 V자 형성 (XY 평면에 펼침).
-        let armAngle = atan2(halfH, 2 * halfW)
-
-        for xOff: Float in [-gap / 2, gap / 2] {
-            // 위쪽 팔 (Y+): Z축 +armAngle 회전
-            let uBox = SCNBox(width: CGFloat(armLen), height: CGFloat(armThick), length: CGFloat(faceDepth), chamferRadius: 0)
-            uBox.materials = [mat]
-            let uNode = SCNNode(geometry: uBox)
-            uNode.position = SCNVector3(xOff - halfW, halfH / 2, 0)
-            uNode.eulerAngles = SCNVector3(0, 0, armAngle)
-            bobNode.addChildNode(uNode)
-
-            // 아래쪽 팔 (Y-): Z축 -armAngle 회전
-            let lBox = SCNBox(width: CGFloat(armLen), height: CGFloat(armThick), length: CGFloat(faceDepth), chamferRadius: 0)
-            lBox.materials = [mat]
-            let lNode = SCNNode(geometry: lBox)
-            lNode.position = SCNVector3(xOff - halfW, -halfH / 2, 0)
-            lNode.eulerAngles = SCNVector3(0, 0, -armAngle)
-            bobNode.addChildNode(lNode)
-        }
-
-        let up = SCNAction.moveBy(x: 0, y: 0.08, z: 0, duration: 0.8)
-        up.timingMode = .easeInEaseOut
-        let down = SCNAction.moveBy(x: 0, y: -0.08, z: 0, duration: 0.8)
-        down.timingMode = .easeInEaseOut
-        bobNode.runAction(SCNAction.repeatForever(SCNAction.sequence([up, down])))
-
-        return node
-    }
-
-    // 경로 위에 5m 간격 + 회전 구간 더블 쉐브론 배치
-    private func placeChevronArrows(on points: [simd_float3], steps: [PathStep], rootNode: SCNNode) {
-        allChevronNodes.removeAll()
-
-        // 회전 구간: instruction에 "회전" 포함된 step의 smooth point 인덱스
-        // RDP 단순화로 spline 입력 점 수가 줄어 points.count ≠ steps.count * subdiv 이므로 비례 환산.
-        // TODO: 정확한 turn 매핑 개선은 GuidanceDirector turns 좌표 활용으로 후속 분리.
-        let subdiv = pathSubdivisions
-        let denom = max((steps.count - 1) * subdiv, 1)
-        let ratio = Float(points.count - 1) / Float(denom)
-        var turnIndices: Set<Int> = []
-        for (idx, step) in steps.enumerated() {
-            if (step.instruction ?? "").contains("회전") {
-                let si = min(Int(Float(idx * subdiv) * ratio), points.count - 1)
-                turnIndices.insert(si)
-            }
-        }
-
-        var placedSet: Set<Int> = []
-
-        func place(at idx: Int) {
-            guard idx < points.count - 1, !placedSet.contains(idx) else { return }
-            placedSet.insert(idx)
-            let p = points[idx]
-            let pn = points[idx + 1]
-            let dx = pn.x - p.x
-            let dz = pn.z - p.z
-            let len = sqrt(dx * dx + dz * dz)
-            guard len > 0.001 else { return }
-            let chevron = createChevronNode()
-
-            // 진행 단위 벡터 t̂, 우측 perpendicular r̂ (Y-up right-hand)
-            let invLen: Float = 1.0 / len
-            let tHat = simd_float2(dx * invLen, dz * invLen)
-            let rHat = simd_float2(-tHat.y, tHat.x)
-
-            // 위치: 다음 노드 직전(진행 방향 끝) + 경로 우측 가장자리로 lateral 오프셋.
-            let edgeOffsetFromNext: Float = 0.6
-            let edgeLateralOffset: Float = 0.55  // ribbon stripWidth 0.8 → ±0.4 외측
-            let chevronHeight: Float = 1       // 바닥에서 띄운 높이
-            let t: Float = max(0.0, (len - edgeOffsetFromNext) / len)
-            let cx = p.x + (pn.x - p.x) * t + rHat.x * edgeLateralOffset
-            let cz = p.z + (pn.z - p.z) * t + rHat.y * edgeLateralOffset
-            let cy = p.y + chevronHeight
-            chevron.position = SCNVector3(cx, cy, cz)
-
-            // Yaw: V자 꼭짓점은 모델 local -X에 위치하므로, local -X를 진행 방향(dx,dz)으로 향하게 하려면
-            // local +X를 진행 방향에 맞추는 atan2(-dz, dx)에 π를 더해 180° 뒤집는다.
-            let yawOffsetDeg: Float = 2.0
-            let yawAngle = atan2(-dz, dx) * .pi + (yawOffsetDeg * .pi / 180.0)
-            let yawQ = simd_quatf(angle: yawAngle, axis: simd_float3(0, 1, 0))
-
-            // Pitch: 진행 방향 안쪽(아래쪽)으로 살짝 기울임. yaw 180° 반전에 따라 부호도 반전(-15°).
-            // rHat 축 기준 -15° 회전 시 V자 꼭짓점(=진행 방향 끝)이 -Y쪽(아래)으로 기울어 안쪽으로 향함.
-            let pitchAngleDeg: Float = 0
-            let pitchAngle = pitchAngleDeg * .pi / 180.0
-            let pitchAxis = simd_float3(rHat.x, 0, rHat.y)
-            let pitchQ = simd_quatf(angle: pitchAngle, axis: pitchAxis)
-
-            // 합성: world frame 기준이므로 pitch * yaw (왼쪽이 후속 적용)
-            chevron.simdOrientation = pitchQ * yawQ
-            chevron.renderingOrder = 10  // ribbon보다 위에 렌더링
-            rootNode.addChildNode(chevron)
-            allChevronNodes.append((node: chevron, pointIndex: idx))
-        }
-
-        // 회전 구간 우선 배치
-        for idx in turnIndices { place(at: idx) }
-
-        // 25m 간격 정규 배치
-        let spacing: Float = 25.0
-        var covered: Float = 0
-        var nextPlace: Float = spacing / 2
-
-        for i in 1..<points.count {
-            let p1 = points[i - 1]
-            let p2 = points[i]
-            let ddx = p2.x - p1.x
-            let ddz = p2.z - p1.z
-            let segLen = sqrt(ddx * ddx + ddz * ddz)
-            guard segLen > 0.0001 else { continue }
-            while covered + segLen >= nextPlace {
-                place(at: i)
-                nextPlace += spacing
-            }
-            covered += segLen
-        }
-    }
-
-    // MARK: - 경로 진행 추적
-
+    /// Phase 8 keyframe 단계 추적 모델로 대체 — body 무력화.
+    /// allSteps/smoothedPoints 미구축이라 호출돼도 dead path. ViewController 호출 안전.
+    /// TODO(Phase 8+): keyframe 진행 추적은 runTrackingTick 으로 통합됨 — 본 함수 폐기 예정.
     private func startPathProgressTracking() {
-        pathProgressTimer?.invalidate()
-        pathProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            guard let frame = self.arSession?.currentFrame else { return }
-            let cameraPos = simd_float3(
-                frame.camera.transform.columns.3.x,
-                frame.camera.transform.columns.3.y,
-                frame.camera.transform.columns.3.z
-            )
-            // ARKit columns.2는 카메라 back vector이므로 부호 반전하여 forward로 사용
-            let camCol2 = frame.camera.transform.columns.2
-            let cameraForward = simd_float3(-camCol2.x, -camCol2.y, -camCol2.z)
-            self.tickPathProgress(cameraPos: cameraPos)
-            self.guidanceDirector.update(
-                cameraPosition: cameraPos,
-                cameraForward: cameraForward,
-                currentTargetWaypointIndex: self.currentTargetWaypointIndex
-            )
-        }
+        // intentionally empty — pathProgressTimer 사용 안 함.
     }
 
+    /// Phase 8 keyframe 단계 추적 모델로 대체 — body 무력화. dead path.
     private func tickPathProgress(cameraPos: simd_float3) {
-        guard !smoothedPoints.isEmpty else { return }
-
-        // 1. waypoint 전환 체크: 카메라가 waypoint를 지나쳤는지 dot-product로 판별
-        while currentTargetWaypointIndex < smoothedPoints.count - 1 {
-            let wp = smoothedPoints[currentTargetWaypointIndex]
-            let wpNext = smoothedPoints[currentTargetWaypointIndex + 1]
-            let pathDir = simd_float2(wpNext.x - wp.x, wpNext.z - wp.z)
-            let toCam = simd_float2(cameraPos.x - wp.x, cameraPos.z - wp.z)
-            if simd_dot(pathDir, toCam) > 0 {
-                currentTargetWaypointIndex += 1
-            } else {
-                break
-            }
-        }
-
-        // 1-1. 층 이동 감지: 현재 waypoint(smooth index) → step index로 환산
-        if !hasActiveFloorTransition {
-            let subdiv = pathSubdivisions
-            // RDP 단순화 후 spline 보간되어 smoothedPoints 길이가 (simplifiedPointCount-1)*subdiv 기준이 됨.
-            // 원본 allSteps 인덱스로 비례 환산 (보정 옵션 2).
-            let denom = max((simplifiedPointCount - 1) * subdiv, 1)
-            let curStepIdx = max(0, min(
-                Int(Float(currentTargetWaypointIndex) * Float(allSteps.count - 1) / Float(denom)),
-                allSteps.count - 1
-            ))
-            if let detection = detectFloorTransition(currentStepIdx: curStepIdx) {
-                let target = smoothedPoints[currentTargetWaypointIndex]
-                let dx = cameraPos.x - target.x
-                let dz = cameraPos.z - target.z
-                let dist = sqrt(dx * dx + dz * dz)
-                if dist < floorTransitionTriggerDistance {
-                    triggerFloorTransition(type: detection.type, targetFloor: detection.targetFloor, currentStepIdx: curStepIdx)
-                    return
-                }
-            }
-        }
-
-        // 2. HUD 갱신
-        if currentTargetWaypointIndex >= smoothedPoints.count {
-            // 도착
-            pathProgressTimer?.invalidate()
-            pathProgressTimer = nil
-            guidanceDirector.reset()
-            delegate?.updateHUD(destinationName: destinationName, remainingDistance: 0, instruction: "목적지에 도착했습니다")
-            return
-        }
-
-        let remaining = computeRemainingDistance(cameraPos: cameraPos)
-        let subdiv = pathSubdivisions
-        let denom2 = max((simplifiedPointCount - 1) * subdiv, 1)
-        let stepIdx = max(0, min(
-            Int(Float(currentTargetWaypointIndex) * Float(allSteps.count - 1) / Float(denom2)),
-            allSteps.count - 1
-        ))
-        let instruction = (stepIdx >= 0 && stepIdx < allSteps.count) ? allSteps[stepIdx].instruction : nil
-        delegate?.updateHUD(destinationName: destinationName, remainingDistance: remaining, instruction: instruction)
+        _ = cameraPos
     }
 
+    /// ViewController.viewWillDisappear 에서 호출 — 안전한 no-op.
     func stopPathProgressTracking() {
         pathProgressTimer?.invalidate()
         pathProgressTimer = nil
@@ -1602,15 +1219,14 @@ class ARNavigationLogic {
 
             if self.isFloorTransitionRestart {
                 // 재스캔 모드: 잔여 경로 직접 사용 (경로 계산 카드 표시 생략)
+                // TODO(Phase 8): mock 흐름에서 drawPathNodes 폐기 — keyframe 단계 추적 모델 미지원.
                 self.delegate?.showRouteCalculating(false)
                 self.matchedARPose = frame.camera.transform
                 self.localizedPose = self.makeMockPose()
                 self.delegate?.setLoading(false)
                 self.delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
-                let steps = self.pendingRemainingSteps
                 self.pendingRemainingSteps = []
                 self.isFloorTransitionRestart = false
-                self.drawPathNodes(steps: steps)
                 return
             }
 
@@ -1623,7 +1239,8 @@ class ARNavigationLogic {
                 self.matchedARPose = frame.camera.transform
                 self.localizedPose = self.makeMockPose()
                 self.delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
-                self.drawPathNodes(steps: self.makeMockSteps())
+                // TODO(Phase 8): mock drawPathNodes(self.makeMockSteps()) 폐기 — keyframe 단계 추적 모델로 대체 예정.
+                _ = self.makeMockSteps()
             }
         }
     }
@@ -1815,8 +1432,8 @@ class ARNavigationLogic {
               let bundle = localizationBundle,
               let extractor = superPointExtractor,
               let engine = lightGlueMatcher else { return }
-        // bundle/allSteps race — allSteps 비어있으면 skip (drawPathNodes 도 호출 안 됨)
-        guard !allSteps.isEmpty else { return }
+        // 후보 비어있으면 skip (setupTrackingCandidates 미호출 또는 직후 reset)
+        guard !trackingKeyframeCandidates.isEmpty else { return }
 
         let arPoseAtCapture = frame.camera.transform
         let pixelBuffer = frame.capturedImage
@@ -1824,6 +1441,10 @@ class ARNavigationLogic {
         let timestamp = frame.timestamp
         let deviceIsLandscape = UIDevice.current.orientation.isLandscape
         let orientation: InputOrientation = deviceIsLandscape ? .landscape : .portrait
+
+        // tick 시점 후보 snapshot — background 큐에서 매칭만 (PnP 폐기)
+        let candidatesSnapshot = trackingKeyframeCandidates
+        let intrinsicsSnapshot = bundle.manifest.intrinsics
 
         isTrackingTickInFlight = true
         trackingQueue.async { [weak self] in
@@ -1834,59 +1455,247 @@ class ARNavigationLogic {
                 timestamp: timestamp,
                 orientation: orientation
             )
-            // 모든 keyframe 매칭 → best.
-            // 가드: world3d 전부 NaN 인 keyframe 제외 (matched 돼도 PnP 입력 페어 0 이라 무용).
-            var perKfMatches: [(idx: Int, matches: [LightGlueMatcherEngine.Match])] = []
-            for (kfIdx, kf) in bundle.keyframes.enumerated() {
-                guard !kf.keypoints.isEmpty else { continue }
-                let validW3d = kf.world3d.compactMap { $0 }.count
-                guard validW3d > 0 else {
-                    print("[Tracking] kf=\(kfIdx) world3d 전부 NaN — skip (서버 매핑 무용)")
-                    continue
-                }
-                if let m = try? engine.match(query: queryFrame, targetKeyframe: kf, targetIntrinsics: bundle.manifest.intrinsics) {
-                    perKfMatches.append((idx: kfIdx, matches: m))
-                }
+            // 모든 후보 keyframe 매칭 — matched count 만 산출. PnP 풀지 않음.
+            let perKfMatches: [(idx: Int, matched: Int)] = candidatesSnapshot.enumerated().compactMap { (idx, kf) in
+                guard !kf.keypoints.isEmpty else { return nil }
+                guard let m = try? engine.match(
+                    query: queryFrame,
+                    targetKeyframe: kf,
+                    targetIntrinsics: intrinsicsSnapshot
+                ) else { return nil }
+                return (idx, m.count)
             }
-            guard let best = perKfMatches.max(by: { $0.matches.count < $1.matches.count }),
-                  !best.matches.isEmpty else {
+            guard let best = perKfMatches.max(by: { $0.matched < $1.matched }) else {
                 DispatchQueue.main.async {
-                    print("[Tracking] tick — 매칭 없음, pose 유지")
-                    self.isTrackingTickInFlight = false
-                }
-                return
-            }
-            guard let pnp = self.attemptPnPLightGlue(frame: queryFrame, bundle: bundle, bestKfIdx: best.idx, lightGlueMatches: best.matches) else {
-                DispatchQueue.main.async {
-                    print("[Tracking] tick — PnP 실패, pose 유지")
+                    print("[Tracking] tick — 매칭 없음, 후보 유지")
                     self.isTrackingTickInFlight = false
                 }
                 return
             }
             DispatchQueue.main.async {
-                self.updateLocalizedPose(pose: pnp.pose, arPoseAtCapture: arPoseAtCapture, kfIdx: pnp.kfIdx)
+                self.handleTrackingMatchResult(
+                    bestIdx: best.idx,
+                    bestMatched: best.matched,
+                    perKfMatches: perKfMatches,
+                    arPoseAtCapture: arPoseAtCapture
+                )
                 self.isTrackingTickInFlight = false
             }
         }
     }
 
-    private func updateLocalizedPose(pose: PoseEstimate, arPoseAtCapture: simd_float4x4, kfIdx: Int) {
-        let t = pose.translation
-        let q = simd_quatf(pose.rotation)
-        let newPose = Pose(
-            x: Double(t.x), y: Double(t.y), z: Double(t.z),
-            qx: Double(q.imag.x), qy: Double(q.imag.y), qz: Double(q.imag.z), qw: Double(q.real)
+    /// runTrackingTick 의 main 큐 후속 처리. PnP 없이 best keyframe 까지 prefix drop +
+    /// checkpoint 갱신 + localizedPose 갱신 + 도착 판정.
+    private func handleTrackingMatchResult(
+        bestIdx: Int,
+        bestMatched: Int,
+        perKfMatches: [(idx: Int, matched: Int)],
+        arPoseAtCapture: simd_float4x4
+    ) {
+        // 진단 로그 — best + 후보 별 매칭 점 수
+        let perKfStr = perKfMatches.map { "\($0.idx):\($0.matched)" }.joined(separator: ",")
+        print("[LightGlue][진단] kf=\(bestIdx) matched=\(bestMatched) per_kf=[\(perKfStr)]")
+
+        // "지워나감" — best 까지 prefix drop. snapshot 인덱스(idx)는 매칭 시점 candidatesSnapshot 기준.
+        // 본 main 큐 도달 시점에 trackingKeyframeCandidates 가 다른 흐름으로 변경됐을 가능성 — count 가드.
+        guard bestIdx < trackingKeyframeCandidates.count else {
+            print("[Tracking] 후보 스냅샷 stale — drop skip")
+            return
+        }
+        trackingKeyframeCandidates = Array(trackingKeyframeCandidates[bestIdx...])
+        lastBestKeyframeIndex = bestIdx
+
+        // best keyframe 의 pose4x4 마지막 열 → localizedPose 갱신 (서버 좌표).
+        // PnP 없이 keyframe 좌표 그대로 사용 — 사용자 위치 ≈ keyframe 위치 가정.
+        if let bestKf = trackingKeyframeCandidates.first {
+            let kfTr = bestKf.pose4x4
+            // homogeneous 마지막 열 = translation (서버 좌표)
+            let kfPos = simd_float3(
+                Float(kfTr[0][3]),
+                Float(kfTr[1][3]),
+                Float(kfTr[2][3])
+            )
+            // 회전 — pose4x4 는 row-major 4×4. 회전 부분 추출은 향후 R→quat 변환 도입 (TODO).
+            // 현재 단계는 위치만 사용.
+            let newPose = Pose(
+                x: Double(kfPos.x), y: Double(kfPos.y), z: Double(kfPos.z),
+                qx: localizedPose?.qx ?? 0,
+                qy: localizedPose?.qy ?? 0,
+                qz: localizedPose?.qz ?? 0,
+                qw: localizedPose?.qw ?? 1
+            )
+            self.localizedPose = newPose
+            self.matchedARPose = arPoseAtCapture
+        }
+
+        // checkpoint (다음 keyframe = 후보 마지막) 갱신
+        updateCheckpointNode()
+
+        // 후보 1개로 줄었으면 새 lookup 트리거 (현재 keyframe 영역 모두 통과한 상태)
+        if trackingKeyframeCandidates.count <= 1 {
+            triggerNewLookup()
+        }
+
+        // 도착 판정 — 후보 1개 이하 + query 좌표 모두 소비 + 카메라 ↔ checkpoint XZ 거리 < 임계
+        if trackingKeyframeCandidates.count <= 1,
+           consumedQueryPointIndex >= max(pathQueryPoints.count - 1, 0),
+           let frame = arSession?.currentFrame,
+           let checkpoint = checkpointNode {
+            let cam = frame.camera.transform.columns.3
+            let dx = cam.x - checkpoint.position.x
+            let dz = cam.z - checkpoint.position.z
+            let dist = sqrt(dx * dx + dz * dz)
+            if dist < trackingArrivalThresholdM, !hasNotifiedArrival {
+                hasNotifiedArrival = true
+                print("[Tracking] 도착 판정 — dist=\(String(format: "%.2f", dist))m < \(trackingArrivalThresholdM)m")
+                stopTracking()
+                delegate?.showArrivalNotification()
+            }
+        }
+    }
+
+    /// trackingKeyframeCandidates 를 진행 방향 정렬. 인덱스 0 = 시작쪽(목적지에서 먼 점),
+    /// 마지막 인덱스 = 목적지쪽(가장 가까운 점). 사용자가 진행할수록 prefix drop.
+    private func setupTrackingCandidates(bundle: LocalizationBundle) {
+        let goalVec = simd_float3(
+            Float(self.goal.x),
+            Float(self.goal.y),
+            Float(self.goal.z ?? 0)
         )
-        self.localizedPose = newPose
-        self.matchedARPose = arPoseAtCapture
-        print(String(format: "[Tracking][갱신] kf=%d t=(%.2f, %.2f, %.2f)", kfIdx, t.x, t.y, t.z))
-        // 노드 갱신 — currentTargetWaypointIndex 보존/복원
-        // TODO(A2): drawPathNodes 재생성 대신 pathRootNode.simdTransform 갱신으로 진화 (깜빡임 완화)
-        // TODO(A2): 직전 pose 대비 변화량 < 0.1m 면 skip (throttle)
-        let savedWaypoint = currentTargetWaypointIndex
-        if !allSteps.isEmpty {
-            drawPathNodes(steps: allSteps)
-            currentTargetWaypointIndex = savedWaypoint
+        let sorted = bundle.keyframes.sorted { (a, b) -> Bool in
+            let da = distanceToGoal(kf: a, goal: goalVec)
+            let db = distanceToGoal(kf: b, goal: goalVec)
+            return da > db  // 거리 내림차순 — 인덱스 0 이 가장 멀고(시작쪽), 마지막이 가장 가까움(목적지쪽)
+        }
+        trackingKeyframeCandidates = sorted
+        lastBestKeyframeIndex = nil
+        print("[Tracking] 후보 정렬 완료 — count=\(sorted.count) (시작쪽→목적지쪽)")
+        updateCheckpointNode()
+    }
+
+    /// keyframe pose4x4 마지막 열 → simd_float3, goal 과 거리 계산.
+    private func distanceToGoal(kf: BundleKeyframe, goal: simd_float3) -> Float {
+        let kfTr = kf.pose4x4
+        let kfPos = simd_float3(
+            Float(kfTr[0][3]),
+            Float(kfTr[1][3]),
+            Float(kfTr[2][3])
+        )
+        return simd_distance(kfPos, goal)
+    }
+
+    /// 단일 흰색 원형 바닥 마커 갱신. 후보 마지막(목적지쪽 = 다음 keyframe) 위치에 표시.
+    /// 노드 없으면 createCheckpointNode 로 생성 + scene rootNode 추가, 있으면 position 만 갱신.
+    private func updateCheckpointNode() {
+        guard let lastKf = trackingKeyframeCandidates.last,
+              let arPose = matchedARPose,
+              let pose = localizedPose else { return }
+
+        let serverPos = simd_float3(
+            Float(pose.x ?? 0),
+            Float(pose.y ?? 0),
+            Float(pose.z ?? 0)
+        )
+        let quat = simd_quatf(
+            ix: Float(pose.qx ?? 0),
+            iy: Float(pose.qy ?? 0),
+            iz: Float(pose.qz ?? 0),
+            r: Float(pose.qw ?? 1)
+        )
+        let input = CoordinateTransformer.Input(
+            serverPosition: serverPos,
+            serverQuaternion: quat,
+            arCameraPose: arPose
+        )
+        let kfTr = lastKf.pose4x4
+        let kfPos = simd_float3(
+            Float(kfTr[0][3]),
+            Float(kfTr[1][3]),
+            Float(kfTr[2][3])
+        )
+        let arPos = CoordinateTransformer.transform(serverPoint: kfPos, input: input)
+
+        // 카메라 높이 → 바닥 레벨 추정 (drawPathNodes 동일 패턴)
+        let cameraY = arPose.columns.3.y
+        let floorY = cameraY - 1.7
+        let placement = simd_float3(arPos.x, floorY, arPos.z)
+
+        if let node = checkpointNode {
+            node.position = SCNVector3(placement.x, placement.y, placement.z)
+        } else {
+            let node = createCheckpointNode(at: placement)
+            scene?.rootNode.addChildNode(node)
+            checkpointNode = node
+        }
+    }
+
+    /// 흰색 원형 바닥 마커 — torus(테두리) + cylinder(채움 alpha 0.6).
+    /// lightingModel = .constant, writesToDepthBuffer = false, isDoubleSided = true.
+    private func createCheckpointNode(at position: simd_float3) -> SCNNode {
+        let node = SCNNode()
+        node.name = "checkpointNode"
+
+        // 테두리 (torus)
+        let torus = SCNTorus(ringRadius: 0.45, pipeRadius: 0.04)
+        let torusMat = SCNMaterial()
+        torusMat.diffuse.contents = UIColor.white
+        torusMat.lightingModel = .constant
+        torusMat.writesToDepthBuffer = false
+        torusMat.isDoubleSided = true
+        torus.materials = [torusMat]
+        let torusNode = SCNNode(geometry: torus)
+        node.addChildNode(torusNode)
+
+        // 내부 채움 (얇은 원판)
+        let disc = SCNCylinder(radius: 0.45, height: 0.005)
+        let discMat = SCNMaterial()
+        discMat.diffuse.contents = UIColor.white.withAlphaComponent(0.6)
+        discMat.lightingModel = .constant
+        discMat.writesToDepthBuffer = false
+        discMat.isDoubleSided = true
+        disc.materials = [discMat]
+        let discNode = SCNNode(geometry: disc)
+        node.addChildNode(discNode)
+
+        node.position = SCNVector3(position.x, position.y, position.z)
+        return node
+    }
+
+    /// 후보 1개 이하 도달 시 — 다음 query 좌표(또는 목적지) 로 새 lookup. 결과로 후보 갱신.
+    private func triggerNewLookup() {
+        consumedQueryPointIndex += 1
+        let nextQueryPoint: NetworkBundleProvider.QueryPoint
+        if consumedQueryPointIndex < pathQueryPoints.count {
+            nextQueryPoint = pathQueryPoints[consumedQueryPointIndex]
+        } else {
+            nextQueryPoint = NetworkBundleProvider.QueryPoint(
+                floorLevel: localizedFloorLevel ?? 1,
+                x: self.goal.x,
+                y: self.goal.y,
+                z: self.goal.z ?? 0
+            )
+        }
+        let provider = NetworkBundleProvider(
+            buildingId: self.buildingId,
+            queryPoints: [nextQueryPoint],
+            radiusM: 5.0,
+            maxKeyframesPerQuery: 5
+        )
+        self.networkBundleProvider = provider
+        print("[NetworkBundle] new lookup (consumed=\(consumedQueryPointIndex)/\(pathQueryPoints.count))")
+        provider.fetch { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success(let bundle):
+                self.localizationBundle = bundle
+                self.keyframeDescriptorCache = bundle.keyframes.map {
+                    Data(base64Encoded: $0.descriptorsB64) ?? Data()
+                }
+                self.setupTrackingCandidates(bundle: bundle)
+                print("[NetworkBundle] new keyframes=\(bundle.keyframes.count)")
+            case .failure(let err):
+                print("[NetworkBundle] new lookup 실패: \(err) — 기존 후보 유지")
+            }
         }
     }
 
@@ -2022,65 +1831,7 @@ class ARNavigationLogic {
         return result
     }
 
-    // MARK: - 목적지 3D 핀 마커
-
-    /// 빨간색 3D 지도 핀 마커 생성 (구 + 원뿔)
-    private func createDestinationPin(at position: simd_float3) -> SCNNode {
-        let node = SCNNode()
-        node.name = "pathNode"
-
-        // 빨간 구 (핀 머리)
-        let sphere = SCNSphere(radius: 0.25)
-        let sphereMaterial = SCNMaterial()
-        sphereMaterial.diffuse.contents = UIColor(red: 0.9, green: 0.15, blue: 0.15, alpha: 1.0)
-        sphereMaterial.emission.contents = UIColor(red: 0.3, green: 0.05, blue: 0.05, alpha: 1.0)
-        sphereMaterial.lightingModel = .physicallyBased
-        sphereMaterial.roughness.contents = 0.3
-        sphereMaterial.metalness.contents = 0.1
-        sphere.materials = [sphereMaterial]
-
-        let sphereNode = SCNNode(geometry: sphere)
-        sphereNode.position = SCNVector3(0, 0.65, 0)
-
-        // 빨간 원뿔 (핀 꼬리)
-        let cone = SCNCone(topRadius: 0.18, bottomRadius: 0.005, height: 0.45)
-        let coneMaterial = SCNMaterial()
-        coneMaterial.diffuse.contents = UIColor(red: 0.85, green: 0.12, blue: 0.12, alpha: 1.0)
-        coneMaterial.emission.contents = UIColor(red: 0.25, green: 0.04, blue: 0.04, alpha: 1.0)
-        coneMaterial.lightingModel = .physicallyBased
-        coneMaterial.roughness.contents = 0.3
-        coneMaterial.metalness.contents = 0.1
-        cone.materials = [coneMaterial]
-
-        let coneNode = SCNNode(geometry: cone)
-        coneNode.position = SCNVector3(0, 0.2, 0)
-
-        // 흰색 원 (핀 내부 표시)
-        let innerCircle = SCNSphere(radius: 0.12)
-        let innerMaterial = SCNMaterial()
-        innerMaterial.diffuse.contents = UIColor(red: 0.6, green: 0.08, blue: 0.08, alpha: 1.0)
-        innerMaterial.emission.contents = UIColor(red: 0.2, green: 0.02, blue: 0.02, alpha: 1.0)
-        innerCircle.materials = [innerMaterial]
-
-        let innerNode = SCNNode(geometry: innerCircle)
-        innerNode.position = SCNVector3(0, 0.65, 0)
-
-        node.addChildNode(coneNode)
-        node.addChildNode(sphereNode)
-        node.addChildNode(innerNode)
-
-        node.position = SCNVector3(position.x, position.y + 0.3, position.z)
-
-        // 떠다니는 애니메이션
-        let hover = SCNAction.sequence([
-            SCNAction.moveBy(x: 0, y: 0.15, z: 0, duration: 0.8),
-            SCNAction.moveBy(x: 0, y: -0.15, z: 0, duration: 0.8)
-        ])
-        hover.timingMode = .easeInEaseOut
-        node.runAction(SCNAction.repeatForever(hover))
-
-        return node
-    }
+    // MARK: - 목적지 3D 핀 마커 (Phase 8 단일 checkpointNode 로 대체 — createDestinationPin 폐기)
 
     // MARK: - 목적지 도착 감지
 

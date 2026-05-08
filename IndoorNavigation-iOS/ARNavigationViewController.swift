@@ -60,8 +60,8 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         setupHUD()
         setupRouteCalculatingView()
         setupFloorTransitionOverlay()
-        setupHeadingOverlay()
-        setupTurnCard()
+        // Phase 8: setupHeadingOverlay() / setupTurnCard() 호출 제거 — keyframe 단계 추적 모델
+        //          (checkpoint 1개) 로 대체. 함수 본체는 dead path 로 보존.
 
         logic.delegate = self
         logic.arSession = sceneView.session
@@ -75,6 +75,21 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         logic.attachSuperPointDebug(debugController)
         #endif
         logic.setupSuperPointExtractor()
+
+        // Phase 8: 화면 더블탭 → 측위 재시작 (무한 테스트용)
+        setupRetapGestureForTesting()
+    }
+
+    /// 화면 더블탭 시 측위 재시작 — 무한 테스트용. logic.startLocalizationFlow() 가 idempotent.
+    private func setupRetapGestureForTesting() {
+        let tap = UITapGestureRecognizer(target: self, action: #selector(onSceneRetapped))
+        tap.numberOfTapsRequired = 2
+        sceneView.addGestureRecognizer(tap)
+    }
+
+    @objc private func onSceneRetapped() {
+        print("[Trial] 화면 더블탭 — 측위 재시작")
+        logic.startLocalizationFlow()
     }
 
     // MARK: - UI 세팅
