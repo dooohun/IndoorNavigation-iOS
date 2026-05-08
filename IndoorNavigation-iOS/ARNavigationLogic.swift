@@ -28,9 +28,10 @@ class ARNavigationLogic {
     // FIXME: 서버 복구 후 false로 전환
     static let useMockData: Bool = false
 
-    // V3 측위 토글. false면 클라 단독 측위 (useLightGlueMatcher) 또는 SLAMv3 legacy 사용.
-    // A1 (클라 LightGlue + mock_bundle 검증) 모드: false 권장. 서버 fallback 필요 시 true.
-    static let useV3Localize: Bool = false
+    // V3 측위 토글. true: 첫 측위는 서버 V3 (정확) → 응답 좌표로 lookup → 추적은 클라 LightGlue.
+    // false: 클라 단독 측위 (lookup 좌표 hardcode 한계 있음).
+    // 사용자 의도된 정공: V3 1회 + lookup + 추적. 본 토글 true 유지.
+    static let useV3Localize: Bool = true
 
     // V3 pathfinding 토글. 현재 useV3Localize 와 짝. legacy 분리가 필요해질 때만 false.
     // 클라 단독 측위 후에도 경로 탐색은 서버 사용 — true 유지.
@@ -214,48 +215,10 @@ class ARNavigationLogic {
             superPointExtractor = stub
         }
 
-        // Phase 8 bundle 로드 — 매 프레임 매칭 호환성 검증용. 실패해도 추론은 계속.
-        // DEBUG 빌드 + LightGlue 토글 ON 이면 NetworkBundleProvider 사용 (UserDefaults 키 명시 시 우선),
-        // 실패 시 MockBundleProvider 폴백.
-        let useNetworkBundle: Bool = {
-            #if DEBUG
-            if UserDefaults.standard.object(forKey: "useNetworkBundle") != nil {
-                return UserDefaults.standard.bool(forKey: "useNetworkBundle")
-            }
-            return Self.useLightGlueMatcher  // LightGlue 사용 시 자동 ON — mock_bundle stale 회피
-            #else
-            return false
-            #endif
-        }()
-
-        if useNetworkBundle {
-            // TODO(S3): BuildingDetailResponse.floors 매핑 — 현재는 floorLevel hardcode (테스트 빌딩 active scan = 4)
-            // TODO(서버답): 빌딩 매핑 좌표계 origin 확인 — queryPosition (0,0,0)
-            // TODO(서버답): 실측 byteSize 보고 radiusM 조정
-            let provider = NetworkBundleProvider(
-                buildingId: self.buildingId,
-                floorLevel: 4,
-                queryPosition: SIMD3<Double>(0, 0, 0),
-                radiusM: 100.0
-            )
-            self.networkBundleProvider = provider  // strong reference 유지 — fetch completion 까지 살림
-            provider.fetch { [weak self] result in
-                guard let self = self else { return }
-                switch result {
-                case .success(let bundle):
-                    self.localizationBundle = bundle
-                    self.keyframeDescriptorCache = bundle.keyframes.map { kf in
-                        Data(base64Encoded: kf.descriptorsB64) ?? Data()
-                    }
-                    print("[NetworkBundle] loaded \(bundle.keyframes.count) keyframes (intrinsics \(bundle.manifest.intrinsics.width)×\(bundle.manifest.intrinsics.height))")
-                case .failure(let error):
-                    print("[NetworkBundle] fetch failed: \(error) — fallback to mock")
-                    self.loadMockBundleFallback()
-                }
-            }
-        } else {
-            loadMockBundleFallback()
-        }
+        // Phase 8 bundle 로드 — 매 프레임 매칭 진단용 mock 만 로드.
+        // 추적용 NetworkBundle 은 V3 측위 응답 받은 후 (handleLocalizeV3Success 안에서) 호출 — 사용자 위치 알 때.
+        // 앱 진입 시점에는 사용자 위치 모르므로 hardcode (0,0,0) 으로 lookup 하면 origin keyframe 받아 추적 무용.
+        loadMockBundleFallback()
     }
 
     /// `MockBundleProvider` 로드 + descriptor 캐시 채움. 실패해도 throw 안 함 (매칭만 비활성).
@@ -902,6 +865,34 @@ class ARNavigationLogic {
         localizedFloorId = response.pose.floorId ?? self.floorId
         localizedFloorLevel = response.pose.floorLevel
         localizedScanId = response.mapId  // B4 인계: PathfindingRequest.startScanId (Optional)
+
+        // 추적용 lookup — V3 응답 좌표 기준 사용자 주변 keyframe pack 받음.
+        // useLightGlueMatcher ON 시에만 호출. 추적 cadence (별도 트랙)에서 활용.
+        // TODO(S3+): 본 호출 결과 받기 전에 pathfinding 호출됨 — 비동기. 추적 시작 시점에 keyframe 사용 가능.
+        if Self.useLightGlueMatcher,
+           let floorLevel = response.pose.floorLevel {
+            let provider = NetworkBundleProvider(
+                buildingId: self.buildingId,
+                floorLevel: floorLevel,
+                queryPosition: SIMD3<Double>(Double(translation.x), Double(translation.y), Double(translation.z)),
+                radiusM: 30.0  // 사용자 주변 30m (좁게 — 패턴 B 실시간 보정 스타일)
+            )
+            self.networkBundleProvider = provider
+            print("[NetworkBundle] V3 측위 후 lookup — 좌표 (\(translation.x), \(translation.y), \(translation.z)), floorLevel \(floorLevel), radius 30m")
+            provider.fetch { [weak self] result in
+                guard let self = self else { return }
+                switch result {
+                case .success(let bundle):
+                    self.localizationBundle = bundle
+                    self.keyframeDescriptorCache = bundle.keyframes.map { kf in
+                        Data(base64Encoded: kf.descriptorsB64) ?? Data()
+                    }
+                    print("[NetworkBundle] loaded \(bundle.keyframes.count) keyframes (사용자 주변)")
+                case .failure(let error):
+                    print("[NetworkBundle] fetch failed: \(error) — 기존 mock_bundle 유지")
+                }
+            }
+        }
 
         delegate?.showScanComplete()
 

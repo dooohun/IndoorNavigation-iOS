@@ -465,8 +465,10 @@ class NetworkManager {
         appendField("building_id", buildingId)
 
         // TODO(서버답): multipart 필드명 'images', 권장 개수, 해상도 미정
+        // 다운샘플링: 원본 1920×1440 → longer side 960 (비율 유지). 업로드 75% 감소 + 서버 SP 처리 빠름.
         for (index, image) in images.enumerated() {
-            guard let imageData = image.jpegData(compressionQuality: 0.5) else { continue }
+            let resized = Self.resizeForLocalize(image, longerSide: 960)
+            guard let imageData = resized.jpegData(compressionQuality: 0.4) else { continue }
             body.append("--\(boundary)\r\n".data(using: .utf8)!)
             body.append("Content-Disposition: form-data; name=\"images\"; filename=\"image\(index).jpg\"\r\n".data(using: .utf8)!)
             body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
@@ -614,6 +616,25 @@ class NetworkManager {
                 completion(.failure(Self.makeError("응답 파싱 실패\n\(responseBody)")))
             }
         }.resume()
+    }
+
+    // MARK: - 이미지 다운샘플링 헬퍼
+
+    /// V3 localize multipart 업로드 전 이미지 다운샘플링. 비율 유지, longer side 를 `longerSide` 로 맞춤.
+    /// 원본이 더 작으면 그대로 반환.
+    private static func resizeForLocalize(_ image: UIImage, longerSide: CGFloat) -> UIImage {
+        let size = image.size
+        let longest = max(size.width, size.height)
+        guard longest > longerSide else { return image }
+        let scale = longerSide / longest
+        let newSize = CGSize(width: floor(size.width * scale), height: floor(size.height * scale))
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: newSize))
+        }
     }
 
     // MARK: - 에러 헬퍼
