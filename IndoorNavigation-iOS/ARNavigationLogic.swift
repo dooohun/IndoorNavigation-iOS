@@ -28,17 +28,23 @@ class ARNavigationLogic {
     // FIXME: 서버 복구 후 false로 전환
     static let useMockData: Bool = false
 
-    // V3 측위 토글. false면 기존 SLAMv3(/api/slam/v3/localize) 사용.
-    static let useV3Localize: Bool = true
+    // V3 측위 토글. false면 클라 단독 측위 (useLightGlueMatcher) 또는 SLAMv3 legacy 사용.
+    // A1 (클라 LightGlue + mock_bundle 검증) 모드: false 권장. 서버 fallback 필요 시 true.
+    static let useV3Localize: Bool = false
 
     // V3 pathfinding 토글. 현재 useV3Localize 와 짝. legacy 분리가 필요해질 때만 false.
+    // 클라 단독 측위 후에도 경로 탐색은 서버 사용 — true 유지.
     static let useV3Pathfinding: Bool = true
 
-    // S3 — LightGlue 매처 토글. DEBUG 한정. useV3Localize 와 독립.
-    // 둘 다 true 면 V3 우선. 클라 단독 측위 검증은 useV3Localize=false + useLightGlueMatcher=true.
+    // S3 — LightGlue 매처 토글. DEBUG 기본 true (클라 단독 측위 검증 모드).
+    // RELEASE 빌드는 항상 false. UserDefaults 키 명시 시 그 값 우선.
+    // 클라 단독 측위: useV3Localize=false + useLightGlueMatcher=true.
     static let useLightGlueMatcher: Bool = {
         #if DEBUG
-        return UserDefaults.standard.bool(forKey: "useLightGlueMatcher")
+        if UserDefaults.standard.object(forKey: "useLightGlueMatcher") != nil {
+            return UserDefaults.standard.bool(forKey: "useLightGlueMatcher")
+        }
+        return true   // DEBUG default — 클라 단독 측위 (A1 모드)
         #else
         return false
         #endif
