@@ -4,9 +4,13 @@
 
 ---
 
-## 누적 커밋 (11개+)
+## 누적 커밋 (14개+)
 
 ```
+(B4 — 후속 SHA 채움)
+docs(phase8-api): PROGRESS B4 완료 박제                          ← B4 #3
+feat(phase8-b4): startV3Pathfinding wiring + handleLocalizeV3Success 분기 교체  ← B4 #2
+feat(phase8-b4): PathfindingResponse → [PathStep] 어댑터 + 단위 테스트  ← B4 #1
 98ddb01 feat(phase8-b3): V3 측위 응답 처리 + ARKit 정렬 통합  ← B3
 7d39129 refactor(phase8-b3): mock attemptPnP UserDefaults 토글로 분리 (V3 통합 사전 정리)
 083fe93 feat(phase8-b3): LocalizeV3Pose → simd_float4x4 변환 헬퍼 + 단위 테스트
@@ -38,6 +42,12 @@ aacfbfb feat(phase7-1): 서버 SuperPoint 매핑 형식과 클라 추출 동기�
   - `localizedScanId` 캐싱 (B4 인계)
   - `attemptPnP` 는 `#if DEBUG + UserDefaults("useMockPnP")` 로 격리 (mock 디버깅·LightGlue base 보존)
   - 단위 테스트 12 통과 (5 신규 + 7 기존)
+- **B4 완료 — V3 pathfinding 호출 wiring + 응답 어댑터**
+  - `PathfindingResponse.toPathSteps()` extension (DTO → 기존 [PathStep])
+  - `useV3Pathfinding` 토글 + `startV3Pathfinding` 메서드 (NetworkManager.pathfinding 호출 + drawPathNodes 어댑팅)
+  - `handleLocalizeV3Success` 의 `else` 분기 교체 (`startCoordinateRoute` → `startV3Pathfinding`)
+  - floorTransitions[] 는 `detectFloorTransition` 키워드 매칭으로 자동 처리 (별도 매핑 불요)
+  - 단위 테스트 15 통과 (3 신규 + 12 기존)
 
 ## 막힌 지점 — 실측 PnP 정확도 (이전 결론)
 
@@ -79,9 +89,10 @@ LightGlue 검증으로 매처 한계 확정. C 트랙(LightGlue Core ML 변환) 
 - **B1** ✅ DTO 정의 (이전 세션)
 - **B2** ✅ NetworkManager 메서드 (이전 세션, 모킹 응답 검증)
 - **B3** ✅ V3 흐름 (4-5장 캡처 + multipart 업로드 + 응답 처리)
-- **B4** ▶️ 다음 — pathfinding 호출 (`localizedScanId` + translation 을 `PathfindingRequest` 로 매핑, `findRouteByCoordinates` 대체)
-- **B5** lookup 호출 + mock bundle 자리에 실 응답
+- **B4** ✅ pathfinding 호출 wiring (`localizedScanId` + translation → `PathfindingRequest` → drawPathNodes 어댑터)
+- **B5** ▶️ 다음 — lookup 호출 + mock bundle 자리에 실 응답
 - **B6** wiring (`MockBundleProvider` → `NetworkBundleProvider`)
+- **C 트랙 (병행)** — LightGlue iOS 통합 (PyTorch → Core ML 변환 + Swift 추론 인터페이스)
 
 ### C 트랙 (병행 진행 중)
 
