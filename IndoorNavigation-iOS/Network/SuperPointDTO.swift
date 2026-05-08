@@ -50,3 +50,50 @@ struct LocalizeV3Response: Codable {
     let floorId: String
     let floorLevel: Int
 }
+
+// MARK: - 2. Pathfinding
+
+enum VerticalPreference: String, Codable {
+    case elevator = "ELEVATOR"
+    case stairs = "STAIRS"
+}
+
+enum RoutePreference: String, Codable {
+    case shortest = "SHORTEST"
+    // TODO(서버답): FASTEST/ACCESSIBLE 등 추가 값 확인
+}
+
+struct PathfindingRequest: Codable {
+    let startScanId: String              // localize 응답 mapId
+    let startFloorLevel: Int?            // 선택 — 없으면 startScanId 로 자동
+    let startX: Double
+    let startY: Double
+    let startZ: Double
+    let destinationName: String          // POI 이름
+    let preference: RoutePreference?
+    let verticalPreference: VerticalPreference?
+}
+
+struct PathfindingStep: Codable {
+    let stepNumber: Int
+    let floorLevel: Int
+    let position: WorldPosition
+    let instruction: String?
+    let nodeId: String
+}
+
+struct FloorTransition: Codable {
+    let fromFloorLevel: Int
+    let toFloorLevel: Int
+    let connectorType: String   // TODO(서버답): enum 후보값 확인 후 enum 승격 ("elevator"/"stairs"/"escalator"?)
+    let connectorKey: String
+}
+
+struct PathfindingResponse: Codable {
+    let buildingId: String
+    let totalDistance: Double
+    let estimatedTimeSeconds: Int
+    let steps: [PathfindingStep]
+    let floorTransitions: [FloorTransition]
+    // TODO(서버답): routeMetadata 자유 스키마 — 필요 시 [String: AnyCodable] 추가
+}
