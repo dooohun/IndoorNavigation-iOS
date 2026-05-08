@@ -443,4 +443,93 @@ struct SuperPointDTOTests {
         let m = try #require(response.pose.toMatrix4x4())
         #expect(abs(m.columns.3.y - 1.5) < 1e-5)
     }
+
+    // MARK: - 13. PathfindingResponse.toPathSteps() — B4 어댑터
+
+    /// Helper: PathfindingStep 합성.
+    private func makePathStep(stepNumber: Int,
+                              floorLevel: Int,
+                              x: Double, y: Double, z: Double,
+                              instruction: String? = nil,
+                              nodeId: String = "node") -> PathfindingStep {
+        return PathfindingStep(
+            stepNumber: stepNumber,
+            floorLevel: floorLevel,
+            position: WorldPosition(x: x, y: y, z: z, floorLevel: floorLevel),
+            instruction: instruction,
+            nodeId: nodeId
+        )
+    }
+
+    /// Helper: PathfindingResponse 합성.
+    private func makePathResponse(steps: [PathfindingStep],
+                                  floorTransitions: [FloorTransition] = []) -> PathfindingResponse {
+        return PathfindingResponse(
+            buildingId: "test-building",
+            totalDistance: 0.0,
+            estimatedTimeSeconds: 0,
+            steps: steps,
+            floorTransitions: floorTransitions
+        )
+    }
+
+    @Test("toPathSteps: steps 3개 → 길이 3, 각 필드 일치")
+    func pathfindingResponse_toPathSteps_basic() {
+        let steps = [
+            makePathStep(stepNumber: 0, floorLevel: 1, x: 1.0, y: 2.0, z: 3.0, instruction: "직진"),
+            makePathStep(stepNumber: 1, floorLevel: 1, x: 4.0, y: 5.0, z: 6.0, instruction: "좌회전"),
+            makePathStep(stepNumber: 2, floorLevel: 1, x: 7.0, y: 8.0, z: 9.0, instruction: nil)
+        ]
+        let resp = makePathResponse(steps: steps)
+
+        let pathSteps = resp.toPathSteps()
+
+        #expect(pathSteps.count == 3)
+
+        #expect(pathSteps[0].stepNumber == 0)
+        #expect(pathSteps[0].floorLevel == 1)
+        #expect(pathSteps[0].position?.x == 1.0)
+        #expect(pathSteps[0].position?.y == 2.0)
+        #expect(pathSteps[0].position?.z == 3.0)
+        #expect(pathSteps[0].instruction == "직진")
+
+        #expect(pathSteps[1].stepNumber == 1)
+        #expect(pathSteps[1].position?.x == 4.0)
+        #expect(pathSteps[1].instruction == "좌회전")
+
+        #expect(pathSteps[2].stepNumber == 2)
+        #expect(pathSteps[2].position?.z == 9.0)
+        #expect(pathSteps[2].instruction == nil)
+    }
+
+    @Test("toPathSteps: steps 5개 (1→1→2→2→2) — floorLevel 변화 보존")
+    func pathfindingResponse_toPathSteps_multiFloor() {
+        let steps = [
+            makePathStep(stepNumber: 0, floorLevel: 1, x: 0.0, y: 0.0, z: 0.0),
+            makePathStep(stepNumber: 1, floorLevel: 1, x: 1.0, y: 0.0, z: 0.0, instruction: "TAKE_ELEVATOR"),
+            makePathStep(stepNumber: 2, floorLevel: 2, x: 1.0, y: 0.0, z: 0.0),
+            makePathStep(stepNumber: 3, floorLevel: 2, x: 2.0, y: 0.0, z: 0.0),
+            makePathStep(stepNumber: 4, floorLevel: 2, x: 3.0, y: 0.0, z: 0.0)
+        ]
+        let resp = makePathResponse(steps: steps)
+
+        let pathSteps = resp.toPathSteps()
+
+        #expect(pathSteps.count == 5)
+        #expect(pathSteps[0].floorLevel == 1)
+        #expect(pathSteps[1].floorLevel == 1)
+        #expect(pathSteps[2].floorLevel == 2)
+        #expect(pathSteps[3].floorLevel == 2)
+        #expect(pathSteps[4].floorLevel == 2)
+
+        // instruction 키워드 보존 (detectFloorTransition 가 사용)
+        #expect(pathSteps[1].instruction == "TAKE_ELEVATOR")
+    }
+
+    @Test("toPathSteps: 빈 steps → 빈 배열")
+    func pathfindingResponse_toPathSteps_emptySteps() {
+        let resp = makePathResponse(steps: [])
+        let pathSteps = resp.toPathSteps()
+        #expect(pathSteps.isEmpty)
+    }
 }

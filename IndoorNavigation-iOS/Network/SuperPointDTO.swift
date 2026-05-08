@@ -222,3 +222,20 @@ extension LocalizeV3Pose {
         return nil
     }
 }
+
+// MARK: - Pathfinding helpers
+
+extension PathfindingResponse {
+    /// PathfindingResponse.steps[] → 기존 PathStep 모델 변환.
+    /// floorTransitions[] 는 detectFloorTransition 이 step 변화로 자동 처리.
+    func toPathSteps() -> [PathStep] {
+        return steps.map { s in
+            PathStep(
+                stepNumber: s.stepNumber,
+                floorLevel: s.floorLevel,
+                position: Position(x: s.position.x, y: s.position.y, z: s.position.z),
+                instruction: s.instruction
+            )
+        }
+    }
+}
