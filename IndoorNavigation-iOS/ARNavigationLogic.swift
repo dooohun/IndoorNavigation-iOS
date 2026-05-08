@@ -212,23 +212,26 @@ class ARNavigationLogic {
         }
 
         // Phase 8 bundle 로드 — 매 프레임 매칭 호환성 검증용. 실패해도 추론은 계속.
-        // DEBUG 빌드 + UserDefaults `useNetworkBundle` == true 면 NetworkBundleProvider 사용,
+        // DEBUG 빌드 + LightGlue 토글 ON 이면 NetworkBundleProvider 사용 (UserDefaults 키 명시 시 우선),
         // 실패 시 MockBundleProvider 폴백.
         let useNetworkBundle: Bool = {
             #if DEBUG
-            return UserDefaults.standard.bool(forKey: "useNetworkBundle")
+            if UserDefaults.standard.object(forKey: "useNetworkBundle") != nil {
+                return UserDefaults.standard.bool(forKey: "useNetworkBundle")
+            }
+            return Self.useLightGlueMatcher  // LightGlue 사용 시 자동 ON — mock_bundle stale 회피
             #else
             return false
             #endif
         }()
 
         if useNetworkBundle {
-            // TODO(S3): BuildingDetailResponse.floors 매핑 — 현재는 floorLevel hardcode
+            // TODO(S3): BuildingDetailResponse.floors 매핑 — 현재는 floorLevel hardcode (테스트 빌딩 active scan = 4)
             // TODO(서버답): 빌딩 매핑 좌표계 origin 확인 — queryPosition (0,0,0)
             // TODO(서버답): 실측 byteSize 보고 radiusM 조정
             let provider = NetworkBundleProvider(
                 buildingId: self.buildingId,
-                floorLevel: 3,
+                floorLevel: 4,
                 queryPosition: SIMD3<Double>(0, 0, 0),
                 radiusM: 100.0
             )
@@ -513,6 +516,12 @@ class ARNavigationLogic {
             bestKfIdx, pairs.count, pose.reprojectionError,
             t.x, t.y, t.z, yawDeg
         ))
+        // reprojection error 임계 게이팅 — 30px 초과 시 측위 fail 처리.
+        // 정상 측위 reproj 1~10px. 30+ 면 좌표계 정합 X (mock_bundle stale 또는 다른 매핑 영역).
+        if pose.reprojectionError > 30 {
+            print("[LightGlue][PnP] kf=\(bestKfIdx) reproj=\(String(format: "%.1f", pose.reprojectionError))px > 30 — 측위 신뢰도 부족, fail 처리")
+            return nil
+        }
         return (pose, bestKfIdx)
     }
 
