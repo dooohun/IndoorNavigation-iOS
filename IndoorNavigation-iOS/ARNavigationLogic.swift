@@ -906,14 +906,19 @@ class ARNavigationLogic {
             delegate?.setLoading(false)
             drawPathNodes(steps: steps)
         } else {
-            delegate?.showRouteCalculating(true)
-            if Self.useV3Pathfinding {
-                startV3Pathfinding(scanId: response.mapId,
-                                   startFloorLevel: response.pose.floorLevel,
-                                   translation: translation)
-            } else {
-                startCoordinateRoute(pose: pose, floorId: response.pose.floorId ?? self.floorId)
-            }
+            // pathfinding 제거: POI displayPoint(self.goal) 좌표로 단순 목적지 핀만 표시.
+            // 추적은 추후 클라 LightGlue cadence 로 매 주기 절대 측위 (별도 트랙).
+            delegate?.showRouteCalculating(false)
+            delegate?.setLoading(false)
+            delegate?.updateStatus("\(destinationName) 방향으로 이동하세요.", color: .white)
+            let destStep = PathStep(
+                stepNumber: 0,
+                floorLevel: response.pose.floorLevel ?? self.localizedFloorLevel,
+                position: Position(x: self.goal.x, y: self.goal.y, z: self.goal.z ?? 0),
+                instruction: destinationName
+            )
+            drawPathNodes(steps: [destStep])
+            print("[Direct] 목적지 핀 표시: name=\(destinationName), goal=(\(self.goal.x), \(self.goal.y), \(self.goal.z ?? 0))")
         }
     }
 
