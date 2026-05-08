@@ -164,6 +164,18 @@ class ARNavigationLogic {
     /// PnP 최소 매칭 점 수 (DLT 이론상 6, 실용은 더 많을수록 안정).
     private let pnpMinPairs: Int = 6
 
+    // MARK: - Phase 8 추적 cadence (A 트랙)
+    /// 추적 측위 주기 (초). 실측 후 조정. TODO(A1).
+    private let trackingCadenceSec: TimeInterval = 1.0
+    /// 추적 timer.
+    private var trackingTimer: Timer?
+    /// 추적 추론 큐 — userInitiated.
+    private let trackingQueue = DispatchQueue(label: "tracking.lightglue", qos: .userInitiated)
+    /// tick 간 큐 쌓임 방지. main 전용.
+    private var isTrackingTickInFlight: Bool = false
+    /// 도착 임계 (m). TODO(A1).
+    private let trackingArrivalThresholdM: Float = 1.0
+
     /// LightGlue 매칭 엔진 — 토글 ON 시에만 init. mlpackage 미배치/load 실패 시 nil → fallback.
     private lazy var lightGlueMatcher: LightGlueMatcherEngine? = {
         do {
@@ -576,6 +588,9 @@ class ARNavigationLogic {
         arrivalCheckTimer?.invalidate()
         arrivalCheckTimer = nil
         hasNotifiedArrival = false
+        trackingTimer?.invalidate()
+        trackingTimer = nil
+        isTrackingTickInFlight = false
 
         capturedImages = []
         capturedARPoses = []
@@ -888,6 +903,7 @@ class ARNavigationLogic {
                         Data(base64Encoded: kf.descriptorsB64) ?? Data()
                     }
                     print("[NetworkBundle] loaded \(bundle.keyframes.count) keyframes (사용자 주변)")
+                    self.startTracking()
                 case .failure(let error):
                     print("[NetworkBundle] fetch failed: \(error) — 기존 mock_bundle 유지")
                 }
@@ -1548,6 +1564,9 @@ class ARNavigationLogic {
         arrivalCheckTimer?.invalidate()
         arrivalCheckTimer = nil
         hasNotifiedArrival = false
+        trackingTimer?.invalidate()
+        trackingTimer = nil
+        isTrackingTickInFlight = false
 
         delegate?.setLocateButtonVisible(false)
         delegate?.setScanningOverlay(visible: true)
@@ -1727,6 +1746,117 @@ class ARNavigationLogic {
 
         captureTimer = Timer.scheduledTimer(withTimeInterval: captureInterval, repeats: true) { [weak self] _ in
             self?.captureOneFrame()
+        }
+    }
+
+    // MARK: - Phase 8 추적 측위 cadence (A 트랙)
+
+    /// 추적 측위 시작 — V3 측위 + lookup 완료 후 호출. cadence 마다 background 측위.
+    func startTracking() {
+        guard Self.useLightGlueMatcher else {
+            print("[Tracking] useLightGlueMatcher OFF — 추적 미시작")
+            return
+        }
+        guard let bundle = localizationBundle, !bundle.keyframes.isEmpty else {
+            print("[Tracking] localizationBundle 없음 — 추적 미시작")
+            return
+        }
+        guard lightGlueMatcher != nil else {
+            print("[Tracking] LightGlueMatcher 없음 — 추적 미시작")
+            return
+        }
+        guard superPointExtractor != nil else {
+            print("[Tracking] SuperPointExtractor 없음 — 추적 미시작")
+            return
+        }
+        trackingTimer?.invalidate()
+        trackingTimer = Timer.scheduledTimer(withTimeInterval: trackingCadenceSec, repeats: true) { [weak self] _ in
+            self?.runTrackingTick()
+        }
+        print("[Tracking] 추적 측위 시작 — cadence \(trackingCadenceSec)s, keyframes=\(bundle.keyframes.count)")
+    }
+
+    func stopTracking() {
+        trackingTimer?.invalidate()
+        trackingTimer = nil
+        print("[Tracking] 추적 측위 중지")
+    }
+
+    private func runTrackingTick() {
+        guard !isTrackingTickInFlight else {
+            print("[Tracking] 직전 tick 미완료 — skip")
+            return
+        }
+        guard let frame = arSession?.currentFrame,
+              let bundle = localizationBundle,
+              let extractor = superPointExtractor,
+              let engine = lightGlueMatcher else { return }
+        // bundle/allSteps race — allSteps 비어있으면 skip (drawPathNodes 도 호출 안 됨)
+        guard !allSteps.isEmpty else { return }
+
+        let arPoseAtCapture = frame.camera.transform
+        let pixelBuffer = frame.capturedImage
+        let intrinsics = frame.camera.intrinsics
+        let timestamp = frame.timestamp
+        let deviceIsLandscape = UIDevice.current.orientation.isLandscape
+        let orientation: InputOrientation = deviceIsLandscape ? .landscape : .portrait
+
+        isTrackingTickInFlight = true
+        trackingQueue.async { [weak self] in
+            guard let self = self else { return }
+            let queryFrame = extractor.extract(
+                image: pixelBuffer,
+                intrinsics: intrinsics,
+                timestamp: timestamp,
+                orientation: orientation
+            )
+            // 모든 keyframe 매칭 → best
+            var perKfMatches: [(idx: Int, matches: [LightGlueMatcherEngine.Match])] = []
+            for (kfIdx, kf) in bundle.keyframes.enumerated() {
+                guard !kf.keypoints.isEmpty else { continue }
+                if let m = try? engine.match(query: queryFrame, targetKeyframe: kf, targetIntrinsics: bundle.manifest.intrinsics) {
+                    perKfMatches.append((idx: kfIdx, matches: m))
+                }
+            }
+            guard let best = perKfMatches.max(by: { $0.matches.count < $1.matches.count }),
+                  !best.matches.isEmpty else {
+                DispatchQueue.main.async {
+                    print("[Tracking] tick — 매칭 없음, pose 유지")
+                    self.isTrackingTickInFlight = false
+                }
+                return
+            }
+            guard let pnp = self.attemptPnPLightGlue(frame: queryFrame, bundle: bundle, bestKfIdx: best.idx, lightGlueMatches: best.matches) else {
+                DispatchQueue.main.async {
+                    print("[Tracking] tick — PnP 실패, pose 유지")
+                    self.isTrackingTickInFlight = false
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                self.updateLocalizedPose(pose: pnp.pose, arPoseAtCapture: arPoseAtCapture, kfIdx: pnp.kfIdx)
+                self.isTrackingTickInFlight = false
+            }
+        }
+    }
+
+    private func updateLocalizedPose(pose: PoseEstimate, arPoseAtCapture: simd_float4x4, kfIdx: Int) {
+        let t = pose.translation
+        let q = simd_quatf(pose.rotation)
+        let newPose = Pose(
+            x: Double(t.x), y: Double(t.y), z: Double(t.z),
+            qx: Double(q.imag.x), qy: Double(q.imag.y), qz: Double(q.imag.z), qw: Double(q.real)
+        )
+        self.localizedPose = newPose
+        self.matchedARPose = arPoseAtCapture
+        print(String(format: "[Tracking][갱신] kf=%d t=(%.2f, %.2f, %.2f)", kfIdx, t.x, t.y, t.z))
+        // 노드 갱신 — currentTargetWaypointIndex 보존/복원
+        // TODO(A2): drawPathNodes 재생성 대신 pathRootNode.simdTransform 갱신으로 진화 (깜빡임 완화)
+        // TODO(A2): 직전 pose 대비 변화량 < 0.1m 면 skip (throttle)
+        let savedWaypoint = currentTargetWaypointIndex
+        if !allSteps.isEmpty {
+            drawPathNodes(steps: allSteps)
+            currentTargetWaypointIndex = savedWaypoint
         }
     }
 
