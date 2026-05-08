@@ -165,8 +165,9 @@ class ARNavigationLogic {
     private let pnpMinPairs: Int = 6
 
     // MARK: - Phase 8 추적 cadence (A 트랙)
-    /// 추적 측위 주기 (초). 실측 후 조정. TODO(A1).
-    private let trackingCadenceSec: TimeInterval = 1.0
+    /// 추적 측위 주기 (초). 실측: 발열 throttled SuperPoint ~700ms + LightGlue 5kf × ~100ms ≈ 1.5s.
+    /// cadence 2.0s 로 큐 쌓임 방지. TODO(A1): thermal throttle / globalDescriptor prefilter 도입 후 단축.
+    private let trackingCadenceSec: TimeInterval = 2.0
     /// 추적 timer.
     private var trackingTimer: Timer?
     /// 추적 추론 큐 — userInitiated.
@@ -751,13 +752,18 @@ class ARNavigationLogic {
         var perKfMatches: [(idx: Int, matches: [LightGlueMatcherEngine.Match])] = []
         for (kfIdx, kf) in bundle.keyframes.enumerated() {
             guard !kf.keypoints.isEmpty else { continue }
+            let validW3d = kf.world3d.compactMap { $0 }.count
+            guard validW3d > 0 else {
+                print("[LightGlue][매칭] kf=\(kfIdx) world3d 전부 NaN — skip")
+                continue
+            }
             do {
                 let m = try engine.match(
                     query: queryFrame,
                     targetKeyframe: kf,
                     targetIntrinsics: bundle.manifest.intrinsics
                 )
-                print("[LightGlue][매칭] kf=\(kfIdx) (kp=\(kf.keypoints.count)) → matches=\(m.count)")
+                print("[LightGlue][매칭] kf=\(kfIdx) (kp=\(kf.keypoints.count), valid_w3d=\(validW3d)) → matches=\(m.count)")
                 perKfMatches.append((idx: kfIdx, matches: m))
             } catch {
                 print("[LightGlue][매칭] kf=\(kfIdx) → ERROR: \(error)")
@@ -1810,10 +1816,16 @@ class ARNavigationLogic {
                 timestamp: timestamp,
                 orientation: orientation
             )
-            // 모든 keyframe 매칭 → best
+            // 모든 keyframe 매칭 → best.
+            // 가드: world3d 전부 NaN 인 keyframe 제외 (matched 돼도 PnP 입력 페어 0 이라 무용).
             var perKfMatches: [(idx: Int, matches: [LightGlueMatcherEngine.Match])] = []
             for (kfIdx, kf) in bundle.keyframes.enumerated() {
                 guard !kf.keypoints.isEmpty else { continue }
+                let validW3d = kf.world3d.compactMap { $0 }.count
+                guard validW3d > 0 else {
+                    print("[Tracking] kf=\(kfIdx) world3d 전부 NaN — skip (서버 매핑 무용)")
+                    continue
+                }
                 if let m = try? engine.match(query: queryFrame, targetKeyframe: kf, targetIntrinsics: bundle.manifest.intrinsics) {
                     perKfMatches.append((idx: kfIdx, matches: m))
                 }
