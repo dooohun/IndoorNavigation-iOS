@@ -13,16 +13,14 @@ struct SuperPointDTOTests {
     func localizeV3Response_decodesQuaternionPose() throws {
         let json = """
         {
+          "buildingId": "00000000-0000-0000-0000-000000000001",
+          "mapId": "scan-uuid-1",
           "pose": {
             "tx": 1.5, "ty": 2.5, "tz": 3.5,
-            "qx": 0.1, "qy": 0.2, "qz": 0.3, "qw": 0.927
+            "qx": 0.1, "qy": 0.2, "qz": 0.3, "qw": 0.927,
+            "floorLevel": 3
           },
-          "confidence": 0.85,
-          "mapId": "scan-uuid-1",
-          "numMatches": 124,
-          "matchedImageIndex": 0,
-          "floorId": "floor-uuid-1",
-          "floorLevel": 3
+          "confidence": 0.85
         }
         """.data(using: .utf8)!
 
@@ -34,7 +32,8 @@ struct SuperPointDTOTests {
         #expect(decoded.pose.matrix == nil)
         #expect(decoded.confidence == 0.85)
         #expect(decoded.mapId == "scan-uuid-1")
-        #expect(decoded.floorLevel == 3)
+        #expect(decoded.buildingId == "00000000-0000-0000-0000-000000000001")
+        #expect(decoded.pose.floorLevel == 3)
     }
 
     // MARK: - 2. LocalizeV3 — 4×4 행렬 형식 디코딩
@@ -43,6 +42,8 @@ struct SuperPointDTOTests {
     func localizeV3Response_decodesMatrixPose() throws {
         let json = """
         {
+          "buildingId": "00000000-0000-0000-0000-000000000002",
+          "mapId": "scan-uuid-2",
           "pose": {
             "matrix": [
               [1.0, 0.0, 0.0, 1.5],
@@ -51,12 +52,7 @@ struct SuperPointDTOTests {
               [0.0, 0.0, 0.0, 1.0]
             ]
           },
-          "confidence": 0.7,
-          "mapId": "scan-uuid-2",
-          "numMatches": 50,
-          "matchedImageIndex": 1,
-          "floorId": "floor-uuid-2",
-          "floorLevel": 1
+          "confidence": 0.7
         }
         """.data(using: .utf8)!
 
@@ -417,24 +413,21 @@ struct SuperPointDTOTests {
     func localizeV3Response_decodeFromJSON_quaternionForm() throws {
         let json = """
         {
+          "buildingId": "00000000-0000-0000-0000-0000000000ff",
+          "mapId": "scan-uuid-fixture",
           "pose": {
             "tx": 12.0, "ty": 1.5, "tz": -3.0,
-            "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0
+            "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0,
+            "floorLevel": 5
           },
-          "confidence": 0.92,
-          "mapId": "scan-uuid-fixture",
-          "numMatches": 200,
-          "matchedImageIndex": 2,
-          "floorId": "floor-uuid-fixture",
-          "floorLevel": 5
+          "confidence": 0.92
         }
         """.data(using: .utf8)!
 
         let response = try JSONDecoder().decode(LocalizeV3Response.self, from: json)
         #expect(response.confidence == 0.92)
         #expect(response.mapId == "scan-uuid-fixture")
-        #expect(response.matchedImageIndex == 2)
-        #expect(response.floorLevel == 5)
+        #expect(response.pose.floorLevel == 5)
 
         // helpers 가 디코딩 결과로부터 정상 동작하는지
         let t = try #require(response.pose.translation)

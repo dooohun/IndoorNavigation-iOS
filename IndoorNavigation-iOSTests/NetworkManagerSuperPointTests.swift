@@ -125,13 +125,10 @@ struct NetworkManagerSuperPointTests {
         // 200 응답 stub — 본문은 디코드 가능한 최소 JSON
         let stubJSON = """
         {
-          "pose": {"tx": 0, "ty": 0, "tz": 0, "qx": 0, "qy": 0, "qz": 0, "qw": 1, "matrix": null},
-          "confidence": 0.5,
+          "buildingId": "bld-test",
           "mapId": "scan-x",
-          "numMatches": 0,
-          "matchedImageIndex": 0,
-          "floorId": "floor-x",
-          "floorLevel": 1
+          "pose": {"tx": 0, "ty": 0, "tz": 0, "qx": 0, "qy": 0, "qz": 0, "qw": 1},
+          "confidence": 0.5
         }
         """.data(using: .utf8)!
         MockURLProtocol.stubResponse = (data: stubJSON, statusCode: 200, headers: ["Content-Type": "application/json"])
@@ -146,7 +143,7 @@ struct NetworkManagerSuperPointTests {
         _ = try result.get()
 
         let req = try #require(MockURLProtocol.capturedRequest, "request 가 캡처되지 않음")
-        #expect(req.url?.absoluteString == "http://218.150.183.198:8080/api/v1/buildings/bld-test/localize/v3")
+        #expect(req.url?.absoluteString == "http://218.150.183.198:8080/api/v1/buildings/bld-test/localize")
         #expect(req.httpMethod == "POST")
         let contentType = req.value(forHTTPHeaderField: "Content-Type") ?? ""
         #expect(contentType.hasPrefix("multipart/form-data; boundary="))
@@ -171,13 +168,10 @@ struct NetworkManagerSuperPointTests {
 
         let stubJSON = """
         {
-          "pose": {"tx": 1.5, "ty": 2.5, "tz": 3.5, "qx": 0.1, "qy": 0.2, "qz": 0.3, "qw": 0.9, "matrix": null},
-          "confidence": 0.92,
+          "buildingId": "00000000-0000-0000-0000-000000000abc",
           "mapId": "scan-abc",
-          "numMatches": 128,
-          "matchedImageIndex": 1,
-          "floorId": "floor-3",
-          "floorLevel": 3
+          "pose": {"tx": 1.5, "ty": 2.5, "tz": 3.5, "qx": 0.1, "qy": 0.2, "qz": 0.3, "qw": 0.9, "floorLevel": 3},
+          "confidence": 0.92
         }
         """.data(using: .utf8)!
         MockURLProtocol.stubResponse = (data: stubJSON, statusCode: 200, headers: ["Content-Type": "application/json"])
@@ -187,9 +181,8 @@ struct NetworkManagerSuperPointTests {
         }
         let response = try result.get()
         #expect(response.mapId == "scan-abc")
-        #expect(response.floorLevel == 3)
-        #expect(response.numMatches == 128)
-        #expect(response.matchedImageIndex == 1)
+        #expect(response.buildingId == "00000000-0000-0000-0000-000000000abc")
+        #expect(response.pose.floorLevel == 3)
         #expect(response.pose.tx == 1.5)
         #expect(response.pose.qx == 0.1)
         #expect(response.pose.qw == 0.9)

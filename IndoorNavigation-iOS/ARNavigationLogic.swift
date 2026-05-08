@@ -574,23 +574,24 @@ class ARNavigationLogic {
             return
         }
 
-        let matchedIndex = response.matchedImageIndex
-        guard matchedIndex >= 0, matchedIndex < capturedARPoses.count else {
+        // 서버 LocalizeResponse 에 matchedImageIndex 없음 — 캡처 마지막 프레임으로 fallback (가장 최근 ARKit pose).
+        guard let lastARPose = capturedARPoses.last else {
             delegate?.setLoading(false)
             delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
             delegate?.setLocateButtonVisible(true)
             return
         }
-        matchedARPose = capturedARPoses[matchedIndex]
+        matchedARPose = lastARPose
 
         let pose = Pose(
             x: Double(translation.x), y: Double(translation.y), z: Double(translation.z),
             qx: Double(quat.imag.x), qy: Double(quat.imag.y), qz: Double(quat.imag.z), qw: Double(quat.real)
         )
         localizedPose = pose
-        localizedFloorId = response.floorId
-        localizedFloorLevel = response.floorLevel
-        localizedScanId = response.mapId  // B4 인계: PathfindingRequest.startScanId
+        // 서버 LocalizeResponse 본체에 floorId/floorLevel 없음 — pose object 안에 있을 수도(자유 schema). 없으면 self.floorId fallback.
+        localizedFloorId = response.pose.floorId ?? self.floorId
+        localizedFloorLevel = response.pose.floorLevel
+        localizedScanId = response.mapId  // B4 인계: PathfindingRequest.startScanId (Optional)
 
         delegate?.showScanComplete()
 
@@ -607,10 +608,10 @@ class ARNavigationLogic {
             delegate?.showRouteCalculating(true)
             if Self.useV3Pathfinding {
                 startV3Pathfinding(scanId: response.mapId,
-                                   startFloorLevel: response.floorLevel,
+                                   startFloorLevel: response.pose.floorLevel,
                                    translation: translation)
             } else {
-                startCoordinateRoute(pose: pose, floorId: response.floorId)
+                startCoordinateRoute(pose: pose, floorId: response.pose.floorId ?? self.floorId)
             }
         }
     }
@@ -666,7 +667,15 @@ class ARNavigationLogic {
 
     // NOTE(B4): floorTransitions[] 는 detectFloorTransition 이 step 변화로 자동 처리 — 별도 매핑 불요.
     // 키워드 미스매치 발견 시 detectFloorTransition 의 stairsKeywords/elevatorKeywords 보강.
-    private func startV3Pathfinding(scanId: String, startFloorLevel: Int, translation: simd_float3) {
+    private func startV3Pathfinding(scanId: String?, startFloorLevel: Int?, translation: simd_float3) {
+        // 서버 PathfindingRequest: startScanId 우선, 없으면 startFloorLevel — 둘 다 nil 이면 422 START_NOT_SPECIFIED
+        guard scanId != nil || startFloorLevel != nil else {
+            delegate?.setLoading(false)
+            delegate?.showRouteCalculating(false)
+            delegate?.showScanFailed(message: "측위 결과가 부족해요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
         // TODO(서버답): verticalPreference/preference 사용자 설정 분리 — 별도 트랙
         let req = PathfindingRequest(
             startScanId: scanId,
