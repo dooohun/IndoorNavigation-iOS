@@ -916,7 +916,7 @@ class ARNavigationLogic {
             let userStep = PathStep(
                 stepNumber: 0,
                 floorLevel: floorLevel,
-                position: Position(x: pose.x ?? 0, y: pose.y ?? 0, z: pose.z),
+                position: Position(x: pose.x ?? 0, y: pose.y ?? 0, z: pose.z ?? 0),
                 instruction: "현재 위치"
             )
             let destStep = PathStep(
