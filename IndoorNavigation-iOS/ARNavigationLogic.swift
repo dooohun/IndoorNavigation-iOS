@@ -183,7 +183,49 @@ class ARNavigationLogic {
             superPointExtractor = stub
         }
 
-        // Phase 8 mock bundle 로드 — 매 프레임 매칭 호환성 검증용. 실패해도 추론은 계속.
+        // Phase 8 bundle 로드 — 매 프레임 매칭 호환성 검증용. 실패해도 추론은 계속.
+        // DEBUG 빌드 + UserDefaults `useNetworkBundle` == true 면 NetworkBundleProvider 사용,
+        // 실패 시 MockBundleProvider 폴백.
+        let useNetworkBundle: Bool = {
+            #if DEBUG
+            return UserDefaults.standard.bool(forKey: "useNetworkBundle")
+            #else
+            return false
+            #endif
+        }()
+
+        if useNetworkBundle {
+            // TODO(S3): BuildingDetailResponse.floors 매핑 — 현재는 floorLevel hardcode
+            // TODO(서버답): 빌딩 매핑 좌표계 origin 확인 — queryPosition (0,0,0)
+            // TODO(서버답): 실측 byteSize 보고 radiusM 조정
+            let provider = NetworkBundleProvider(
+                buildingId: self.buildingId,
+                floorLevel: 3,
+                queryPosition: SIMD3<Double>(0, 0, 0),
+                radiusM: 100.0
+            )
+            provider.fetch { [weak self] result in
+                guard let self = self else { return }
+                switch result {
+                case .success(let bundle):
+                    self.localizationBundle = bundle
+                    self.keyframeDescriptorCache = bundle.keyframes.map { kf in
+                        Data(base64Encoded: kf.descriptorsB64) ?? Data()
+                    }
+                    print("[NetworkBundle] loaded \(bundle.keyframes.count) keyframes (intrinsics \(bundle.manifest.intrinsics.width)×\(bundle.manifest.intrinsics.height))")
+                case .failure(let error):
+                    print("[NetworkBundle] fetch failed: \(error) — fallback to mock")
+                    self.loadMockBundleFallback()
+                }
+            }
+        } else {
+            loadMockBundleFallback()
+        }
+    }
+
+    /// `MockBundleProvider` 로드 + descriptor 캐시 채움. 실패해도 throw 안 함 (매칭만 비활성).
+    /// 토글 OFF 시 + NetworkBundleProvider 실패 시 모두 본 헬퍼로 폴백.
+    private func loadMockBundleFallback() {
         do {
             let bundle = try MockBundleProvider().loadBundle()
             localizationBundle = bundle
