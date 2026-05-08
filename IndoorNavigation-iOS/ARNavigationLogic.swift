@@ -45,6 +45,7 @@ class ARNavigationLogic {
     }
 
     // 다중 프레임 캡처
+    // TODO(서버답): V3 권장 이미지 개수 4-5장 가정
     let maxImages = 5
     let captureInterval: TimeInterval = 0.8
     private var matchedARPose: simd_float4x4?
@@ -295,8 +296,13 @@ class ARNavigationLogic {
         )
         recordMatchSample(sample, queryCount: queryCount)
 
-        // best keyframe 의 매칭으로 2D-3D 쌍 추출 + PnP 시도. 매핑 영역 안에 있을 때만 의미 있음.
-        attemptPnP(frame: frame, bundle: bundle, bestKfIdx: best.idx, bestMatches: best.matches)
+        // mock 트랙 PnP — V3 가 메인 측위. UserDefaults("useMockPnP")=true 시에만 시도.
+        // TODO(향후): superPointDebug 컨트롤러에 토글 UI 추가
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "useMockPnP") {
+            attemptPnP(frame: frame, bundle: bundle, bestKfIdx: best.idx, bestMatches: best.matches)
+        }
+        #endif
     }
 
     /// best keyframe 매칭에서 valid 2D-3D 쌍을 추출 + DLTPnPSolver 호출. 결과 즉시 console 로그.
