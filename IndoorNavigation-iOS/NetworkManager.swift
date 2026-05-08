@@ -443,11 +443,12 @@ class NetworkManager {
     func localizeV3(buildingId: String,
                     images: [UIImage],
                     completion: @escaping (Result<LocalizeV3Response, Error>) -> Void) {
-        // TODO(서버답): endpoint path '/buildings/{id}/localize/v3' 가정 — slamBaseURL/v3 와 baseURL/v3 중 확인 필요
-        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/localize/v3") else { return }
+        // 서버 swagger 확정: V3 endpoint 는 /api/v1/buildings/{id}/localize (v3 suffix 없음).
+        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/localize") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 30
+        // 서버에서 SuperPoint 추출 + LightGlue 매칭 + PnP 까지 수행 — 5장 처리에 30초+ 걸림. 90초로 상향.
+        request.timeoutInterval = 90
 
         let boundary = "Boundary-\(UUID().uuidString)"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
@@ -498,7 +499,7 @@ class NetworkManager {
             }
             do {
                 let result = try JSONDecoder().decode(LocalizeV3Response.self, from: data)
-                log("RES", "localizeV3 성공: floorLevel=\(result.floorLevel), confidence=\(result.confidence)")
+                log("RES", "localizeV3 성공: confidence=\(result.confidence), mapId=\(result.mapId ?? "nil"), pose.floorLevel=\(result.pose.floorLevel.map(String.init) ?? "nil")")
                 completion(.success(result))
             } catch {
                 log("ERR", "파싱 실패:", error)

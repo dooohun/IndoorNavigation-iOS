@@ -28,7 +28,8 @@ struct LocalizeV3Request {
     let buildingId: String  // UUID 문자열
 }
 
-/// Localize V3 응답의 pose. swagger 의 `additionalProp1: {}` 형식 미정 — 두 후보 모두 디코딩 가능하도록 모든 필드 Optional 처리.
+/// Localize V3 응답의 pose. 서버 swagger 가 `additionalProperties: true` 자유 schema —
+/// 들어올 가능성 있는 필드 모두 Optional 로 보존하여 어떤 형식이든 디코딩 실패하지 않게.
 struct LocalizeV3Pose: Codable {
     // 추정 A: tx/ty/tz + 쿼터니언 (qx/qy/qz/qw)
     let tx: Double?
@@ -38,18 +39,21 @@ struct LocalizeV3Pose: Codable {
     let qy: Double?
     let qz: Double?
     let qw: Double?
-    // TODO(서버답): 4×4 행렬로 오면 아래 fallback
+    // TODO(서버답): 4×4 행렬로 오면 fallback
     let matrix: [[Double]]?
+    // 서버 응답에 floorLevel/floorId 가 LocalizeResponse 본체에 없음 → pose object 안에 들어있을 가능성. 없으면 nil.
+    let floorLevel: Int?
+    let floorId: String?
 }
 
+/// 서버 swagger `LocalizeResponse` 정합:
+/// required: buildingId / pose / confidence. nullable: mapId. optional: candidates(자유 object — 디코드 무시).
 struct LocalizeV3Response: Codable {
+    let buildingId: String
+    let mapId: String?            // nullable — pathfinding startScanId 로 사용
     let pose: LocalizeV3Pose
     let confidence: Double
-    let mapId: String              // pathfinding startScanId 로 사용
-    let numMatches: Int
-    let matchedImageIndex: Int
-    let floorId: String
-    let floorLevel: Int
+    // candidates: [object] 자유 schema — 클라 미사용. JSONDecoder 가 모르는 키 자동 무시.
 }
 
 // MARK: - 2. Pathfinding
@@ -65,8 +69,8 @@ enum RoutePreference: String, Codable {
 }
 
 struct PathfindingRequest: Codable {
-    let startScanId: String              // localize 응답 mapId
-    let startFloorLevel: Int?            // 선택 — 없으면 startScanId 로 자동
+    let startScanId: String?             // localize 응답 mapId (서버 nullable). 둘 중 하나는 채워야 함.
+    let startFloorLevel: Int?            // 선택 — startScanId 가 있으면 무시됨
     let startX: Double
     let startY: Double
     let startZ: Double
