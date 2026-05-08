@@ -31,6 +31,9 @@ class ARNavigationLogic {
     // V3 측위 토글. false면 기존 SLAMv3(/api/slam/v3/localize) 사용.
     static let useV3Localize: Bool = true
 
+    // V3 pathfinding 토글. 현재 useV3Localize 와 짝. legacy 분리가 필요해질 때만 false.
+    static let useV3Pathfinding: Bool = true
+
     weak var delegate: ARNavigationLogicDelegate?
     weak var arSession: ARSession?
     weak var scene: SCNScene?
@@ -591,7 +594,6 @@ class ARNavigationLogic {
 
         delegate?.showScanComplete()
 
-        // TODO(B4): response.mapId → PathfindingRequest.startScanId, translation → startX/Y/Z
         if isFloorTransitionRestart {
             // 잔여 경로 재렌더링 (서버 pathfinding 호출 생략)
             delegate?.showRouteCalculating(false)
@@ -603,7 +605,13 @@ class ARNavigationLogic {
             drawPathNodes(steps: steps)
         } else {
             delegate?.showRouteCalculating(true)
-            startCoordinateRoute(pose: pose, floorId: response.floorId)
+            if Self.useV3Pathfinding {
+                startV3Pathfinding(scanId: response.mapId,
+                                   startFloorLevel: response.floorLevel,
+                                   translation: translation)
+            } else {
+                startCoordinateRoute(pose: pose, floorId: response.floorId)
+            }
         }
     }
 
@@ -653,6 +661,47 @@ class ARNavigationLogic {
                 position: Position(x: x, y: y, z: z),
                 instruction: nil
             )
+        }
+    }
+
+    // NOTE(B4): floorTransitions[] 는 detectFloorTransition 이 step 변화로 자동 처리 — 별도 매핑 불요.
+    // 키워드 미스매치 발견 시 detectFloorTransition 의 stairsKeywords/elevatorKeywords 보강.
+    private func startV3Pathfinding(scanId: String, startFloorLevel: Int, translation: simd_float3) {
+        // TODO(서버답): verticalPreference/preference 사용자 설정 분리 — 별도 트랙
+        let req = PathfindingRequest(
+            startScanId: scanId,
+            startFloorLevel: startFloorLevel,
+            startX: Double(translation.x),
+            startY: Double(translation.y),
+            startZ: Double(translation.z),
+            destinationName: self.destinationName,
+            preference: .shortest,
+            verticalPreference: .elevator
+        )
+        NetworkManager.shared.pathfinding(buildingId: buildingId, request: req) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.delegate?.setLoading(false)
+                self.delegate?.showRouteCalculating(false)
+                switch result {
+                case .success(let resp):
+                    let steps = resp.toPathSteps()
+                    // TODO(서버답): V3 pathfinding 응답에 snapDistance 추가 시 채우기
+                    self.lastStartSnapDistance = nil
+                    print("[V3-PATH] steps=\(steps.count), totalDistance=\(resp.totalDistance)m, floorTransitions=\(resp.floorTransitions.count)")
+                    if !steps.isEmpty {
+                        self.delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
+                        self.drawPathNodes(steps: steps)
+                    } else {
+                        self.delegate?.showScanFailed(message: "경로를 찾지 못했어요.\n다시 한번 스캔해 주세요.")
+                        self.delegate?.setLocateButtonVisible(true)
+                    }
+                case .failure:
+                    // TODO(B5+): STAIRS 선택 시 PATH_NOT_FOUND → ELEVATOR 재시도
+                    self.delegate?.showScanFailed(message: "경로 탐색에 실패했어요.\n다시 한번 스캔해 주세요.")
+                    self.delegate?.setLocateButtonVisible(true)
+                }
+            }
         }
     }
 
