@@ -4,10 +4,14 @@
 
 ---
 
-## 누적 커밋 (8개)
+## 누적 커밋 (11개+)
 
 ```
-bd23ef7 feat(phase8): RANSAC PnP solver + Lowe ratio test (outlier 면역 시도)  ← 직전
+98ddb01 feat(phase8-b3): V3 측위 응답 처리 + ARKit 정렬 통합  ← B3
+7d39129 refactor(phase8-b3): mock attemptPnP UserDefaults 토글로 분리 (V3 통합 사전 정리)
+083fe93 feat(phase8-b3): LocalizeV3Pose → simd_float4x4 변환 헬퍼 + 단위 테스트
+6c67861 docs(phase8-api): 진행 상태 + 다음 단계 결정 박제 (세션 정리)
+bd23ef7 feat(phase8): RANSAC PnP solver + Lowe ratio test (outlier 면역 시도)
 e7146cc docs(phase8-api): 서버 3 endpoint 사양 + 풀스택 흐름 + DTO 계획
 3cb0131 feat(phase8): ARNavigationLogic 에 PnP 호출 통합
 39ef045 feat(phase8): DLT PnP solver + 2D-3D 점 쌍 추출 인프라
@@ -17,6 +21,8 @@ fe5a06a feat(phase8): mock bundle JSON 인프라 (Codable + 5kf mock)
 aacfbfb feat(phase7-1): 서버 SuperPoint 매핑 형식과 클라 추출 동기화 (전 단계)
 ```
 
+(B1/B2 NetworkManager 메서드 + DTO 정의 커밋은 이전 세션에서 합쳐짐)
+
 ## 현재까지 완성된 인프라 (✓)
 
 - **Phase 7-1 완료** — Core ML SuperPoint 추출, 960×540 입력, 발열 안정 (Phase 7-1 워크스페이스 참고)
@@ -25,8 +31,19 @@ aacfbfb feat(phase7-1): 서버 SuperPoint 매핑 형식과 클라 추출 동기�
 - **DescriptorMatcher** — vDSP_mmul cosine similarity + Lowe ratio test
 - **PnP 인프라** — `MatchedPointPair`, `DLTPnPSolver` (LAPACK SVD), `RansacPnPSolver`
   - synthetic 단위 테스트 (clean / outlier / etc.) 모두 PASS
+- **B1/B2 — DTO + NetworkManager 메서드** (이전 세션) — `LocalizeV3Request/Response`, `PathfindingRequest/Response`, `LookupRequest/Response`, 3 메서드 모두 모킹 응답 검증
+- **B3 완료 — V3 측위 흐름 ARNavigationLogic 통합**
+  - `LocalizeV3Pose` → `simd_float4x4` 변환 helpers (matrix/quaternion 양방향, fallback)
+  - `useV3Localize` 토글 + `sendToServerV3` + `handleLocalizeV3Success`
+  - `localizedScanId` 캐싱 (B4 인계)
+  - `attemptPnP` 는 `#if DEBUG + UserDefaults("useMockPnP")` 로 격리 (mock 디버깅·LightGlue base 보존)
+  - 단위 테스트 12 통과 (5 신규 + 7 기존)
 
-## 막힌 지점 — 실측 PnP 정확도
+## 막힌 지점 — 실측 PnP 정확도 (이전 결론)
+
+LightGlue 검증으로 매처 한계 확정. C 트랙(LightGlue Core ML 변환) 병행 진행 중.
+
+
 
 여러 시도 결과:
 
@@ -55,27 +72,19 @@ aacfbfb feat(phase7-1): 서버 SuperPoint 매핑 형식과 클라 추출 동기�
 
 ---
 
-## 다음 결정 분기 (3 옵션)
+## 다음 결정 분기 — B3 완료, 다음은 B4 + C 트랙 병행
 
-### A. 매칭 미세 튜닝 (단기, 효과 미지수)
-- ratio 1.15 ~ 1.2 중간값 시도
-- 또는 절대 threshold 0.85+ 로 높임
-- 효과 한계 — 본질적으로 단순 NN 한계 안 풀림
+### B 트랙 진행 상황
 
-### B. 매칭/PnP 보류 + 서버 통신 인프라 우선 ★ 추천
-- V3/pathfinding/lookup endpoint Swift Codable + NetworkManager 메서드
-- 첫 측위는 서버가 (LightGlue 사용) 정확
-- 추적은 일단 ARKit drift 따라가다 주기적 V3 재호출
-- LightGlue iOS 도입은 별도 트랙
-- **B1**: DTO 정의
-- **B2**: NetworkManager 메서드 (모킹)
-- **B3**: V3 흐름 (4-5장 캡처 + multipart 업로드)
-- **B4**: pathfinding 호출
-- **B5**: lookup 호출 + mock bundle 자리에 실 응답
-- **B6**: wiring (`MockBundleProvider` → `NetworkBundleProvider`)
-- 서버 답 받기 전 B1+B2 미리 가능
+- **B1** ✅ DTO 정의 (이전 세션)
+- **B2** ✅ NetworkManager 메서드 (이전 세션, 모킹 응답 검증)
+- **B3** ✅ V3 흐름 (4-5장 캡처 + multipart 업로드 + 응답 처리)
+- **B4** ▶️ 다음 — pathfinding 호출 (`localizedScanId` + translation 을 `PathfindingRequest` 로 매핑, `findRouteByCoordinates` 대체)
+- **B5** lookup 호출 + mock bundle 자리에 실 응답
+- **B6** wiring (`MockBundleProvider` → `NetworkBundleProvider`)
 
-### C. LightGlue iOS 도입 (장기)
+### C 트랙 (병행 진행 중)
+
 - LightGlue PyTorch → Core ML 변환 (며칠)
 - Swift 추론 인터페이스
 - 본격 정밀 측위 가능
