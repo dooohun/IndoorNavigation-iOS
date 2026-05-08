@@ -135,6 +135,9 @@ class ARNavigationLogic {
     private var localizationBundle: LocalizationBundle?
     /// keyframe 별 base64 디코딩된 descriptor bytes 캐시 (반복 디코딩 회피).
     private var keyframeDescriptorCache: [Data] = []
+    /// NetworkBundleProvider strong reference — fetch completion 까지 인스턴스 살려둠
+    /// (로컬 변수만 두면 setupSuperPointExtractor 종료 시 deallocated → completion silent return).
+    private var networkBundleProvider: NetworkBundleProvider?
     /// 매 프레임 매칭 결과 누적 → window 평균 console 로그.
     private struct MatchSample {
         let bestKfIdx: Int
@@ -235,6 +238,7 @@ class ARNavigationLogic {
                 queryPosition: SIMD3<Double>(0, 0, 0),
                 radiusM: 100.0
             )
+            self.networkBundleProvider = provider  // strong reference 유지 — fetch completion 까지 살림
             provider.fetch { [weak self] result in
                 guard let self = self else { return }
                 switch result {
