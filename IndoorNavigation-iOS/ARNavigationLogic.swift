@@ -594,10 +594,9 @@ class ARNavigationLogic {
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let context = CIContext(options: nil)
         guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
-        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
-        let bakedImage = bakeOrientation(uiImage)
+        let uiImage = UIImage(cgImage: cgImage)
 
-        capturedImages.append(bakedImage)
+        capturedImages.append(uiImage)
         capturedARPoses.append(frame.camera.transform)
 
         let count = capturedImages.count
@@ -1517,24 +1516,6 @@ class ARNavigationLogic {
     }
 
     // MARK: - 헬퍼
-
-    /// UIImage의 imageOrientation을 실제 픽셀에 redraw하여 .up 정방향 UIImage 반환.
-    /// PNG는 EXIF orientation을 지원하지 않으므로 pngData() 호출 전에 baking 필수.
-    private func bakeOrientation(_ image: UIImage) -> UIImage {
-        if image.imageOrientation == .up {
-            return image
-        }
-
-        let format = UIGraphicsImageRendererFormat.default()
-        format.scale = image.scale
-        format.opaque = true
-        let renderer = UIGraphicsImageRenderer(size: image.size, format: format)
-        let baked = renderer.image { _ in
-            image.draw(in: CGRect(origin: .zero, size: image.size))
-        }
-
-        return baked
-    }
 
     private func computeRemainingDistance(cameraPos: simd_float3) -> Float {
         guard !smoothedPoints.isEmpty else { return 0 }
