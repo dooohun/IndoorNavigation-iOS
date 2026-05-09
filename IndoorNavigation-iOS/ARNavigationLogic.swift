@@ -56,6 +56,11 @@ class ARNavigationLogic {
     // TODO(서버답): V3 권장 이미지 개수 4-5장 가정
     let maxImages = 5
     let captureInterval: TimeInterval = 0.8
+    /// 캡처 시점 카메라 이동 속도 임계 (m/s). 초과 시 motion blur 우려로 skip.
+    let captureMaxTranslationVel: Float = 0.3
+    /// 캡처 시점 카메라 회전 속도 임계 (rad/s ≈ 30°/s). 초과 시 skip.
+    let captureMaxRotationVel: Float = 0.52
+    private var lastCaptureTimestamp: TimeInterval?
     private var matchedARPose: simd_float4x4?
     private var localizedPose: Pose?
     private var localizedFloorId: String?
@@ -344,6 +349,7 @@ class ARNavigationLogic {
         // capture 버퍼 클리어
         capturedImages = []
         capturedARPoses = []
+        lastCaptureTimestamp = nil
 
         // GuidanceDirector 도 reset (Phase 5 dead path 지만 호출 부수효과 없게)
         guidanceDirector.reset()
@@ -372,6 +378,44 @@ class ARNavigationLogic {
     private func captureOneFrame() {
         guard let frame = arSession?.currentFrame else { return }
 
+        // 1. ARKit 모션 경고 — excessiveMotion / relocalizing / insufficientFeatures
+        if case .limited(let reason) = frame.camera.trackingState {
+            switch reason {
+            case .excessiveMotion:
+                delegate?.updateStatus("잠시 멈춰주세요 (흔들림 감지)", color: .orange)
+                return
+            case .insufficientFeatures:
+                delegate?.updateStatus("주변에 특징이 부족해요. 다른 곳을 비춰주세요", color: .orange)
+                return
+            case .initializing, .relocalizing:
+                return
+            @unknown default:
+                return
+            }
+        }
+
+        // 2. 직전 캡처 대비 카메라 이동·회전 속도 — blur 임계 차단
+        if let lastTime = lastCaptureTimestamp,
+           let lastTransform = capturedARPoses.last {
+            let dt = max(Float(frame.timestamp - lastTime), 0.001)
+            let curT = frame.camera.transform.columns.3
+            let lastT = lastTransform.columns.3
+            let dist = simd_distance(
+                simd_float3(curT.x, curT.y, curT.z),
+                simd_float3(lastT.x, lastT.y, lastT.z)
+            )
+            let translationVel = dist / dt  // m/s
+            let curQ = simd_quatf(frame.camera.transform)
+            let lastQ = simd_quatf(lastTransform)
+            let angleDelta = simd_quatf(curQ.normalized * lastQ.normalized.inverse).angle
+            let rotationVel = abs(angleDelta) / dt  // rad/s
+
+            if translationVel > captureMaxTranslationVel || rotationVel > captureMaxRotationVel {
+                delegate?.updateStatus("천천히 움직여주세요", color: .orange)
+                return
+            }
+        }
+
         let pixelBuffer = frame.capturedImage
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let context = CIContext(options: nil)
@@ -380,9 +424,11 @@ class ARNavigationLogic {
 
         capturedImages.append(uiImage)
         capturedARPoses.append(frame.camera.transform)
+        lastCaptureTimestamp = frame.timestamp
 
         let count = capturedImages.count
         delegate?.setCaptureProgress(text: "\(count)/\(maxImages)", isHidden: false)
+        delegate?.updateStatus("천천히 주변을 둘러보세요\n사진을 \(maxImages)장 촬영합니다.", color: .white)
 
         if count >= maxImages {
             stopCapture()
@@ -729,6 +775,7 @@ class ARNavigationLogic {
 
         capturedImages = []
         capturedARPoses = []
+        lastCaptureTimestamp = nil
 
         captureTimer = Timer.scheduledTimer(withTimeInterval: captureInterval, repeats: true) { [weak self] _ in
             self?.captureOneFrame()
