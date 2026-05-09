@@ -45,7 +45,6 @@ final class PixelBufferPreprocessor {
         guard formatType == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
               formatType == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
               formatType == kCVPixelFormatType_OneComponent8 else {
-            print("[Preprocess] unsupported pixel format: \(formatType)")
             return nil
         }
 
@@ -95,7 +94,6 @@ final class PixelBufferPreprocessor {
             )
         }
         guard let rb = rotatedBuf else {
-            print("[Preprocess] rotated buffer alloc 실패")
             return nil
         }
 
@@ -121,7 +119,6 @@ final class PixelBufferPreprocessor {
         // rotationConstant: 0=0°, 1=90° CCW, 2=180°, 3=90° CW (= 270° CCW)
         let rotErr = vImageRotate90_Planar8(&srcVImg, &rotVImg, 3, 0, vImage_Flags(kvImageNoFlags))
         if rotErr != kvImageNoError {
-            print("[Preprocess] vImageRotate90_Planar8 failed (err=\(rotErr))")
             CVPixelBufferUnlockBaseAddress(rb, [])
             return nil
         }
@@ -159,7 +156,6 @@ final class PixelBufferPreprocessor {
             )
         }
         guard let dstBuffer = outBuffer else {
-            print("[Preprocess] output buffer alloc 실패")
             return nil
         }
 
@@ -206,7 +202,6 @@ final class PixelBufferPreprocessor {
 
         let err = vImageScale_Planar8(&srcVImage, &dstVImage, nil, vImage_Flags(kvImageNoFlags))
         if err != kvImageNoError {
-            print("[Preprocess] vImageScale_Planar8 failed (err=\(err))")
             return nil
         }
         return dstBuffer
@@ -258,7 +253,6 @@ final class PixelBufferPreprocessor {
             &pool
         )
         if status != kCVReturnSuccess {
-            print("[Preprocess] CVPixelBufferPoolCreate (w=\(width), h=\(height)) failed (status=\(status))")
             return nil
         }
         return pool

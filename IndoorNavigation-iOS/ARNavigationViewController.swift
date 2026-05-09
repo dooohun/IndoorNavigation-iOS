@@ -7,7 +7,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var buildingId: String = ""
     var floorId: String = ""
     var destinationName: String = ""
-    var goal: Coordinate = Coordinate(x: 0, y: 0, z: nil)
+    var goal: Coordinate = Coordinate(x: 0, y: 0, z: 0)
 
     var sceneView: ARSCNView!
     var locateButton: UIButton!
@@ -91,7 +91,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     }
 
     @objc private func onSceneRetapped() {
-        print("[Trial] 화면 더블탭 — 측위 재시작")
         logic.startLocalizationFlow()
     }
 

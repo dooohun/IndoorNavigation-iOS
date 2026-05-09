@@ -263,11 +263,9 @@ final class LightGlueMatcherEngine {
     private func parseOutput(matches0: MLMultiArray, scores0: MLMultiArray, validQ: Int, validR: Int) -> [Match] {
         let count = matches0.count
         guard count >= validQ else {
-            print("[LightGlue] matches0 count(\(count)) < validQ(\(validQ)) — 결과 단축")
             return []
         }
         guard scores0.count >= validQ else {
-            print("[LightGlue] scores0 count(\(scores0.count)) < validQ(\(validQ))")
             return []
         }
 

@@ -30,10 +30,9 @@
    │ matchedARPose = capturedARPoses.last  ← V3 응답에 matchedImageIndex 있지만 미사용 (TODO)
    ▼
 [startV3Pathfinding]  POST /api/v1/buildings/{id}/pathfinding
-   │ request: { startScanId | startFloorLevel, startX/Y/Z, destinationName,
+   │ request: { startFloorLevel, startX/Y/Z, destinationName,
    │            preference: SHORTEST (legacy/ignored),
    │            verticalPreference: ELEVATOR (default) }
-   │ retry: START_SCAN_NOT_FOUND 시 startScanId 빼고 1회 재시도
    │ → PathfindingResponse { totalDistance, estimatedTimeSeconds,
    │                         steps[] (stepNumber, floorLevel, position{x,y,z}, instruction, nodeId),
    │                         floorTransitions[], routeMetadata }
@@ -69,7 +68,7 @@
 
 | 필드 | 타입 | 비고 |
 |------|------|------|
-| `startScanId` / `startFloorLevel` | optional / optional | **둘 중 하나 필수**. 둘 다 없으면 `START_NOT_SPECIFIED` |
+| `startFloorLevel` | optional | 측위 응답 `pose.floorLevel` 그대로. 없으면 `START_NOT_SPECIFIED` |
 | `startX/Y/Z` | number | server world frame meter, 측위 응답 pose translation 그대로 |
 | `destinationName` | string | POI `name` 또는 `label` 과 정확히 일치해야 함 |
 | `preference` | enum | **legacy/ignored**. metadata 에 echo 만. 신규 클라는 사용 X |
@@ -135,7 +134,7 @@ options: {
 | `captureOneFrame` | `ARNavigationLogic.swift:655` | ARFrame → UIImage + transform 누적 |
 | `sendToServerV3` | `ARNavigationLogic.swift:721` | multipart V3 호출 |
 | `handleLocalizeV3Success` | `ARNavigationLogic.swift:893` | confidence 게이팅 + pose 분리 + scanId 저장 |
-| `startV3Pathfinding` | `ARNavigationLogic.swift:1043` | pathfinding 호출 + START_SCAN_NOT_FOUND 재시도 |
+| `startV3Pathfinding` | `ARNavigationLogic.swift:1043` | pathfinding 호출 (실패 시 lookup fallback) |
 | `fetchBundleForPath` | `ARNavigationLogic.swift:1096` | steps → QueryPoint[] + provider fetch |
 | `NetworkBundleProvider.fetch` | `Tracking/NetworkBundleProvider.swift:82` | lookup 호출 + adaptation + 캐시 |
 

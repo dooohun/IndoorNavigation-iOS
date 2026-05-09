@@ -35,7 +35,6 @@ final class DescriptorSampler {
 
         let shape = descMap.shape.map { $0.intValue }
         guard shape.count == 4, shape[1] == dim else {
-            print("[DescSample] descMap shape unexpected: \(shape)")
             return (try? MLMultiArray(shape: [NSNumber(value: n), NSNumber(value: dim)], dataType: .float16))
                 ?? Self.makeEmpty(dim: dim)
         }
@@ -54,7 +53,6 @@ final class DescriptorSampler {
         do {
             array = try MLMultiArray(shape: [NSNumber(value: n), NSNumber(value: dim)], dataType: .float16)
         } catch {
-            print("[DescSample] MLMultiArray alloc failed: \(error)")
             return Self.makeEmpty(dim: dim)
         }
         // dataPointer 직접 Float16 쓰기 — NSNumber 박싱 회피 (~N×256 박싱 → 0).
@@ -151,7 +149,7 @@ final class DescriptorSampler {
                 for i in 0..<count { result[i] = Float(src[i]) }
             }
         default:
-            print("[DescSample] unsupported MLMultiArray dataType: \(arr.dataType)")
+            break
         }
         return result
     }

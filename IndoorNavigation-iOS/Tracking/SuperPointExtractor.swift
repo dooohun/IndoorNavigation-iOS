@@ -36,7 +36,6 @@ final class SuperPointExtractorStub: SuperPointExtracting {
     init(config: Config = Config()) { self.config = config }
 
     func warmUp() {
-        print("[SuperPoint] warmUp (stub, no model loaded)")
     }
 
     func extract(image: CVPixelBuffer, intrinsics: simd_float3x3, timestamp: TimeInterval, orientation: InputOrientation) -> SuperPointFrame {
@@ -182,14 +181,11 @@ final class SuperPointExtractorML: SuperPointExtracting {
     func warmUp() {
         // 0-fill GRAY 480×640 buffer 1회 prediction → ANE 핫스타트.
         guard let buf = makeBlankGrayBuffer() else {
-            print("[SuperPoint] warmUp skipped (failed to alloc blank buffer)")
             return
         }
         do {
             _ = try runPrediction(grayBuffer: buf)
-            print("[SuperPoint] warmUp done")
         } catch {
-            print("[SuperPoint] warmUp failed: \(error)")
         }
     }
 
@@ -208,7 +204,6 @@ final class SuperPointExtractorML: SuperPointExtracting {
         let t0 = CACurrentMediaTime()
 
         guard let grayBuf = preprocessor.toGrayscaleBuffer(image, orientation: orientation) else {
-            print("[SuperPoint] preprocess failed")
             return empty
         }
         let t1 = CACurrentMediaTime()
@@ -217,7 +212,6 @@ final class SuperPointExtractorML: SuperPointExtracting {
         do {
             semiDesc = try runPrediction(grayBuffer: grayBuf)
         } catch {
-            print("[SuperPoint] prediction failed: \(error)")
             return empty
         }
         let t2 = CACurrentMediaTime()
@@ -250,30 +244,10 @@ final class SuperPointExtractorML: SuperPointExtracting {
         phaseFrameSeq += 1
         let s = PhaseSample(pre: pre, pred: pred, dec: dec, samp: samp, total: total, kpCount: kpCount)
         if phaseFrameSeq == 1 {
-            // 콜드 첫 프레임 — 워밍업 후에도 ANE 컴파일/캐시 영향 가능성.
-            print(String(
-                format: "[SuperPoint][cold] pre=%.1f pred=%.1f dec=%.1f samp=%.1f total=%.1f ms (kp=%d)",
-                pre, pred, dec, samp, total, kpCount
-            ))
             return
         }
         phaseSamples.append(s)
         guard phaseSamples.count >= phaseLogWindow else { return }
-        let n = Double(phaseSamples.count)
-        let sumPre = phaseSamples.reduce(0.0) { $0 + $1.pre }
-        let sumPred = phaseSamples.reduce(0.0) { $0 + $1.pred }
-        let sumDec = phaseSamples.reduce(0.0) { $0 + $1.dec }
-        let sumSamp = phaseSamples.reduce(0.0) { $0 + $1.samp }
-        let sumTotal = phaseSamples.reduce(0.0) { $0 + $1.total }
-        let maxTotal = phaseSamples.map { $0.total }.max() ?? 0
-        let minTotal = phaseSamples.map { $0.total }.min() ?? 0
-        let avgKp = phaseSamples.reduce(0) { $0 + $1.kpCount } / phaseSamples.count
-        print(String(
-            format: "[SuperPoint][avg×%d] pre=%.1f pred=%.1f dec=%.1f samp=%.1f total=%.1f (min=%.1f max=%.1f) kp=%d",
-            phaseSamples.count,
-            sumPre / n, sumPred / n, sumDec / n, sumSamp / n, sumTotal / n,
-            minTotal, maxTotal, avgKp
-        ))
         phaseSamples.removeAll(keepingCapacity: true)
     }
 

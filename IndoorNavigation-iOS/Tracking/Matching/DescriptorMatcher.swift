@@ -58,14 +58,12 @@ final class DescriptorMatcher {
         guard query.shape.count == 2,
               query.shape[1].intValue == dim,
               query.dataType == .float16 else {
-            print("[Match] query shape/dtype 불일치: \(query.shape), \(query.dataType)")
             return []
         }
         let q = query.shape[0].intValue
         let r = referenceCount
         guard q > 0, r > 0 else { return [] }
         guard referenceBytes.count == r * dim * MemoryLayout<Float16>.size else {
-            print("[Match] reference 사이즈 불일치: \(referenceBytes.count) ≠ \(r * dim * 2)")
             return []
         }
 

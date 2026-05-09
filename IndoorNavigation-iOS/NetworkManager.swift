@@ -1,153 +1,6 @@
 import Foundation
 import UIKit
 
-// MARK: - Building / POI DTOs
-
-struct BuildingResponse: Codable {
-    let buildingId: String
-    let name: String
-    let description: String?
-    let latitude: Double?
-    let longitude: Double?
-    let status: String?
-    let createdAt: String?
-    let updatedAt: String?
-}
-
-struct BuildingDetailResponse: Codable {
-    let buildingId: String?
-    let name: String?
-    let description: String?
-    let latitude: Double?
-    let longitude: Double?
-    let status: String?
-    let createdAt: String?
-    let updatedAt: String?
-    let floors: [FloorResponse]?
-    let verticalPassages: [VerticalPassageResponse]?
-}
-
-struct FloorResponse: Codable {
-    let floorId: String?
-    let buildingId: String?
-    let name: String?
-    let level: Int?
-    let height: Double?
-    let hasPath: Bool?
-    let hasPly: Bool?
-    let activeScanId: String?
-    let createdAt: String?
-    let updatedAt: String?
-}
-
-struct VerticalPassageResponse: Codable {
-    let passageId: String?
-    let buildingId: String?
-    let connectorType: String?
-    let connectorKey: String?
-    let name: String?
-    let mock: Bool?
-    let segments: [PassageSegment]?
-}
-
-struct PassageSegment: Codable {
-    let stopId: String?
-    let levelId: String?
-    let routeNodeId: String?
-    let x: Double?
-    let y: Double?
-    let floorId: String?
-    let kind: String?
-}
-
-struct POIResponse: Codable {
-    let poiId: String?
-    let buildingId: String?
-    let floorId: String?
-    let name: String?
-    let label: String?
-    let category: String?
-    let routeNodeId: String?
-    let displayPoint: PoiDisplayPoint?
-    let needsReview: Bool?
-    let llmConfidence: Double?
-}
-
-struct PoiDisplayPoint: Codable {
-    let x: Double?
-    let y: Double?
-    let z: Double?
-}
-
-// MARK: - Localize / Coordinate Route DTOs
-
-struct SLAMLocalizeResponse: Codable {
-    let pose: Pose?
-    let confidence: Double?
-    let mapId: String?
-    let numMatches: Int?
-    let matchedImageIndex: Int?
-    let floorId: String?
-    let floorLevel: Int?
-}
-
-struct Pose: Codable {
-    let x: Double?
-    let y: Double?
-    let z: Double?
-    // 회전 쿼터니언 (AR 방향 정렬에 필요)
-    let qx: Double?
-    let qy: Double?
-    let qz: Double?
-    let qw: Double?
-}
-
-struct Coordinate: Codable {
-    let x: Double
-    let y: Double
-    let z: Double?
-}
-
-struct FloorCoordinateRouteRequest: Codable {
-    let start: Coordinate
-    let goal: Coordinate
-}
-
-struct FloorCoordinateRouteResponse: Codable {
-    let buildingId: String?
-    let floorId: String?
-    let scanId: String?
-    let pathGeometry: PathGeometry?
-    let lengthM: Double?
-    let nodeCount: Int?
-    let snapInfo: RouteSnapInfo?
-}
-
-struct PathGeometry: Codable {
-    let type: String?
-    let coordinates: [[Double]]?
-}
-
-struct RouteSnapInfo: Codable {
-    let startSnapDistanceM: Double?
-    let goalSnapDistanceM: Double?
-}
-
-// MARK: - 내부 경로 렌더링 모델 (서버 응답 어댑터 대상)
-
-struct PathStep: Codable {
-    let stepNumber: Int?
-    let floorLevel: Int?
-    let position: Position?
-    let instruction: String?
-}
-
-struct Position: Codable {
-    let x: Double
-    let y: Double
-    let z: Double
-}
-
 // MARK: - 에러 모델
 
 private struct V1ErrorResponse: Codable {
@@ -180,340 +33,71 @@ class NetworkManager {
     let baseURL = "http://218.150.183.198:8080/api/v1"
     let slamBaseURL = "http://218.150.183.198:8080/api/slam/v3"
 
-    /// 테스트용 DI 포인트. 기존 메서드들은 `URLSession.shared` 를 직접 쓰지만,
-    /// Phase 8 B2 신규 3 메서드(localizeV3 / pathfinding / featurePointsLookup)는 본 프로퍼티를 통해
-    /// `URLProtocol` 모킹을 주입한 커스텀 세션으로 갈아끼울 수 있다.
-    var session: URLSession = .shared
+    // MARK: - Buildings
 
-    // MARK: - 1. Localize
-
-    func localize(buildingId: String?, mapId: String?, images: [UIImage], completion: @escaping (Result<SLAMLocalizeResponse, Error>) -> Void) {
-        guard let url = URL(string: "\(slamBaseURL)/localize") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-
-        let boundary = "Boundary-\(UUID().uuidString)"
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-
-        var body = Data()
-
-        func appendField(_ name: String, _ value: String) {
-            body.append("--\(boundary)\r\n".data(using: .utf8)!)
-            body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
-            body.append(value.data(using: .utf8)!)
-            body.append("\r\n".data(using: .utf8)!)
-        }
-
-        if let bid = buildingId { appendField("building_id", bid) }
-        if let mid = mapId { appendField("map_id", mid) }
-
-        for (index, image) in images.enumerated() {
-            guard let imageData = image.jpegData(compressionQuality: 0.5) else { continue }
-            body.append("--\(boundary)\r\n".data(using: .utf8)!)
-            body.append("Content-Disposition: form-data; name=\"images\"; filename=\"image\(index).jpg\"\r\n".data(using: .utf8)!)
-            body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
-            body.append(imageData)
-            body.append("\r\n".data(using: .utf8)!)
-        }
-        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
-        request.httpBody = body
-
-        log("REQ", "POST", url.absoluteString)
-        log("REQ", "이미지 \(images.count)장, 바디 크기: \(body.count) bytes")
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                log("ERR", "네트워크 오류:", error)
-                completion(.failure(Self.networkError(error)))
-                return
-            }
-            let http = response as? HTTPURLResponse
-            let statusCode = http?.statusCode ?? 0
-            let responseBody = data.flatMap { String(data: $0, encoding: .utf8) } ?? "(빈 응답)"
-
-            log("RES", "HTTP \(statusCode)")
-            log("RES", "바디:", responseBody)
-
-            let data = data ?? Data()
-            guard (200..<300).contains(statusCode) else {
-                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
-                return
-            }
-            do {
-                let result = try JSONDecoder().decode(SLAMLocalizeResponse.self, from: data)
-                log("RES", "파싱 성공:", result)
-                completion(.success(result))
-            } catch {
-                log("ERR", "파싱 실패:", error)
-                completion(.failure(Self.makeError("응답 파싱 실패\n\(responseBody)")))
-            }
-        }.resume()
-    }
-
-    // MARK: - 2. Coordinate Route
-
-    func findRouteByCoordinates(buildingId: String, floorId: String, request requestDto: FloorCoordinateRouteRequest, completion: @escaping (Result<FloorCoordinateRouteResponse, Error>) -> Void) {
-        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/floors/\(floorId)/routes/coordinates") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 30
-
-        do {
-            let bodyData = try JSONEncoder().encode(requestDto)
-            request.httpBody = bodyData
-            log("REQ", "POST", url.absoluteString)
-            log("REQ", "바디:", String(data: bodyData, encoding: .utf8) ?? "")
-        } catch {
-            completion(.failure(error))
-            return
-        }
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                log("ERR", "네트워크 오류:", error)
-                completion(.failure(Self.networkError(error)))
-                return
-            }
-            let http = response as? HTTPURLResponse
-            let statusCode = http?.statusCode ?? 0
-            let responseBody = data.flatMap { String(data: $0, encoding: .utf8) } ?? "(빈 응답)"
-
-            log("RES", "HTTP \(statusCode)")
-            log("RES", "바디:", responseBody)
-
-            let data = data ?? Data()
-            guard (200..<300).contains(statusCode) else {
-                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
-                return
-            }
-            do {
-                let result = try JSONDecoder().decode(FloorCoordinateRouteResponse.self, from: data)
-                log("RES", "파싱 성공:", result)
-                completion(.success(result))
-            } catch {
-                log("ERR", "파싱 실패:", error)
-                completion(.failure(Self.makeError("응답 파싱 실패\n\(responseBody)")))
-            }
-        }.resume()
-    }
-
-    // MARK: - 3. 건물 목록 조회
-
-    func fetchBuildings(status: String? = "ACTIVE", completion: @escaping (Result<[BuildingResponse], Error>) -> Void) {
+    func fetchBuildings(status: String? = "ACTIVE",
+                        completion: @escaping (Result<[BuildingResponse], Error>) -> Void) {
         var urlString = "\(baseURL)/buildings"
         if let status = status {
             urlString += "?status=\(status)"
         }
         guard let url = URL(string: urlString) else { return }
-
-        log("REQ", "GET", url.absoluteString)
-
-        URLSession.shared.dataTask(with: url) { data, response, error in
-            if let error = error {
-                log("ERR", "네트워크 오류:", error)
-                completion(.failure(Self.networkError(error)))
-                return
-            }
-            let http = response as? HTTPURLResponse
-            let statusCode = http?.statusCode ?? 0
-            let data = data ?? Data()
-            log("RES", "HTTP \(statusCode)")
-
-            guard (200..<300).contains(statusCode) else {
-                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
-                return
-            }
-            do {
-                let result = try JSONDecoder().decode([BuildingResponse].self, from: data)
-                log("RES", "건물 \(result.count)개 조회")
-                completion(.success(result))
-            } catch {
-                log("ERR", "파싱 실패:", error)
-                completion(.failure(Self.makeError("응답 파싱 실패")))
-            }
-        }.resume()
-    }
-
-    // MARK: - 4. 건물 상세 조회
-
-    func fetchBuildingDetail(buildingId: String, completion: @escaping (Result<BuildingDetailResponse, Error>) -> Void) {
-        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)") else { return }
-
-        log("REQ", "GET", url.absoluteString)
-
-        URLSession.shared.dataTask(with: url) { data, response, error in
-            if let error = error {
-                log("ERR", "네트워크 오류:", error)
-                completion(.failure(Self.networkError(error)))
-                return
-            }
-            let http = response as? HTTPURLResponse
-            let statusCode = http?.statusCode ?? 0
-            let data = data ?? Data()
-            log("RES", "HTTP \(statusCode)")
-
-            guard (200..<300).contains(statusCode) else {
-                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
-                return
-            }
-            do {
-                let result = try JSONDecoder().decode(BuildingDetailResponse.self, from: data)
-                log("RES", "건물 상세 조회 성공")
-                completion(.success(result))
-            } catch {
-                log("ERR", "파싱 실패:", error)
-                completion(.failure(Self.makeError("응답 파싱 실패")))
-            }
-        }.resume()
-    }
-
-    // MARK: - 5. POI 목록 조회
-
-    func fetchPOIs(buildingId: String, completion: @escaping (Result<[POIResponse], Error>) -> Void) {
-        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/pois") else { return }
-
-        log("REQ", "GET", url.absoluteString)
-
-        URLSession.shared.dataTask(with: url) { data, response, error in
-            if let error = error {
-                log("ERR", "네트워크 오류:", error)
-                completion(.failure(Self.networkError(error)))
-                return
-            }
-            let http = response as? HTTPURLResponse
-            let statusCode = http?.statusCode ?? 0
-            let data = data ?? Data()
-            log("RES", "HTTP \(statusCode)")
-
-            guard (200..<300).contains(statusCode) else {
-                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
-                return
-            }
-            do {
-                let result = try JSONDecoder().decode([POIResponse].self, from: data)
-                log("RES", "POI \(result.count)개 조회")
-                completion(.success(result))
-            } catch {
-                log("ERR", "파싱 실패:", error)
-                completion(.failure(Self.makeError("응답 파싱 실패")))
-            }
-        }.resume()
-    }
-
-    // MARK: - 6. POI 검색
-
-    func searchPOIs(buildingId: String, query: String, completion: @escaping (Result<[POIResponse], Error>) -> Void) {
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/pois/search?query=\(encoded)") else { return }
-
-        log("REQ", "GET", url.absoluteString)
-
-        URLSession.shared.dataTask(with: url) { data, response, error in
-            if let error = error {
-                log("ERR", "네트워크 오류:", error)
-                completion(.failure(Self.networkError(error)))
-                return
-            }
-            let http = response as? HTTPURLResponse
-            let statusCode = http?.statusCode ?? 0
-            let data = data ?? Data()
-            log("RES", "HTTP \(statusCode)")
-
-            guard (200..<300).contains(statusCode) else {
-                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
-                return
-            }
-            do {
-                let result = try JSONDecoder().decode([POIResponse].self, from: data)
-                log("RES", "POI 검색 결과 \(result.count)개")
-                completion(.success(result))
-            } catch {
-                log("ERR", "파싱 실패:", error)
-                completion(.failure(Self.makeError("응답 파싱 실패")))
-            }
-        }.resume()
-    }
-
-    // MARK: - 7. SuperPoint Localize V3
-
-    /// `POST /api/v1/buildings/{buildingId}/localize/v3` — multipart 이미지 업로드.
-    /// 응답: `LocalizeV3Response`. 신규 3 메서드는 DI session property 사용.
-    func localizeV3(buildingId: String,
-                    images: [UIImage],
-                    completion: @escaping (Result<LocalizeV3Response, Error>) -> Void) {
-        // 서버 swagger 확정: V3 endpoint 는 /api/v1/buildings/{id}/localize (v3 suffix 없음).
-        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/localize") else { return }
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        // 서버에서 SuperPoint 추출 + LightGlue 매칭 + PnP 까지 수행 — 5장 처리에 30초+ 걸림. 90초로 상향.
-        request.timeoutInterval = 90
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
 
-        let boundary = "Boundary-\(UUID().uuidString)"
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-
-        var body = Data()
-
-        func appendField(_ name: String, _ value: String) {
-            body.append("--\(boundary)\r\n".data(using: .utf8)!)
-            body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
-            body.append(value.data(using: .utf8)!)
-            body.append("\r\n".data(using: .utf8)!)
+        log("REQ", "GET", url.absoluteString)
+        Self.performJSON(request) { (result: Result<[BuildingResponse], Error>) in
+            if case .success(let arr) = result { log("RES", "건물 \(arr.count)개 조회") }
+            completion(result)
         }
-
-        appendField("building_id", buildingId)
-
-        // TODO(서버답): multipart 필드명 'images', 권장 개수, 해상도 미정
-        // 다운샘플링: 원본 1920×1440 → longer side 960 (비율 유지). 업로드 75% 감소 + 서버 SP 처리 빠름.
-        for (index, image) in images.enumerated() {
-            let resized = Self.resizeForLocalize(image, longerSide: 960)
-            guard let imageData = resized.jpegData(compressionQuality: 0.4) else { continue }
-            body.append("--\(boundary)\r\n".data(using: .utf8)!)
-            body.append("Content-Disposition: form-data; name=\"images\"; filename=\"image\(index).jpg\"\r\n".data(using: .utf8)!)
-            body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
-            body.append(imageData)
-            body.append("\r\n".data(using: .utf8)!)
-        }
-        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
-        request.httpBody = body
-
-        log("REQ", "POST", url.absoluteString)
-        log("REQ", "이미지 \(images.count)장, 바디 크기: \(body.count) bytes")
-
-        session.dataTask(with: request) { data, response, error in
-            if let error = error {
-                log("ERR", "네트워크 오류:", error)
-                completion(.failure(Self.networkError(error)))
-                return
-            }
-            let http = response as? HTTPURLResponse
-            let statusCode = http?.statusCode ?? 0
-            let responseBody = data.flatMap { String(data: $0, encoding: .utf8) } ?? "(빈 응답)"
-
-            log("RES", "HTTP \(statusCode)")
-            log("RES", "바디:", responseBody)
-
-            let data = data ?? Data()
-            guard (200..<300).contains(statusCode) else {
-                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
-                return
-            }
-            do {
-                let result = try JSONDecoder().decode(LocalizeV3Response.self, from: data)
-                log("RES", "localizeV3 성공: confidence=\(result.confidence), mapId=\(result.mapId ?? "nil"), pose.floorLevel=\(result.pose.floorLevel.map(String.init) ?? "nil")")
-                completion(.success(result))
-            } catch {
-                log("ERR", "파싱 실패:", error)
-                completion(.failure(Self.makeError("응답 파싱 실패\n\(responseBody)")))
-            }
-        }.resume()
     }
 
-    // MARK: - 8. Pathfinding
+    func fetchBuildingDetail(buildingId: String,
+                             completion: @escaping (Result<BuildingDetailResponse, Error>) -> Void) {
+        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
 
-    /// `POST /api/v1/buildings/{buildingId}/pathfinding` — JSON 본문으로 경로 요청.
-    /// 응답: `PathfindingResponse` (steps + floorTransitions).
+        log("REQ", "GET", url.absoluteString)
+        Self.performJSON(request, completion: completion)
+    }
+
+    // MARK: - Floors
+
+    /// `GET /buildings/{bid}/floors/{fid}/map.png` — 층 지도 PNG 바이너리.
+    /// `widthPx` 지정 시 서버측 다운스케일 결과를 받음.
+    func fetchFloorMapImage(floorId: String,
+                            widthPx: Int? = nil,
+                            completion: @escaping (Result<Data, Error>) -> Void) {
+        var urlString = "\(baseURL)/floors/\(floorId)/map.png"
+        if let widthPx = widthPx {
+            urlString += "?width_px=\(widthPx)"
+        }
+        guard let url = URL(string: urlString) else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+
+        log("REQ", "GET", url.absoluteString)
+        Self.performData(request, completion: completion)
+    }
+
+    /// `GET /buildings/{bid}/floors/{fid}/map` — 층 지도 메타(JSON) + GeoJSON polygon + nodes/edges.
+    func fetchFloorMap(floorId: String,
+                       completion: @escaping (Result<FloorMapResponse, Error>) -> Void) {
+        guard let url = URL(string: "\(baseURL)/floors/\(floorId)/map") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+
+        log("REQ", "GET", url.absoluteString)
+        Self.performJSON(request, completion: completion)
+    }
+
+    // MARK: - Pathfinding & Routing
+
     func pathfinding(buildingId: String,
                      request requestDto: PathfindingRequest,
                      completion: @escaping (Result<PathfindingResponse, Error>) -> Void) {
@@ -533,50 +117,52 @@ class NetworkManager {
             return
         }
 
-        session.dataTask(with: request) { data, response, error in
-            if let error = error {
-                log("ERR", "네트워크 오류:", error)
-                completion(.failure(Self.networkError(error)))
-                return
+        Self.performJSON(request) { (result: Result<PathfindingResponse, Error>) in
+            if case .success(let resp) = result {
+                let transitionCount = resp.floorTransitions?.count ?? 0
+                log("RES", "pathfinding 성공: steps \(resp.steps.count)개, transitions \(transitionCount)개")
             }
-            let http = response as? HTTPURLResponse
-            let statusCode = http?.statusCode ?? 0
-            let responseBody = data.flatMap { String(data: $0, encoding: .utf8) } ?? "(빈 응답)"
-
-            log("RES", "HTTP \(statusCode)")
-            log("RES", "바디:", responseBody)
-
-            let data = data ?? Data()
-            guard (200..<300).contains(statusCode) else {
-                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
-                return
-            }
-            do {
-                let result = try JSONDecoder().decode(PathfindingResponse.self, from: data)
-                // TODO(서버답): routeMetadata 자유 스키마 — DTO 무시 중. 필요 시 AnyCodable 추가
-                log("RES", "pathfinding 성공: steps \(result.steps.count)개, transitions \(result.floorTransitions.count)개")
-                completion(.success(result))
-            } catch {
-                log("ERR", "파싱 실패:", error)
-                completion(.failure(Self.makeError("응답 파싱 실패\n\(responseBody)")))
-            }
-        }.resume()
+            completion(result)
+        }
     }
 
-    // MARK: - 9. Feature Points Lookup
-
-    /// `POST /api/v1/buildings/{buildingId}/feature-points/lookup` — keyframe 청크 조회.
     /// 첫 호출 시 서버 cache build 가 30~60초 걸릴 수 있어 timeout 90s.
-    /// 응답: `LookupResponse` (keyframes 페이로드는 base64 — 디코드는 호출 측 책임).
     func featurePointsLookup(buildingId: String,
-                             request requestDto: LookupRequest,
-                             completion: @escaping (Result<LookupResponse, Error>) -> Void) {
+                             request requestDto: FeatureLookupRequest,
+                             completion: @escaping (Result<FeatureLookupResponse, Error>) -> Void) {
         guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/feature-points/lookup") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        // TODO(서버답): 첫 호출 cache build 30s~1분 — timeout 90s 설정. 진행률 polling endpoint 확인
         request.timeoutInterval = 90
+
+        do {
+            let bodyData = try JSONEncoder().encode(requestDto)
+            request.httpBody = bodyData
+            log("REQ", "POST", url.absoluteString)
+            log("REQ", "바디 크기: \(bodyData.count) bytes (queries=\(requestDto.queries.count))")
+        } catch {
+            completion(.failure(error))
+            return
+        }
+
+        Self.performJSON(request, logBody: false) { (result: Result<FeatureLookupResponse, Error>) in
+            if case .success(let resp) = result {
+                log("RES", "keyframes \(resp.keyframes.count)개, 총 \(resp.stats.byteSize) bytes")
+            }
+            completion(result)
+        }
+    }
+
+    func findRouteByCoordinates(buildingId: String,
+                                floorId: String,
+                                request requestDto: FloorCoordinateRouteRequest,
+                                completion: @escaping (Result<FloorCoordinateRouteResponse, Error>) -> Void) {
+        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/floors/\(floorId)/routes/coordinates") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30
 
         do {
             let bodyData = try JSONEncoder().encode(requestDto)
@@ -588,40 +174,156 @@ class NetworkManager {
             return
         }
 
-        session.dataTask(with: request) { data, response, error in
+        Self.performJSON(request, completion: completion)
+    }
+
+    // MARK: - POIs
+
+    func fetchPOIs(buildingId: String,
+                   completion: @escaping (Result<[POIResponse], Error>) -> Void) {
+        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/pois") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+
+        log("REQ", "GET", url.absoluteString)
+        Self.performJSON(request) { (result: Result<[POIResponse], Error>) in
+            if case .success(let arr) = result { log("RES", "POI \(arr.count)개 조회") }
+            completion(result)
+        }
+    }
+
+    func searchPOIs(buildingId: String,
+                    query: String,
+                    completion: @escaping (Result<[POIResponse], Error>) -> Void) {
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/pois/search?query=\(encoded)") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+
+        log("REQ", "GET", url.absoluteString)
+        Self.performJSON(request) { (result: Result<[POIResponse], Error>) in
+            if case .success(let arr) = result { log("RES", "POI 검색 결과 \(arr.count)개") }
+            completion(result)
+        }
+    }
+
+    // MARK: - SLAM Localize V3
+
+    /// `POST /api/slam/v3/localize` — multipart 이미지 업로드.
+    /// 서버에서 SuperPoint 추출 + LightGlue 매칭 + PnP 까지 수행 — 5장 처리에 30초+ 걸려 timeout 90s.
+    func localizeV3(buildingId: String,
+                    images: [UIImage],
+                    completion: @escaping (Result<SLAMLocalizeResponse, Error>) -> Void) {
+        guard let url = URL(string: "\(slamBaseURL)/localize") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 90
+
+        let boundary = "Boundary-\(UUID().uuidString)"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+        func appendField(_ name: String, _ value: String) {
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
+            body.append(value.data(using: .utf8)!)
+            body.append("\r\n".data(using: .utf8)!)
+        }
+
+        appendField("building_id", buildingId)
+
+        // 다운샘플링: 원본 1920×1440 → longer side 960. 업로드 75% 감소 + 서버 SP 처리 빠름.
+        for (index, image) in images.enumerated() {
+            let resized = Self.resizeForLocalize(image, longerSide: 960)
+            guard let imageData = resized.jpegData(compressionQuality: 0.4) else { continue }
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"images\"; filename=\"image\(index).jpg\"\r\n".data(using: .utf8)!)
+            body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+            body.append(imageData)
+            body.append("\r\n".data(using: .utf8)!)
+        }
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        request.httpBody = body
+
+        log("REQ", "POST", url.absoluteString)
+        log("REQ", "이미지 \(images.count)장, 바디 크기: \(body.count) bytes")
+
+        Self.performJSON(request) { (result: Result<SLAMLocalizeResponse, Error>) in
+            if case .success(let resp) = result {
+                log("RES", "localizeV3 성공: confidence=\(resp.confidence), mapId=\(resp.mapId ?? "nil"), pose.floorLevel=\(resp.pose.floorLevel.map(String.init) ?? "nil")")
+            }
+            completion(result)
+        }
+    }
+
+    // MARK: - 공통 응답 처리
+
+    /// JSON 응답 디코딩 공통 처리. status guard → V1Error/Validation 디코드 → 본문 디코드.
+    private static func performJSON<T: Decodable>(
+        _ request: URLRequest,
+        logBody: Bool = true,
+        completion: @escaping (Result<T, Error>) -> Void
+    ) {
+        URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 log("ERR", "네트워크 오류:", error)
-                completion(.failure(Self.networkError(error)))
+                completion(.failure(networkError(error)))
                 return
             }
             let http = response as? HTTPURLResponse
             let statusCode = http?.statusCode ?? 0
-            let responseBody = data.flatMap { String(data: $0, encoding: .utf8) } ?? "(빈 응답)"
-
-            log("RES", "HTTP \(statusCode)")
-            // 페이로드는 base64 — 너무 길어 본문 전체 로깅은 생략
-
             let data = data ?? Data()
+            log("RES", "HTTP \(statusCode)")
+
+            if logBody {
+                let responseBody = String(data: data, encoding: .utf8) ?? "(빈 응답)"
+                log("RES", "바디:", responseBody)
+            }
+
             guard (200..<300).contains(statusCode) else {
-                completion(.failure(Self.httpError(statusCode: statusCode, data: data)))
+                completion(.failure(httpError(statusCode: statusCode, data: data)))
                 return
             }
             do {
-                let result = try JSONDecoder().decode(LookupResponse.self, from: data)
-                // TODO(서버답): keyframes byteSize 클 때 (~64MB) 스트리밍 디코드 검토
-                log("RES", "keyframes \(result.keyframes.count)개, 총 \(result.stats.byteSize) bytes")
+                let result = try JSONDecoder().decode(T.self, from: data)
                 completion(.success(result))
             } catch {
                 log("ERR", "파싱 실패:", error)
-                completion(.failure(Self.makeError("응답 파싱 실패\n\(responseBody)")))
+                let body = String(data: data, encoding: .utf8) ?? "(빈 응답)"
+                completion(.failure(makeError("응답 파싱 실패\n\(body)")))
             }
+        }.resume()
+    }
+
+    /// 바이너리 응답(이미지 등) 공통 처리.
+    private static func performData(
+        _ request: URLRequest,
+        completion: @escaping (Result<Data, Error>) -> Void
+    ) {
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                log("ERR", "네트워크 오류:", error)
+                completion(.failure(networkError(error)))
+                return
+            }
+            let http = response as? HTTPURLResponse
+            let statusCode = http?.statusCode ?? 0
+            let data = data ?? Data()
+            log("RES", "HTTP \(statusCode), \(data.count) bytes")
+
+            guard (200..<300).contains(statusCode) else {
+                completion(.failure(httpError(statusCode: statusCode, data: data)))
+                return
+            }
+            completion(.success(data))
         }.resume()
     }
 
     // MARK: - 이미지 다운샘플링 헬퍼
 
     /// V3 localize multipart 업로드 전 이미지 다운샘플링. 비율 유지, longer side 를 `longerSide` 로 맞춤.
-    /// 원본이 더 작으면 그대로 반환.
     private static func resizeForLocalize(_ image: UIImage, longerSide: CGFloat) -> UIImage {
         let size = image.size
         let longest = max(size.width, size.height)

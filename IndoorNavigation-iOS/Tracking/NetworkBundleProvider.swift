@@ -23,7 +23,7 @@ final class NetworkBundleProvider: BundleProviding {
         case notLoaded
         /// 서버 응답에 keyframe 이 0개.
         case emptyResponse
-        /// `LookupResponse → LocalizationBundle` 변환 실패.
+        /// `FeatureLookupResponse → LocalizationBundle` 변환 실패.
         case adaptationFailed(reason: String)
         /// 네트워크/디코딩 등 하부 오류 래핑.
         case underlying(Error)
@@ -81,15 +81,15 @@ final class NetworkBundleProvider: BundleProviding {
     /// 서버 lookup 호출 → 어댑팅 → 캐시 저장. completion 은 main 스레드.
     func fetch(completion: @escaping (Result<LocalizationBundle, Error>) -> Void) {
         let queries = queryPoints.map {
-            LookupQuery(floorLevel: $0.floorLevel, x: $0.x, y: $0.y, z: $0.z, viewDirection: nil)
+            FeatureLookupQuery(floorLevel: $0.floorLevel, x: $0.x, y: $0.y, z: $0.z, viewDirection: nil)
         }
-        let options = LookupOptions(
+        let options = FeatureLookupOptions(
             radiusM: radiusM,
             maxKeyframesPerQuery: maxKeyframesPerQuery,
             viewConeDeg: nil,
             format: "json_b64"
         )
-        let req = LookupRequest(queries: queries, options: options)
+        let req = FeatureLookupRequest(queries: queries, options: options)
 
         networkManager.featurePointsLookup(buildingId: buildingId, request: req) { [weak self] result in
             DispatchQueue.main.async {

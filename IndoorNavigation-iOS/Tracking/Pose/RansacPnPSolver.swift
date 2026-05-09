@@ -73,7 +73,6 @@ final class RansacPnPSolver: PnPSolving {
         guard bestInlierIdx.count >= minInliers else {
             // 실패 진단 — best inlier 수가 0 이면 모든 candidate 의 reproj 가 threshold 초과.
             // 즉 intrinsics 불일치 또는 매칭 outlier 매우 높음. threshold 완화 또는 K 정확화 필요.
-            print("[RANSAC] inlier insufficient — best=\(bestInlierIdx.count), required=\(minInliers), threshold=\(inlierThresholdPx)px")
             return nil
         }
 

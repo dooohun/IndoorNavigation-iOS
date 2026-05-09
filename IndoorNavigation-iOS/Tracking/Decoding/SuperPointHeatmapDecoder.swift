@@ -45,7 +45,6 @@ final class SuperPointHeatmapDecoder {
         // 기대 shape: [1, 65, gridH, gridW]
         let shape = semi.shape.map { $0.intValue }
         guard shape.count == 4 else {
-            print("[Decode] semi shape rank mismatch: \(shape)")
             return []
         }
         let totalChannels = shape[1]
@@ -57,7 +56,6 @@ final class SuperPointHeatmapDecoder {
         let outH = gridH * cell
         let outW = gridW * cell
         guard totalChannels == config.dustbinChannelIndex + 1 else {
-            print("[Decode] dustbin channel mismatch: shape=\(shape), expected channels=\(config.dustbinChannelIndex + 1)")
             return []
         }
 
@@ -208,7 +206,7 @@ final class SuperPointHeatmapDecoder {
                 for i in 0..<count { result[i] = Float(src[i]) }
             }
         default:
-            print("[Decode] unsupported MLMultiArray dataType: \(arr.dataType)")
+            break
         }
         return result
     }

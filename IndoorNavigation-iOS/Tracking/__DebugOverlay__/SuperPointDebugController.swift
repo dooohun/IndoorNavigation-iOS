@@ -99,7 +99,6 @@ final class SuperPointDebugController {
     @objc private func onDumpTapped() {
         frameDumper.requestNextDump()
         flashDumpButton(color: .systemYellow)
-        print("[Dumper] next-frame dump requested")
     }
 
     /// dump 결과(성공/실패) 시각 피드백. ARNavigationLogic 이 completion 에서 호출.

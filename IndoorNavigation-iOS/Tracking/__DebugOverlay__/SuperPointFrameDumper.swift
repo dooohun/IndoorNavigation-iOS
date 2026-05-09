@@ -160,8 +160,6 @@ final class SuperPointFrameDumper {
             throw DumperError.fileWriteFailed(underlying: error)
         }
 
-        let kpCount = frame.keypoints.count
-        print("[Dumper] saved: \(url.lastPathComponent) (kp=\(kpCount), desc=\(data.count)B)")
         return url
     }
 

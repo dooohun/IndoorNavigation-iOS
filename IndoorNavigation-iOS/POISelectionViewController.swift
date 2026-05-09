@@ -27,7 +27,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
     convenience init(buildingId: String, buildingName: String) {
         let building = BuildingResponse(
             buildingId: buildingId, name: buildingName, description: nil,
-            latitude: nil, longitude: nil, status: nil,
+            latitude: nil, longitude: nil, status: "ACTIVE",
             createdAt: nil, updatedAt: nil
         )
         self.init(building: building)
@@ -165,7 +165,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
                     self.floors = floors
                     var map: [String: Int] = [:]
                     for f in floors {
-                        if let fid = f.floorId, let lv = f.level { map[fid] = lv }
+                        map[f.floorId] = f.level
                     }
                     self.floorIdToLevel = map
                     self.tableView.reloadData()
@@ -267,7 +267,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
         var config = cell.defaultContentConfiguration()
         config.text = poi.name ?? "(이름 없음)"
         config.image = iconForCategory(poi.category)
-        if let cat = poi.category { config.secondaryText = categoryDisplayName(cat) }
+        config.secondaryText = categoryDisplayName(poi.category)
         cell.contentConfiguration = config
         cell.accessoryType = .disclosureIndicator
         return cell
@@ -299,7 +299,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
             arVC.destinationName = poi.name ?? ""
             arVC.floorId = poi.floorId ?? ""
             let dp = poi.displayPoint
-            arVC.goal = Coordinate(x: dp?.x ?? 0, y: dp?.y ?? 0, z: dp?.z)
+            arVC.goal = Coordinate(x: dp?.x ?? 0, y: dp?.y ?? 0, z: dp?.z ?? 0)
             arVC.modalPresentationStyle = .fullScreen
             self.present(arVC, animated: true)
         })
