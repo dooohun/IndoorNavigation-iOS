@@ -588,7 +588,8 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
 extension ARNavigationViewController: ARNavigationLogicDelegate {
 
     func updateStatus(_ message: String, color: UIColor) {
-        // 스캔 오버레이 / 완료 배지가 대체
+        instructionLabel.text = message
+        instructionLabel.textColor = color == .white ? .darkText : color
     }
 
     func setLoading(_ loading: Bool) {
