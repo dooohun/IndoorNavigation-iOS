@@ -108,10 +108,8 @@ class NetworkManager {
         request.timeoutInterval = 30
 
         do {
-            let bodyData = try JSONEncoder().encode(requestDto)
-            request.httpBody = bodyData
+            request.httpBody = try JSONEncoder().encode(requestDto)
             log("REQ", "POST", url.absoluteString)
-            log("REQ", "바디:", String(data: bodyData, encoding: .utf8) ?? "")
         } catch {
             completion(.failure(error))
             return
@@ -120,7 +118,7 @@ class NetworkManager {
         Self.performJSON(request) { (result: Result<PathfindingResponse, Error>) in
             if case .success(let resp) = result {
                 let transitionCount = resp.floorTransitions?.count ?? 0
-                log("RES", "pathfinding 성공: steps \(resp.steps.count)개, transitions \(transitionCount)개")
+                log("RES", "pathfinding: steps \(resp.steps.count), transitions \(transitionCount), total \(String(format: "%.1f", resp.totalDistance))m")
             }
             completion(result)
         }
@@ -137,18 +135,16 @@ class NetworkManager {
         request.timeoutInterval = 90
 
         do {
-            let bodyData = try JSONEncoder().encode(requestDto)
-            request.httpBody = bodyData
-            log("REQ", "POST", url.absoluteString)
-            log("REQ", "바디 크기: \(bodyData.count) bytes (queries=\(requestDto.queries.count))")
+            request.httpBody = try JSONEncoder().encode(requestDto)
+            log("REQ", "POST lookup queries=\(requestDto.queries.count)")
         } catch {
             completion(.failure(error))
             return
         }
 
-        Self.performJSON(request, logBody: false) { (result: Result<FeatureLookupResponse, Error>) in
+        Self.performJSON(request) { (result: Result<FeatureLookupResponse, Error>) in
             if case .success(let resp) = result {
-                log("RES", "keyframes \(resp.keyframes.count)개, 총 \(resp.stats.byteSize) bytes")
+                log("RES", "lookup: keyframes \(resp.keyframes.count), \(resp.stats.byteSize / 1024)KB")
             }
             completion(result)
         }
@@ -165,10 +161,8 @@ class NetworkManager {
         request.timeoutInterval = 30
 
         do {
-            let bodyData = try JSONEncoder().encode(requestDto)
-            request.httpBody = bodyData
+            request.httpBody = try JSONEncoder().encode(requestDto)
             log("REQ", "POST", url.absoluteString)
-            log("REQ", "바디:", String(data: bodyData, encoding: .utf8) ?? "")
         } catch {
             completion(.failure(error))
             return
@@ -247,12 +241,11 @@ class NetworkManager {
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body
 
-        log("REQ", "POST", url.absoluteString)
-        log("REQ", "이미지 \(images.count)장, 바디 크기: \(body.count) bytes")
+        log("REQ", "POST localize images=\(images.count) body=\(body.count / 1024)KB")
 
         Self.performJSON(request) { (result: Result<SLAMLocalizeResponse, Error>) in
             if case .success(let resp) = result {
-                log("RES", "localizeV3 성공: confidence=\(resp.confidence), mapId=\(resp.mapId ?? "nil"), pose.floorLevel=\(resp.pose.floorLevel.map(String.init) ?? "nil")")
+                log("RES", "localize: confidence=\(String(format: "%.2f", resp.confidence)) floor=\(resp.floorLevel.map(String.init) ?? "?") matches=\(resp.numMatches ?? 0)")
             }
             completion(result)
         }
@@ -263,7 +256,6 @@ class NetworkManager {
     /// JSON 응답 디코딩 공통 처리. status guard → V1Error/Validation 디코드 → 본문 디코드.
     private static func performJSON<T: Decodable>(
         _ request: URLRequest,
-        logBody: Bool = true,
         completion: @escaping (Result<T, Error>) -> Void
     ) {
         URLSession.shared.dataTask(with: request) { data, response, error in
@@ -275,14 +267,9 @@ class NetworkManager {
             let http = response as? HTTPURLResponse
             let statusCode = http?.statusCode ?? 0
             let data = data ?? Data()
-            log("RES", "HTTP \(statusCode)")
-
-            if logBody {
-                let responseBody = String(data: data, encoding: .utf8) ?? "(빈 응답)"
-                log("RES", "바디:", responseBody)
-            }
 
             guard (200..<300).contains(statusCode) else {
+                log("RES", "HTTP \(statusCode)")
                 completion(.failure(httpError(statusCode: statusCode, data: data)))
                 return
             }

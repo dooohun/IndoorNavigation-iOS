@@ -1436,6 +1436,12 @@ class ARNavigationLogic {
         let floorY = cameraY - 1.7
         let placement = simd_float3(arPos.x, floorY, arPos.z)
 
+        let camPos = arPose.columns.3
+        let dx = placement.x - camPos.x, dz = placement.z - camPos.z
+        let distXZ = sqrt(dx * dx + dz * dz)
+        print(String(format: "[Checkpoint] kf serverPos=(%.2f,%.2f,%.2f) → arPos=(%.2f,%.2f,%.2f) cam→cp=%.2fm",
+                     kfPos.x, kfPos.y, kfPos.z, placement.x, placement.y, placement.z, distXZ))
+
         if let node = checkpointNode {
             node.position = SCNVector3(placement.x, placement.y, placement.z)
         } else {
