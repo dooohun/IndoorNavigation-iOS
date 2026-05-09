@@ -23,7 +23,6 @@ struct CoordinateTransformer {
     /// W = arCameraPose × rtabMapToARKit × inv(rtabCameraPose)
     /// result = W × point_rtab
     static func transform(serverPoint: simd_float3, input: Input) -> simd_float3 {
-        // 1. RTAB-Map 카메라 포즈 행렬 (body → world)
         var rtabCameraPose = simd_float4x4(input.serverQuaternion)
         rtabCameraPose.columns.3 = simd_float4(
             input.serverPosition.x,
@@ -32,14 +31,23 @@ struct CoordinateTransformer {
             1
         )
 
-        // 2. 월드 변환 행렬
-        //    로컬라이즈 시점에 두 포즈가 같은 물리적 순간을 나타냄
-        //    body frame 차이(rtabMapToARKit)를 포함한 완전한 rigid transform
-        let W = input.arCameraPose * rtabMapToARKit * rtabCameraPose.inverse
-
-        // 3. RTAB-Map 월드 좌표 → ARKit 월드 좌표
+        let invRtab = rtabCameraPose.inverse
+        let W = input.arCameraPose * rtabMapToARKit * invRtab
         let point = simd_float4(serverPoint.x, serverPoint.y, serverPoint.z, 1)
         let result = W * point
+
+        // 진단: 단계별 변환 추적 — 거리·방향 손실 위치 식별용
+        let cam = input.arCameraPose.columns.3
+        let pCamFrame = invRtab * point
+        let qNorm = input.serverQuaternion.length
+        let dCam = simd_length(simd_float3(pCamFrame.x, pCamFrame.y, pCamFrame.z))
+        let dResult = simd_length(simd_float3(result.x - cam.x, result.y - cam.y, result.z - cam.z))
+        print(String(format: "[CT] sp=(%.2f,%.2f,%.2f) sq=(%.3f,%.3f,%.3f,%.3f|n=%.3f) arCam=(%.2f,%.2f,%.2f) pCam=(%.2f,%.2f,%.2f|d=%.2f) → ar=(%.2f,%.2f,%.2f|d=%.2f)",
+            input.serverPosition.x, input.serverPosition.y, input.serverPosition.z,
+            input.serverQuaternion.imag.x, input.serverQuaternion.imag.y, input.serverQuaternion.imag.z, input.serverQuaternion.real, qNorm,
+            cam.x, cam.y, cam.z,
+            pCamFrame.x, pCamFrame.y, pCamFrame.z, dCam,
+            result.x, result.y, result.z, dResult))
 
         return simd_float3(result.x, result.y, result.z)
     }

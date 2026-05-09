@@ -968,10 +968,15 @@ class ARNavigationLogic {
                     Data(base64Encoded: kf.descriptorsB64) ?? Data()
                 }
                 print("[NetworkBundle] loaded \(bundle.keyframes.count) keyframes (경로 전체 영역)")
+                self.delegate?.showRouteCalculating(false)
+                self.delegate?.setLoading(false)
+                self.delegate?.updateStatus("\(self.destinationName) 방향으로 이동하세요.", color: .white)
                 self.setupTrackingCandidates(bundle: bundle)
                 self.startTracking()
             case .failure(let error):
                 print("[NetworkBundle] fetch failed: \(error) — 추적 미시작, ARKit pose 만")
+                self.delegate?.showRouteCalculating(false)
+                self.delegate?.setLoading(false)
             }
         }
     }
