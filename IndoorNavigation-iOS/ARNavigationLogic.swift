@@ -1340,32 +1340,7 @@ class ARNavigationLogic {
         }
         trackingKeyframeCandidates = Array(trackingKeyframeCandidates[bestIdx...])
         lastBestKeyframeIndex = bestIdx
-
-        // best keyframe 의 pose4x4 마지막 열 → localizedPose 갱신 (서버 좌표).
-        // PnP 없이 keyframe 좌표 그대로 사용 — 사용자 위치 ≈ keyframe 위치 가정.
-        if let bestKf = trackingKeyframeCandidates.first {
-            let kfTr = bestKf.pose4x4
-            // homogeneous 마지막 열 = translation (서버 좌표)
-            let kfPos = simd_float3(
-                Float(kfTr[0][3]),
-                Float(kfTr[1][3]),
-                Float(kfTr[2][3])
-            )
-            // 회전 — pose4x4 는 row-major 4×4. 회전 부분 추출은 향후 R→quat 변환 도입 (TODO).
-            // 현재 단계는 위치만 사용.
-            let newPose = Pose(
-                x: Double(kfPos.x), y: Double(kfPos.y), z: Double(kfPos.z),
-                qx: localizedPose?.qx ?? 0,
-                qy: localizedPose?.qy ?? 0,
-                qz: localizedPose?.qz ?? 0,
-                qw: localizedPose?.qw ?? 1
-            )
-            self.localizedPose = newPose
-            self.matchedARPose = arPoseAtCapture
-        }
-
-        // checkpoint (다음 keyframe = 후보 마지막) 갱신
-        updateCheckpointNode()
+        _ = arPoseAtCapture  // 매 tick 변환 갱신 폐기 — checkpointNode 는 V3 측위 시점에 한 번 고정.
 
         // 후보 1개로 줄었으면 새 lookup 트리거 (현재 keyframe 영역 모두 통과한 상태)
         if trackingKeyframeCandidates.count <= 1 {
@@ -1457,8 +1432,13 @@ class ARNavigationLogic {
         let camPos = arPose.columns.3
         let dx = placement.x - camPos.x, dz = placement.z - camPos.z
         let distXZ = sqrt(dx * dx + dz * dz)
-        print(String(format: "[Checkpoint] kf serverPos=(%.2f,%.2f,%.2f) → arPos=(%.2f,%.2f,%.2f) cam→cp=%.2fm",
-                     kfPos.x, kfPos.y, kfPos.z, placement.x, placement.y, placement.z, distXZ))
+        // 카메라 forward in ARKit world = -col2 (ARKit 컨벤션 -Z forward)
+        let camFwd = simd_normalize(simd_float3(-arPose.columns.2.x, -arPose.columns.2.y, -arPose.columns.2.z))
+        let toCp = simd_normalize(simd_float3(dx, placement.y - camPos.y, dz))
+        let dot = simd_dot(camFwd, toCp)
+        let angleDeg = acos(max(-1, min(1, dot))) * 180 / .pi
+        print(String(format: "[Checkpoint] kf=(%.2f,%.2f,%.2f) → ar=(%.2f,%.2f,%.2f) cam→cp=%.2fm fwd∠cp=%.1f°",
+                     kfPos.x, kfPos.y, kfPos.z, placement.x, placement.y, placement.z, distXZ, angleDeg))
 
         if let node = checkpointNode {
             node.position = SCNVector3(placement.x, placement.y, placement.z)
