@@ -189,6 +189,8 @@ class ARNavigationLogic {
     private var pathQueryPoints: [NetworkBundleProvider.QueryPoint] = []
     /// 다음 query 좌표 커서. triggerNewLookup 호출 시 +1.
     private var consumedQueryPointIndex: Int = 0
+    /// pathfinding steps 시각화용 노드 (sphere + 인접 segment cylinder).
+    private var pathNodes: [SCNNode] = []
     /// trial counter — 화면 더블탭으로 측위 재시작 시 +1, 로그 prefix 용.
     private var trialNumber: Int = 0
 
@@ -545,6 +547,8 @@ class ARNavigationLogic {
         lastBestKeyframeIndex = nil
         pathQueryPoints = []
         consumedQueryPointIndex = 0
+        pathNodes.forEach { $0.removeFromParentNode() }
+        pathNodes = []
 
         // bundle 클리어
         localizationBundle = nil
@@ -901,7 +905,7 @@ class ARNavigationLogic {
                     let steps = resp.toPathSteps()
                     self.lastStartSnapDistance = nil
                     print("[V3-PATH] steps=\(steps.count), totalDistance=\(resp.totalDistance)m, floorTransitions=\(resp.floorTransitions?.count ?? 0)")
-                    // 데이터용 — drawPathNodes 호출 X (직선 안내는 handleLocalizeV3Success 에서 이미 표시).
+                    self.drawPathFromSteps(steps)
                     // steps[].position 좌표를 lookup multi-query 로 사용 → 경로 전체 영역 keyframe pack 받음.
                     self.fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
                 case .failure(let err):
@@ -1447,6 +1451,80 @@ class ARNavigationLogic {
             scene?.rootNode.addChildNode(node)
             checkpointNode = node
         }
+    }
+
+    /// pathfinding steps[].position 들을 server world → AR world 변환 후 sphere + cylinder line 으로 시각화.
+    /// V3 측위 + lookup 직후 1회 호출. 매 tick 갱신 X.
+    private func drawPathFromSteps(_ steps: [PathStep]) {
+        pathNodes.forEach { $0.removeFromParentNode() }
+        pathNodes.removeAll()
+
+        guard let arPose = matchedARPose, let pose = localizedPose else { return }
+
+        let serverPos = simd_float3(Float(pose.x ?? 0), Float(pose.y ?? 0), Float(pose.z ?? 0))
+        let quat = simd_quatf(
+            ix: Float(pose.qx ?? 0), iy: Float(pose.qy ?? 0),
+            iz: Float(pose.qz ?? 0), r: Float(pose.qw ?? 1)
+        )
+        let input = CoordinateTransformer.Input(
+            serverPosition: serverPos, serverQuaternion: quat, arCameraPose: arPose
+        )
+        let floorY = arPose.columns.3.y - 1.7
+
+        let arPoints: [simd_float3] = steps.compactMap { step in
+            guard let pos = step.position,
+                  let x = pos.x, let y = pos.y, let z = pos.z else { return nil }
+            let p = CoordinateTransformer.transform(
+                serverPoint: simd_float3(Float(x), Float(y), Float(z)),
+                input: input
+            )
+            return simd_float3(p.x, floorY, p.z)
+        }
+        guard arPoints.count >= 2 else { return }
+
+        for p in arPoints {
+            let sphere = SCNSphere(radius: 0.12)
+            let mat = SCNMaterial()
+            mat.diffuse.contents = UIColor.systemBlue
+            mat.lightingModel = .constant
+            mat.writesToDepthBuffer = false
+            sphere.materials = [mat]
+            let node = SCNNode(geometry: sphere)
+            node.position = SCNVector3(p.x, p.y, p.z)
+            scene?.rootNode.addChildNode(node)
+            pathNodes.append(node)
+        }
+        for i in 0..<(arPoints.count - 1) {
+            let seg = lineSegmentNode(from: arPoints[i], to: arPoints[i + 1])
+            scene?.rootNode.addChildNode(seg)
+            pathNodes.append(seg)
+        }
+        print("[Path] drew \(steps.count) steps as \(arPoints.count) points + \(arPoints.count - 1) segments")
+    }
+
+    /// 두 점 사이 cylinder. SCNCylinder 의 default 축은 Y. cross product 로 v 방향 회전.
+    private func lineSegmentNode(from a: simd_float3, to b: simd_float3) -> SCNNode {
+        let v = b - a
+        let length = simd_length(v)
+        let cyl = SCNCylinder(radius: 0.05, height: CGFloat(length))
+        let mat = SCNMaterial()
+        mat.diffuse.contents = UIColor.systemBlue.withAlphaComponent(0.7)
+        mat.lightingModel = .constant
+        mat.writesToDepthBuffer = false
+        cyl.materials = [mat]
+        let node = SCNNode(geometry: cyl)
+        let mid = (a + b) * 0.5
+        node.position = SCNVector3(mid.x, mid.y, mid.z)
+
+        let yAxis = simd_float3(0, 1, 0)
+        let dir = simd_normalize(v)
+        let cross = simd_cross(yAxis, dir)
+        let dot = simd_dot(yAxis, dir)
+        if simd_length(cross) > 0.001 {
+            let axis = simd_normalize(cross)
+            node.rotation = SCNVector4(axis.x, axis.y, axis.z, acos(max(-1, min(1, dot))))
+        }
+        return node
     }
 
     /// 흰색 원형 바닥 마커 — torus(테두리) + cylinder(채움 alpha 0.6).
