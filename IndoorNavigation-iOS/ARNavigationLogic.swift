@@ -165,9 +165,12 @@ class ARNavigationLogic {
     private let pnpMinPairs: Int = 6
 
     // MARK: - Phase 8 추적 cadence (A 트랙)
-    /// 추적 측위 주기 (초). 실측: 발열 throttled SuperPoint ~700ms + LightGlue 5kf × ~100ms ≈ 1.5s.
-    /// cadence 2.0s 로 큐 쌓임 방지. TODO(A1): thermal throttle / globalDescriptor prefilter 도입 후 단축.
-    private let trackingCadenceSec: TimeInterval = 2.0
+    /// 추적 측위 주기 (초). SuperPoint ~700ms + LightGlue 5kf × ~100ms ≈ 1.2s.
+    /// cadence 5.0s = thermal throttle 회피 + prefix drop 충분 빈도.
+    private let trackingCadenceSec: TimeInterval = 5.0
+    /// 매 tick 매칭할 후보 keyframe 최대 개수 (candidates 앞쪽부터).
+    /// prefix drop 모델상 사용자는 인덱스 0~N 근처 → 19개 모두 매칭 불요.
+    private let trackingMatchTopK: Int = 5
     /// 추적 timer.
     private var trackingTimer: Timer?
     /// 추적 추론 큐 — userInitiated.
@@ -1305,7 +1308,10 @@ class ARNavigationLogic {
             print("[Tick] SuperPoint 추출 완료 — keypoints=\(queryFrame.keypoints.count)")
             var matchErrors = 0
             var allKfData: [(idx: Int, count: Int, matches: [LightGlueMatcherEngine.Match])] = []
-            for (idx, kf) in candidatesSnapshot.enumerated() {
+            // 발열 제어: prefix drop 모델상 사용자는 candidates 앞쪽 근처 → topK 만 매칭.
+            let matchLimit = min(self.trackingMatchTopK, candidatesSnapshot.count)
+            for idx in 0..<matchLimit {
+                let kf = candidatesSnapshot[idx]
                 guard !kf.keypoints.isEmpty else { continue }
                 do {
                     let m = try engine.match(query: queryFrame, targetKeyframe: kf, targetIntrinsics: intrinsicsSnapshot)
