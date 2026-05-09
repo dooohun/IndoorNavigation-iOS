@@ -1231,21 +1231,26 @@ class ARNavigationLogic {
     /// 추적 측위 시작 — V3 측위 + lookup 완료 후 호출. cadence 마다 background 측위.
     func startTracking() {
         guard Self.useLightGlueMatcher else {
+            print("[Tracking] start 실패 — useLightGlueMatcher=false")
             return
         }
         guard let bundle = localizationBundle, !bundle.keyframes.isEmpty else {
+            print("[Tracking] start 실패 — bundle 없음 또는 빈 keyframes")
             return
         }
         guard lightGlueMatcher != nil else {
+            print("[Tracking] start 실패 — lightGlueMatcher=nil")
             return
         }
         guard superPointExtractor != nil else {
+            print("[Tracking] start 실패 — superPointExtractor=nil")
             return
         }
         trackingTimer?.invalidate()
         trackingTimer = Timer.scheduledTimer(withTimeInterval: trackingCadenceSec, repeats: true) { [weak self] _ in
             self?.runTrackingTick()
         }
+        print("[Tracking] 시작 — cadence=\(trackingCadenceSec)s, keyframes=\(bundle.keyframes.count)")
     }
 
     func stopTracking() {
@@ -1276,6 +1281,7 @@ class ARNavigationLogic {
         let intrinsicsSnapshot = bundle.manifest.intrinsics
 
         isTrackingTickInFlight = true
+        print("[Tick] 시작 — candidates=\(candidatesSnapshot.count)")
         trackingQueue.async { [weak self] in
             guard let self = self else { return }
             let queryFrame = extractor.extract(
@@ -1284,23 +1290,30 @@ class ARNavigationLogic {
                 timestamp: timestamp,
                 orientation: orientation
             )
-            // 모든 후보 keyframe 매칭 — matched count 만 산출. PnP 풀지 않음.
+            print("[Tick] SuperPoint 추출 완료 — keypoints=\(queryFrame.keypoints.count)")
+            var matchErrors = 0
             let perKfMatches: [(idx: Int, matched: Int)] = candidatesSnapshot.enumerated().compactMap { (idx, kf) in
                 guard !kf.keypoints.isEmpty else { return nil }
-                guard let m = try? engine.match(
-                    query: queryFrame,
-                    targetKeyframe: kf,
-                    targetIntrinsics: intrinsicsSnapshot
-                ) else { return nil }
-                return (idx, m.count)
+                do {
+                    let m = try engine.match(query: queryFrame, targetKeyframe: kf, targetIntrinsics: intrinsicsSnapshot)
+                    return (idx, m.count)
+                } catch {
+                    matchErrors += 1
+                    if matchErrors <= 1 { print("[Tick] LightGlue 실패 kf=\(idx): \(error)") }
+                    return nil
+                }
             }
+            let summary = perKfMatches.map { "\($0.idx):\($0.matched)" }.joined(separator: ",")
+            print("[Tick] LightGlue 결과 — kf매칭=\(perKfMatches.count)/\(candidatesSnapshot.count) [\(summary)] errors=\(matchErrors)")
             guard let best = perKfMatches.max(by: { $0.matched < $1.matched }) else {
                 DispatchQueue.main.async {
+                    print("[Tick] best 없음 — 후보 유지")
                     self.isTrackingTickInFlight = false
                 }
                 return
             }
             DispatchQueue.main.async {
+                print("[Tick] best kf=\(best.idx) matched=\(best.matched) → prefix drop")
                 self.handleTrackingMatchResult(
                     bestIdx: best.idx,
                     bestMatched: best.matched,

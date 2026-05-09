@@ -1,4 +1,5 @@
 import simd
+import Foundation
 
 struct CoordinateTransformer {
 
@@ -36,18 +37,26 @@ struct CoordinateTransformer {
         let point = simd_float4(serverPoint.x, serverPoint.y, serverPoint.z, 1)
         let result = W * point
 
-        // 진단: 단계별 변환 추적 — 거리·방향 손실 위치 식별용
+        // 진단 1: 현재 변환 결과
         let cam = input.arCameraPose.columns.3
         let pCamFrame = invRtab * point
-        let qNorm = input.serverQuaternion.length
         let dCam = simd_length(simd_float3(pCamFrame.x, pCamFrame.y, pCamFrame.z))
-        let dResult = simd_length(simd_float3(result.x - cam.x, result.y - cam.y, result.z - cam.z))
-        print(String(format: "[CT] sp=(%.2f,%.2f,%.2f) sq=(%.3f,%.3f,%.3f,%.3f|n=%.3f) arCam=(%.2f,%.2f,%.2f) pCam=(%.2f,%.2f,%.2f|d=%.2f) → ar=(%.2f,%.2f,%.2f|d=%.2f)",
-            input.serverPosition.x, input.serverPosition.y, input.serverPosition.z,
-            input.serverQuaternion.imag.x, input.serverQuaternion.imag.y, input.serverQuaternion.imag.z, input.serverQuaternion.real, qNorm,
-            cam.x, cam.y, cam.z,
+        print(String(format: "[CT] pCam=(%.2f,%.2f,%.2f|d=%.2f) → ar=(%.2f,%.2f,%.2f)",
             pCamFrame.x, pCamFrame.y, pCamFrame.z, dCam,
-            result.x, result.y, result.z, dResult))
+            result.x, result.y, result.z))
+
+        // 진단 2: server quat 이 R_camera_from_world (W2C) 일 가설
+        // 현재 코드는 R_world_from_camera (C2W) 가정. 만약 W2C 면 quat inverse 후 SE(3) 조립
+        var rtabAlt = simd_float4x4(input.serverQuaternion.inverse)
+        rtabAlt.columns.3 = simd_float4(input.serverPosition.x, input.serverPosition.y, input.serverPosition.z, 1)
+        let invAlt = rtabAlt.inverse
+        let pCamAlt = invAlt * point
+        let dCamAlt = simd_length(simd_float3(pCamAlt.x, pCamAlt.y, pCamAlt.z))
+        let resultAlt = input.arCameraPose * rtabMapToARKit * invAlt * point
+        print(String(format: "[CT-ALT] (quat.inverse) pCam=(%.2f,%.2f,%.2f|d=%.2f) → ar=(%.2f,%.2f,%.2f)",
+            pCamAlt.x, pCamAlt.y, pCamAlt.z, dCamAlt,
+            resultAlt.x, resultAlt.y, resultAlt.z))
+        _ = cam
 
         return simd_float3(result.x, result.y, result.z)
     }
