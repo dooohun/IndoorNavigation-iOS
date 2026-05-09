@@ -405,9 +405,19 @@ class ARNavigationLogic {
                 simd_float3(lastT.x, lastT.y, lastT.z)
             )
             let translationVel = dist / dt  // m/s
-            let curQ = simd_quatf(frame.camera.transform)
-            let lastQ = simd_quatf(lastTransform)
-            let angleDelta = simd_quatf(curQ.normalized * lastQ.normalized.inverse).angle
+            let curR = simd_float3x3(
+                SIMD3<Float>(frame.camera.transform.columns.0.x, frame.camera.transform.columns.0.y, frame.camera.transform.columns.0.z),
+                SIMD3<Float>(frame.camera.transform.columns.1.x, frame.camera.transform.columns.1.y, frame.camera.transform.columns.1.z),
+                SIMD3<Float>(frame.camera.transform.columns.2.x, frame.camera.transform.columns.2.y, frame.camera.transform.columns.2.z)
+            )
+            let lastR = simd_float3x3(
+                SIMD3<Float>(lastTransform.columns.0.x, lastTransform.columns.0.y, lastTransform.columns.0.z),
+                SIMD3<Float>(lastTransform.columns.1.x, lastTransform.columns.1.y, lastTransform.columns.1.z),
+                SIMD3<Float>(lastTransform.columns.2.x, lastTransform.columns.2.y, lastTransform.columns.2.z)
+            )
+            let curQ = simd_quatf(curR)
+            let lastQ = simd_quatf(lastR)
+            let angleDelta = (curQ.normalized * lastQ.normalized.inverse).angle
             let rotationVel = abs(angleDelta) / dt  // rad/s
 
             if translationVel > captureMaxTranslationVel || rotationVel > captureMaxRotationVel {
