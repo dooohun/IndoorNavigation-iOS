@@ -191,6 +191,10 @@ class ARNavigationLogic {
     private var consumedQueryPointIndex: Int = 0
     /// pathfinding steps 시각화용 노드 (sphere + 인접 segment cylinder).
     private var pathNodes: [SCNNode] = []
+    /// drawPathFromSteps 가 받은 마지막 steps — PnP 보정 후 재렌더용.
+    private var lastPathSteps: [PathStep] = []
+    /// V3 측위 + lookup 후 첫 PnP 보정 1회만 적용. true 되면 이후 tick 은 prefix drop 만.
+    private var hasPerformedPnPRefinement: Bool = false
     /// trial counter — 화면 더블탭으로 측위 재시작 시 +1, 로그 prefix 용.
     private var trialNumber: Int = 0
 
@@ -549,6 +553,8 @@ class ARNavigationLogic {
         consumedQueryPointIndex = 0
         pathNodes.forEach { $0.removeFromParentNode() }
         pathNodes = []
+        lastPathSteps = []
+        hasPerformedPnPRefinement = false
 
         // bundle 클리어
         localizationBundle = nil
@@ -1285,7 +1291,9 @@ class ARNavigationLogic {
         let intrinsicsSnapshot = bundle.manifest.intrinsics
 
         isTrackingTickInFlight = true
-        print("[Tick] 시작 — candidates=\(candidatesSnapshot.count)")
+        let pnpAttempt = !hasPerformedPnPRefinement
+        let bundleSnapshot = bundle
+        print("[Tick] 시작 — candidates=\(candidatesSnapshot.count) pnpAttempt=\(pnpAttempt)")
         trackingQueue.async { [weak self] in
             guard let self = self else { return }
             let queryFrame = extractor.extract(
@@ -1296,17 +1304,18 @@ class ARNavigationLogic {
             )
             print("[Tick] SuperPoint 추출 완료 — keypoints=\(queryFrame.keypoints.count)")
             var matchErrors = 0
-            let perKfMatches: [(idx: Int, matched: Int)] = candidatesSnapshot.enumerated().compactMap { (idx, kf) in
-                guard !kf.keypoints.isEmpty else { return nil }
+            var allKfData: [(idx: Int, count: Int, matches: [LightGlueMatcherEngine.Match])] = []
+            for (idx, kf) in candidatesSnapshot.enumerated() {
+                guard !kf.keypoints.isEmpty else { continue }
                 do {
                     let m = try engine.match(query: queryFrame, targetKeyframe: kf, targetIntrinsics: intrinsicsSnapshot)
-                    return (idx, m.count)
+                    allKfData.append((idx, m.count, m))
                 } catch {
                     matchErrors += 1
                     if matchErrors <= 1 { print("[Tick] LightGlue 실패 kf=\(idx): \(error)") }
-                    return nil
                 }
             }
+            let perKfMatches = allKfData.map { (idx: $0.idx, matched: $0.count) }
             let summary = perKfMatches.map { "\($0.idx):\($0.matched)" }.joined(separator: ",")
             print("[Tick] LightGlue 결과 — kf매칭=\(perKfMatches.count)/\(candidatesSnapshot.count) [\(summary)] errors=\(matchErrors)")
             guard let best = perKfMatches.max(by: { $0.matched < $1.matched }) else {
@@ -1316,8 +1325,45 @@ class ARNavigationLogic {
                 }
                 return
             }
+
+            // PnP 보정 — V3 측위 quat 오차 정정. 첫 성공 시점에 한 번만 적용.
+            var pnpRefinement: PoseEstimate? = nil
+            if pnpAttempt {
+                let bestRaw = allKfData.first { $0.idx == best.idx }?.matches ?? []
+                let bestKf = candidatesSnapshot[best.idx]
+                let pairs = MatchedPointExtractor.extract(
+                    lightGlueMatches: bestRaw,
+                    queryKeypoints: queryFrame.keypoints,
+                    bundleKeyframe: bestKf
+                )
+                if pairs.count >= self.pnpMinPairs {
+                    let mIntr = bundleSnapshot.manifest.intrinsics
+                    let K = simd_float3x3(rows: [
+                        SIMD3<Float>(Float(mIntr.fx), 0, Float(mIntr.cx)),
+                        SIMD3<Float>(0, Float(mIntr.fy), Float(mIntr.cy)),
+                        SIMD3<Float>(0, 0, 1),
+                    ])
+                    if let solved = self.pnpSolver.solve(
+                        objectPoints: pairs.map { $0.worldPoint },
+                        imagePoints: pairs.map { $0.imagePoint },
+                        intrinsics: K
+                    ), solved.reprojectionError < 30 {
+                        pnpRefinement = solved
+                        print(String(format: "[Tick] PnP 보정 성공 — pairs=%d reproj=%.2fpx", pairs.count, solved.reprojectionError))
+                    } else {
+                        print("[Tick] PnP fail (pairs=\(pairs.count) — reproj 초과 또는 solve 실패)")
+                    }
+                } else {
+                    print("[Tick] PnP skip — pairs=\(pairs.count) < \(self.pnpMinPairs)")
+                }
+            }
+
             DispatchQueue.main.async {
                 print("[Tick] best kf=\(best.idx) matched=\(best.matched) → prefix drop")
+                if let pnp = pnpRefinement {
+                    self.applyPnPRefinement(pose: pnp, arPose: arPoseAtCapture)
+                    self.hasPerformedPnPRefinement = true
+                }
                 self.handleTrackingMatchResult(
                     bestIdx: best.idx,
                     bestMatched: best.matched,
@@ -1327,6 +1373,29 @@ class ARNavigationLogic {
                 self.isTrackingTickInFlight = false
             }
         }
+    }
+
+    /// PnP 결과로 localizedPose / matchedARPose 갱신 + path / checkpoint 재렌더.
+    /// PoseEstimate.rotation 은 world→camera (W2C). server pose 응답 형식과 동일 convention 이라
+    /// quaternion 그대로 qx/qy/qz/qw 로. translation 은 -R^T t_W2C 로 camera position in world.
+    private func applyPnPRefinement(pose: PoseEstimate, arPose: simd_float4x4) {
+        let R_W2C = pose.rotation
+        let t_W2C = pose.translation
+        let R_C2W = R_W2C.transpose
+        let t_W = -(R_C2W * t_W2C)
+        let q_W2C = simd_quatf(R_W2C)
+
+        self.localizedPose = Pose(
+            x: Double(t_W.x), y: Double(t_W.y), z: Double(t_W.z),
+            qx: Double(q_W2C.imag.x), qy: Double(q_W2C.imag.y),
+            qz: Double(q_W2C.imag.z), qw: Double(q_W2C.real)
+        )
+        self.matchedARPose = arPose
+        print(String(format: "[PnP] refined → t_W=(%.2f,%.2f,%.2f) reproj=%.2fpx", t_W.x, t_W.y, t_W.z, pose.reprojectionError))
+
+        // 보정된 pose 로 path / checkpoint 재렌더
+        self.drawPathFromSteps(self.lastPathSteps)
+        self.updateCheckpointNode()
     }
 
     /// runTrackingTick 의 main 큐 후속 처리. PnP 없이 best keyframe 까지 prefix drop +
@@ -1383,6 +1452,7 @@ class ARNavigationLogic {
         }
         trackingKeyframeCandidates = sorted
         lastBestKeyframeIndex = nil
+        hasPerformedPnPRefinement = false
         updateCheckpointNode()
     }
 
@@ -1456,6 +1526,7 @@ class ARNavigationLogic {
     /// pathfinding steps[].position 들을 server world → AR world 변환 후 sphere + cylinder line 으로 시각화.
     /// V3 측위 + lookup 직후 1회 호출. 매 tick 갱신 X.
     private func drawPathFromSteps(_ steps: [PathStep]) {
+        lastPathSteps = steps
         pathNodes.forEach { $0.removeFromParentNode() }
         pathNodes.removeAll()
 
