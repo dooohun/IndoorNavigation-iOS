@@ -3,10 +3,15 @@ import Foundation
 
 struct CoordinateTransformer {
 
-    // server camera frame 이 ARKit camera frame (X-right, Y-up, -Z forward) 와 동일하다고 가정
-    // — quat.inverse 분석 결과 pCam=(1.31, 3.05, -23.35) 가 -Z forward 정합.
-    // 추가 좌표축 회전 불필요 → identity.
-    static let rtabMapToARKit: simd_float4x4 = matrix_identity_float4x4
+    // R_z(π) = Z 축 기준 180° 회전. server camera frame 의 X, Y 결과 부호 반전.
+    // 실측 단서:
+    //  - server +Y (좌회전 5.4m) → ARKit +X (우측) 으로 매핑 → 좌우 반전 → X 부호 반전 필요
+    //  - server +Z (위 1.6m)    → ARKit -Y (아래) 로 매핑 → 위아래 반전 → Y 부호 반전 필요
+    //  - Z(forward) 는 정합 → Z 그대로
+    // 결과: rtabMapToARKit = R_z(π) (proper rotation, det +1)
+    static let rtabMapToARKit: simd_float4x4 = simd_float4x4(
+        simd_quatf(angle: .pi, axis: SIMD3<Float>(0, 0, 1))
+    )
 
     struct Input {
         let serverPosition: simd_float3     // localize (x, y, z)
