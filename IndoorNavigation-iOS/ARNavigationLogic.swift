@@ -24,28 +24,13 @@ protocol ARNavigationLogicDelegate: AnyObject {
 
 class ARNavigationLogic {
 
-    // MARK: - Mock Mode (서버 미가용 시 UI 점검용)
-    // FIXME: 서버 복구 후 false로 전환
-    static let useMockData: Bool = false
-
-    // V3 측위 토글. true: 첫 측위는 서버 V3 (정확) → 응답 좌표로 lookup → 추적은 클라 LightGlue.
-    // false: 클라 단독 측위 (lookup 좌표 hardcode 한계 있음).
-    // 사용자 의도된 정공: V3 1회 + lookup + 추적. 본 토글 true 유지.
-    static let useV3Localize: Bool = true
-
-    // V3 pathfinding 토글. 현재 useV3Localize 와 짝. legacy 분리가 필요해질 때만 false.
-    // 클라 단독 측위 후에도 경로 탐색은 서버 사용 — true 유지.
-    static let useV3Pathfinding: Bool = true
-
-    // S3 — LightGlue 매처 토글. DEBUG 기본 true (클라 단독 측위 검증 모드).
-    // RELEASE 빌드는 항상 false. UserDefaults 키 명시 시 그 값 우선.
-    // 클라 단독 측위: useV3Localize=false + useLightGlueMatcher=true.
+    // LightGlue 매처 토글 — RELEASE 에서 false 면 lightGlueMatcher lazy init skip.
     static let useLightGlueMatcher: Bool = {
         #if DEBUG
         if UserDefaults.standard.object(forKey: "useLightGlueMatcher") != nil {
             return UserDefaults.standard.bool(forKey: "useLightGlueMatcher")
         }
-        return true   // DEBUG default — 클라 단독 측위 (A1 모드)
+        return true
         #else
         return false
         #endif
@@ -139,20 +124,6 @@ class ARNavigationLogic {
     /// NetworkBundleProvider strong reference — fetch completion 까지 인스턴스 살려둠
     /// (로컬 변수만 두면 setupSuperPointExtractor 종료 시 deallocated → completion silent return).
     private var networkBundleProvider: NetworkBundleProvider?
-    /// 매 프레임 매칭 결과 누적 → window 평균 console 로그.
-    private struct MatchSample {
-        let bestKfIdx: Int
-        let bestMatched: Int
-        let bestAvgScore: Float
-        let perKfMatched: [Int]
-    }
-    private var matchSamples: [MatchSample] = []
-    private let matchLogWindow = 5
-    /// cosine similarity 절대 임계 (정규화 vector 기준 0.7 = 매우 유사).
-    private let matchScoreThreshold: Float = 0.7
-    /// Lowe's ratio test — top-1 / top-2 가 본 값보다 커야 매칭 인정.
-    /// 1.3 = best 가 second 보다 30% 이상 우월해야. false positive 강력 제거.
-    private let matchRatio: Float = 1.3
     /// PnP solver — RANSAC 으로 outlier 매칭에 면역. iter 100, inlier 임계 20px (intrinsics
     /// 불일치 미세 reproj 차이 흡수 — 단계 5 클라 K 정확화 전 잠정), 최소 inlier 8.
     /// 단순 DLT 단독은 outlier 1~2 개에도 reproj 폭주하므로 실측에서 무용지물 (관찰됨).
@@ -247,23 +218,6 @@ class ARNavigationLogic {
             superPointExtractor = stub
         }
 
-        // Phase 8 bundle 로드 — 매 프레임 매칭 진단용 mock 만 로드.
-        // 추적용 NetworkBundle 은 V3 측위 응답 받은 후 (handleLocalizeV3Success 안에서) 호출 — 사용자 위치 알 때.
-        // 앱 진입 시점에는 사용자 위치 모르므로 hardcode (0,0,0) 으로 lookup 하면 origin keyframe 받아 추적 무용.
-        loadMockBundleFallback()
-    }
-
-    /// `MockBundleProvider` 로드 + descriptor 캐시 채움. 실패해도 throw 안 함 (매칭만 비활성).
-    /// 토글 OFF 시 + NetworkBundleProvider 실패 시 모두 본 헬퍼로 폴백.
-    private func loadMockBundleFallback() {
-        do {
-            let bundle = try MockBundleProvider().loadBundle()
-            localizationBundle = bundle
-            keyframeDescriptorCache = bundle.keyframes.map { kf in
-                Data(base64Encoded: kf.descriptorsB64) ?? Data()
-            }
-        } catch {
-        }
     }
 
     /// SuperPointExtractorML 의 onInferenceTimeMs 콜백으로부터 호출. 최근 100개만 유지.
@@ -331,187 +285,10 @@ class ARNavigationLogic {
         }
         #endif
 
-        matchAgainstMockBundle(result)
-
         #if DEBUG
         superPointDebug?.receiveFrame(result)
         #endif
-    }
-
-    /// 추출 결과를 mock bundle 의 모든 keyframe 과 cosine similarity 매칭. best keyframe
-    /// 선택 후 window 평균을 console 로그로 출력 (매핑 환경 안/밖에서 매칭률 비교용).
-    private func matchAgainstMockBundle(_ frame: SuperPointFrame) {
-        guard let bundle = localizationBundle, !keyframeDescriptorCache.isEmpty else { return }
-        guard frame.descriptors.shape.count == 2,
-              frame.descriptors.shape[0].intValue > 0 else { return }
-
-        // S3 분기 — LightGlue 토글 ON 시 매 프레임 매칭은 SKIP.
-        // 사유: 5 keyframe × LightGlue 추론(~100ms) = main 스레드 ~500ms 점유로 UI/캡처 차단.
-        // 매 프레임 LightGlue 매칭은 진단 로그용이었고 측위는 runClientLocalize 트리거 시점에만 수행.
-        // 향후 추적 측위(매 cadence) 본격 도입 시 background 큐로 옮겨 다시 활성화 (TODO S3+).
-        if Self.useLightGlueMatcher {
-            return
-        }
-
-        let queryCount = frame.descriptors.shape[0].intValue
-
-        var perKfStats: [(idx: Int, stats: DescriptorMatcher.Stats, matches: [DescriptorMatcher.Match?])] = []
-        for (kfIdx, kf) in bundle.keyframes.enumerated() {
-            let refBytes = keyframeDescriptorCache[kfIdx]
-            let n = kf.keypoints.count
-            guard n > 0, refBytes.count == n * 256 * MemoryLayout<Float16>.size else { continue }
-            let matches = DescriptorMatcher.matchTop1(
-                query: frame.descriptors,
-                referenceBytes: refBytes,
-                referenceCount: n,
-                threshold: matchScoreThreshold,
-                ratio: matchRatio
-            )
-            let stats = DescriptorMatcher.stats(matches: matches, queryCount: queryCount)
-            perKfStats.append((idx: kfIdx, stats: stats, matches: matches))
-        }
-        guard !perKfStats.isEmpty else { return }
-        let best = perKfStats.max { $0.stats.matchedCount < $1.stats.matchedCount }!
-        let sample = MatchSample(
-            bestKfIdx: best.idx,
-            bestMatched: best.stats.matchedCount,
-            bestAvgScore: best.stats.avgScore,
-            perKfMatched: perKfStats.map { $0.stats.matchedCount }
-        )
-        recordMatchSample(sample, queryCount: queryCount)
-
-        // mock 트랙 PnP — V3 가 메인 측위. UserDefaults("useMockPnP")=true 시에만 시도.
-        // TODO(향후): superPointDebug 컨트롤러에 토글 UI 추가
-        #if DEBUG
-        if UserDefaults.standard.bool(forKey: "useMockPnP") {
-            attemptPnP(frame: frame, bundle: bundle, bestKfIdx: best.idx, bestMatches: best.matches)
-        }
-        #endif
-    }
-
-    /// best keyframe 매칭에서 valid 2D-3D 쌍을 추출 + DLTPnPSolver 호출. 결과 즉시 console 로그.
-    private func attemptPnP(
-        frame: SuperPointFrame,
-        bundle: LocalizationBundle,
-        bestKfIdx: Int,
-        bestMatches: [DescriptorMatcher.Match?]
-    ) {
-        let bestKf = bundle.keyframes[bestKfIdx]
-        let pairs = MatchedPointExtractor.extract(
-            matches: bestMatches,
-            queryKeypoints: frame.keypoints,
-            bundleKeyframe: bestKf
-        )
-        guard pairs.count >= pnpMinPairs else { return }
-
-        // 매핑 시점 카메라 intrinsics (서버 manifest). 클라가 동일 사이즈(960×540)로 SuperPoint
-        // 추출했으므로 좌표계 일치한다고 가정 — 정확한 클라 K(스케일·회전 보정) 는 단계 5 에서.
-        let m = bundle.manifest.intrinsics
-        let K = simd_float3x3(rows: [
-            SIMD3<Float>(Float(m.fx), 0, Float(m.cx)),
-            SIMD3<Float>(0, Float(m.fy), Float(m.cy)),
-            SIMD3<Float>(0, 0, 1),
-        ])
-
-        guard pnpSolver.solve(
-            objectPoints: pairs.map { $0.worldPoint },
-            imagePoints: pairs.map { $0.imagePoint },
-            intrinsics: K
-        ) != nil else {
-            return
-        }
-    }
-
-    // MARK: - S3 LightGlue 매칭 + 클라 단독 측위
-
-    /// LightGlue 엔진으로 모든 keyframe 매칭 → best 선정 + window 평균 console 로그.
-    /// DescriptorMatcher 경로(matchAgainstMockBundle)와 1:1 미러. PnP 는 본 메서드에서 호출하지 않는다
-    /// — 매 프레임 700ms 추론은 비현실적이므로 측위 트리거는 캡처 시점(runClientLocalize) 1회만.
-    private func matchAgainstMockBundleLightGlue(
-        _ frame: SuperPointFrame,
-        bundle: LocalizationBundle,
-        engine: LightGlueMatcherEngine
-    ) {
-        let queryCount = frame.keypoints.count
-        guard queryCount > 0 else { return }
-
-        var perKfStats: [(idx: Int, matched: Int, avgScore: Float)] = []
-        for (kfIdx, kf) in bundle.keyframes.enumerated() {
-            guard !kf.keypoints.isEmpty else { continue }
-            guard let matches = try? engine.match(
-                query: frame,
-                targetKeyframe: kf,
-                targetIntrinsics: bundle.manifest.intrinsics
-            ) else { continue }
-            let matched = matches.count
-            let avg: Float = matched > 0 ? matches.reduce(0.0) { $0 + $1.score } / Float(matched) : 0
-            perKfStats.append((idx: kfIdx, matched: matched, avgScore: avg))
-        }
-        guard !perKfStats.isEmpty else { return }
-        let best = perKfStats.max { $0.matched < $1.matched }!
-        let sample = MatchSample(
-            bestKfIdx: best.idx,
-            bestMatched: best.matched,
-            bestAvgScore: best.avgScore,
-            perKfMatched: perKfStats.map { $0.matched }
-        )
-        recordMatchSampleLightGlue(sample, queryCount: queryCount)
-    }
-
-    /// LightGlue 매칭 결과 + best keyframe → MatchedPointPair 추출 → RANSAC PnP 풀이.
-    /// 성공 시 (pose, kfIdx) 반환, 실패 시 nil. attemptPnP 패턴 복제 (반환형만 (PoseEstimate, Int)? 로 변경).
-    /// TODO(S3): PnP reprojectionError 임계 게이팅 — 실측 후 임계 확정.
-    private func attemptPnPLightGlue(
-        frame: SuperPointFrame,
-        bundle: LocalizationBundle,
-        bestKfIdx: Int,
-        lightGlueMatches: [LightGlueMatcherEngine.Match]
-    ) -> (pose: PoseEstimate, kfIdx: Int)? {
-        let bestKf = bundle.keyframes[bestKfIdx]
-        let pairs = MatchedPointExtractor.extract(
-            lightGlueMatches: lightGlueMatches,
-            queryKeypoints: frame.keypoints,
-            bundleKeyframe: bestKf
-        )
-        guard pairs.count >= pnpMinPairs else {
-            return nil
-        }
-
-        // 매핑 시점 카메라 intrinsics (서버 manifest). attemptPnP 동일 패턴.
-        let m = bundle.manifest.intrinsics
-        let K = simd_float3x3(rows: [
-            SIMD3<Float>(Float(m.fx), 0, Float(m.cx)),
-            SIMD3<Float>(0, Float(m.fy), Float(m.cy)),
-            SIMD3<Float>(0, 0, 1),
-        ])
-
-        guard let pose = pnpSolver.solve(
-            objectPoints: pairs.map { $0.worldPoint },
-            imagePoints: pairs.map { $0.imagePoint },
-            intrinsics: K
-        ) else {
-            return nil
-        }
-
-        // reprojection error 임계 게이팅 — 30px 초과 시 측위 fail 처리.
-        // 정상 측위 reproj 1~10px. 30+ 면 좌표계 정합 X (mock_bundle stale 또는 다른 매핑 영역).
-        if pose.reprojectionError > 30 {
-            return nil
-        }
-        return (pose, bestKfIdx)
-    }
-
-    /// LightGlue 매칭 window 평균 로그 (recordMatchSample 동일 흐름, 로그 prefix 만 분리).
-    private func recordMatchSampleLightGlue(_ sample: MatchSample, queryCount: Int) {
-        matchSamples.append(sample)
-        guard matchSamples.count >= matchLogWindow else { return }
-        matchSamples.removeAll(keepingCapacity: true)
-    }
-
-    private func recordMatchSample(_ sample: MatchSample, queryCount: Int) {
-        matchSamples.append(sample)
-        guard matchSamples.count >= matchLogWindow else { return }
-        matchSamples.removeAll(keepingCapacity: true)
+        _ = result
     }
 
     // MARK: - 다중 프레임 캡처 후 Localize
@@ -570,17 +347,9 @@ class ARNavigationLogic {
 
         // GuidanceDirector 도 reset (Phase 5 dead path 지만 호출 부수효과 없게)
         guidanceDirector.reset()
-
-        // mock bundle fallback 재로드 — 추적용 NetworkBundle 은 V3 응답 후 갱신.
-        loadMockBundleFallback()
     }
 
     func startLocalizationFlow() {
-        if Self.useMockData {
-            runMockFlow()
-            return
-        }
-
         guard arSession?.currentFrame != nil else {
             delegate?.updateStatus("AR 세션이 준비되지 않았습니다. 잠시 후 다시 시도하세요.", color: .systemYellow)
             return
@@ -627,20 +396,8 @@ class ARNavigationLogic {
         delegate?.setCaptureProgress(text: "", isHidden: true)
     }
 
-    private func sendToServer() {
-        if Self.useV3Localize {
-            sendToServerV3()
-        } else if Self.useLightGlueMatcher {
-            // S3 — 클라 단독 측위. 서버 호출 없이 LightGlue + RANSAC PnP 로 self-localize.
-            runClientLocalize()
-        } else {
-            // legacy SLAMv3 폐기 — useV3Localize=false + useLightGlueMatcher=false 분기는 도달 불가.
-            // TODO(폐기): 토글 자체 정리 시 본 분기/sendToServer 단순화.
-        }
-    }
-
     /// V3 측위 흐름 — multipart 업로드 + SLAMLocalizeResponse 핸들링.
-    private func sendToServerV3() {
+    private func sendToServer() {
         guard !capturedImages.isEmpty else {
             delegate?.setLoading(false)
             delegate?.setScanningOverlay(visible: false)
@@ -665,223 +422,6 @@ class ARNavigationLogic {
         }
     }
 
-    /// S3 — 클라 단독 측위 (서버 호출 없이 LightGlue + RANSAC PnP 로 self-localize).
-    /// 캡처된 5장 중 1장(현재 ARFrame) 만 사용. 매칭 + PnP 성공 시 handleClientLocalizeSuccess 로 후속 흐름.
-    /// TODO(S3): 5장 캡처 중 1장만 사용 — 5장 평균 또는 inlier 최대 선택 향후 개선
-    /// TODO(S3): best keyframe 선택 — globalDescriptor cosine prefilter (NetworkBundle 100+ keyframe 시 필수)
-    private func runClientLocalize() {
-        guard !capturedImages.isEmpty else {
-            delegate?.setLoading(false)
-            delegate?.setScanningOverlay(visible: false)
-            delegate?.showScanFailed(message: "캡처된 이미지가 없어요.\n다시 시도해 주세요.")
-            delegate?.setLocateButtonVisible(true)
-            return
-        }
-
-        delegate?.setScanningOverlay(visible: false)
-
-        guard let frame = arSession?.currentFrame,
-              let extractor = superPointExtractor else {
-            delegate?.setLoading(false)
-            delegate?.showScanFailed(message: "AR 세션이 준비되지 않았어요.\n다시 한번 스캔해 주세요.")
-            delegate?.setLocateButtonVisible(true)
-            return
-        }
-
-        guard let bundle = localizationBundle, !bundle.keyframes.isEmpty else {
-            delegate?.setLoading(false)
-            delegate?.showScanFailed(message: "매핑 데이터가 준비되지 않았어요.\n다시 한번 스캔해 주세요.")
-            delegate?.setLocateButtonVisible(true)
-            return
-        }
-
-        guard let engine = lightGlueMatcher else {
-            delegate?.setLoading(false)
-            delegate?.showScanFailed(message: "매처가 준비되지 않았어요.\n다시 한번 스캔해 주세요.")
-            delegate?.setLocateButtonVisible(true)
-            return
-        }
-
-        // 1. 현재 ARFrame 으로 SuperPoint 추출 (processARFrame 패턴 동일)
-        let deviceIsLandscape = UIDevice.current.orientation.isLandscape
-        let orientation: InputOrientation = deviceIsLandscape ? .landscape : .portrait
-        let queryFrame = extractor.extract(
-            image: frame.capturedImage,
-            intrinsics: frame.camera.intrinsics,
-            timestamp: frame.timestamp,
-            orientation: orientation
-        )
-
-        // 2. 모든 keyframe 매칭 → best (matched count max)
-        var perKfMatches: [(idx: Int, matches: [LightGlueMatcherEngine.Match])] = []
-        for (kfIdx, kf) in bundle.keyframes.enumerated() {
-            guard !kf.keypoints.isEmpty else { continue }
-            let validW3d = kf.world3d.compactMap { $0 }.count
-            guard validW3d > 0 else {
-                continue
-            }
-            do {
-                let m = try engine.match(
-                    query: queryFrame,
-                    targetKeyframe: kf,
-                    targetIntrinsics: bundle.manifest.intrinsics
-                )
-                perKfMatches.append((idx: kfIdx, matches: m))
-            } catch {
-                continue
-            }
-        }
-        guard let best = perKfMatches.max(by: { $0.matches.count < $1.matches.count }),
-              !best.matches.isEmpty else {
-            delegate?.setLoading(false)
-            delegate?.showScanFailed(message: "주변 환경을 인식하지 못했어요.\n다시 한번 스캔해 주세요.")
-            delegate?.setLocateButtonVisible(true)
-            return
-        }
-
-        // 3. PnP 풀이
-        guard let pnp = attemptPnPLightGlue(
-            frame: queryFrame,
-            bundle: bundle,
-            bestKfIdx: best.idx,
-            lightGlueMatches: best.matches
-        ) else {
-            delegate?.setLoading(false)
-            delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
-            delegate?.setLocateButtonVisible(true)
-            return
-        }
-
-        // 4. PoseEstimate → Pose (Codable) 어댑터.
-        // TODO(S3): Pose 회전 어댑터 — RansacPnPSolver pose.rotation 좌표계 방향
-        //          (camera→world vs world→camera) 확인. V3 와 동일 가정.
-        let t = pnp.pose.translation
-        let q = simd_quatf(pnp.pose.rotation)
-        let pose = Pose(
-            x: Double(t.x), y: Double(t.y), z: Double(t.z),
-            qx: Double(q.imag.x), qy: Double(q.imag.y), qz: Double(q.imag.z), qw: Double(q.real)
-        )
-
-        // TODO(S3): floorId/floorLevel 결정 — bundle.manifest 의존, 매핑 시점과 다른 층 측위 시 부정확
-        let floorLevel = bundle.manifest.floorLevel
-        let scanId = bundle.manifest.scanId
-
-        handleClientLocalizeSuccess(pose: pose, scanId: scanId, floorLevel: floorLevel)
-    }
-
-    /// V3 측위 응답 핸들러 — showScanComplete + 층 전환 분기 + V3 pathfinding 시작.
-    private func handleLocalizeV3Success(response: SLAMLocalizeResponse) {
-        // TODO(서버답): confidence 임계값 미정 → 0.3 잠정
-        guard response.confidence >= 0.3 else {
-            delegate?.setLoading(false)
-            delegate?.showScanFailed(message: "위치 인식 신뢰도가 낮아요.\n다시 한번 스캔해 주세요.")
-            delegate?.setLocateButtonVisible(true)
-            return
-        }
-
-        // TODO(서버답): pose 변환 방향 — camera→world 가정 (SLAMv3와 동일)
-        guard let _ = response.pose.toMatrix4x4(),
-              let translation = response.pose.translation,
-              let quat = response.pose.rotationQuaternion else {
-            delegate?.setLoading(false)
-            delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
-            delegate?.setLocateButtonVisible(true)
-            return
-        }
-
-        // 서버 LocalizeResponse 에 matchedImageIndex 없음 — 캡처 마지막 프레임으로 fallback (가장 최근 ARKit pose).
-        guard let lastARPose = capturedARPoses.last else {
-            delegate?.setLoading(false)
-            delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
-            delegate?.setLocateButtonVisible(true)
-            return
-        }
-        matchedARPose = lastARPose
-
-        let pose = Pose(
-            x: Double(translation.x), y: Double(translation.y), z: Double(translation.z),
-            qx: Double(quat.imag.x), qy: Double(quat.imag.y), qz: Double(quat.imag.z), qw: Double(quat.real)
-        )
-        localizedPose = pose
-        // 서버 LocalizeResponse 본체에 floorId/floorLevel 없음 — pose object 안에 있을 수도(자유 schema). 없으면 self.floorId fallback.
-        localizedFloorId = response.pose.floorId ?? self.floorId
-        localizedFloorLevel = response.pose.floorLevel
-        localizedScanId = response.mapId  // B4 인계: PathfindingRequest.startScanId (Optional)
-
-        // 추적용 lookup 은 pathfinding 응답 받은 후 — steps 좌표 multi-query 로 경로 전체 keyframe 받음.
-        // pathfinding 호출은 startV3Pathfinding 에서 (아래 분기). 응답 분기에서 lookup 트리거.
-
-        delegate?.showScanComplete()
-
-        if isFloorTransitionRestart {
-            // 잔여 경로 재렌더링 (서버 pathfinding 호출 생략)
-            // TODO(Phase 3): Phase 8 keyframe 단계 추적 모델에서 층 전환 잔여 경로 재시작 미지원.
-            //                drawPathNodes 폐기 — 추후 trackingKeyframeCandidates 재구성 흐름으로 대체.
-            delegate?.showRouteCalculating(false)
-            delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
-            pendingRemainingSteps = []
-            isFloorTransitionRestart = false
-            delegate?.setLoading(false)
-        } else {
-            // 직선 안내 폐기 — Phase 8 keyframe 단계 추적 모델 (checkpoint 1개 + tick drop) 로 대체.
-            delegate?.showRouteCalculating(false)
-            delegate?.setLoading(false)
-            delegate?.updateStatus("\(destinationName) 방향으로 이동하세요.", color: .white)
-            delegate?.setHUDVisible(true)
-            if Self.useLightGlueMatcher {
-                startV3Pathfinding(scanId: response.mapId,
-                                   startFloorLevel: response.pose.floorLevel,
-                                   translation: translation)
-            }
-        }
-    }
-
-    /// S3 — 클라 단독 측위 성공 핸들러. handleLocalizeV3Success 와 동일 후속 흐름
-    /// (showScanComplete + 층 전환 분기 + V3 또는 좌표 경로). pose 변환은 runClientLocalize 에서 완료.
-    private func handleClientLocalizeSuccess(pose: Pose, scanId: String?, floorLevel: Int?) {
-        guard let lastARPose = capturedARPoses.last else {
-            delegate?.setLoading(false)
-            delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
-            delegate?.setLocateButtonVisible(true)
-            return
-        }
-        matchedARPose = lastARPose
-
-        localizedPose = pose
-        localizedFloorId = self.localizationBundle?.manifest.floorId ?? self.floorId
-        localizedFloorLevel = floorLevel ?? self.localizationBundle?.manifest.floorLevel
-        localizedScanId = scanId
-
-        delegate?.showScanComplete()
-
-        if isFloorTransitionRestart {
-            // 잔여 경로 재렌더링 (서버 pathfinding 호출 생략)
-            // TODO(Phase 3): Phase 8 keyframe 단계 추적 모델에서 층 전환 잔여 경로 재시작 미지원.
-            //                drawPathNodes 폐기 — dead path.
-            delegate?.showRouteCalculating(false)
-            delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
-            pendingRemainingSteps = []
-            isFloorTransitionRestart = false
-            delegate?.setLoading(false)
-        } else {
-            delegate?.showRouteCalculating(true)
-            let activeFloorId = self.localizationBundle?.manifest.floorId ?? self.floorId
-            _ = activeFloorId  // legacy dead path 의 startCoordinateRoute 인자였음 (TODO 박제)
-            if Self.useV3Pathfinding {
-                let translation = simd_float3(
-                    Float(pose.x ?? 0),
-                    Float(pose.y ?? 0),
-                    Float(pose.z ?? 0)
-                )
-                startV3Pathfinding(scanId: scanId,
-                                   startFloorLevel: floorLevel,
-                                   translation: translation)
-            } else {
-                // legacy 클라 단독 측위 폴백 — Phase 8 추적 모델에선 dead path.
-                // TODO(S3+): useV3Pathfinding=false 분기 자체 폐기 검토.
-            }
-        }
-    }
 
     // MARK: - 경로 탐색
 
@@ -1025,101 +565,6 @@ class ARNavigationLogic {
         pathProgressTimer = nil
     }
 
-    // MARK: - Mock Mode
-
-    /// 서버 미가용 시 mock pose/steps로 경로 렌더링을 트리거.
-    /// `useMockData == true`일 때 `startLocalizationFlow()`가 호출.
-    private func runMockFlow() {
-        guard let frame = arSession?.currentFrame else {
-            delegate?.updateStatus("AR 세션이 준비되지 않았습니다.", color: .systemYellow)
-            return
-        }
-
-        // 직전 시도 잔여 상태 정리 (재진입 안전성)
-        pathRootNode?.removeFromParentNode()
-        pathRootNode = nil
-        allChevronNodes.removeAll()
-        destinationPinNode = nil
-        allSteps = []
-        allARPoints = []
-        smoothedPoints = []
-        simplifiedPointCount = 0
-        currentTargetWaypointIndex = 0
-        matchedARPose = nil
-        localizedPose = nil
-        destinationARPosition = nil
-
-        pathProgressTimer?.invalidate()
-        pathProgressTimer = nil
-        arrivalCheckTimer?.invalidate()
-        arrivalCheckTimer = nil
-        hasNotifiedArrival = false
-        trackingTimer?.invalidate()
-        trackingTimer = nil
-        isTrackingTickInFlight = false
-
-        delegate?.setLocateButtonVisible(false)
-        delegate?.setScanningOverlay(visible: true)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self = self else { return }
-            self.delegate?.setScanningOverlay(visible: false)
-            self.delegate?.showScanComplete()
-
-            if self.isFloorTransitionRestart {
-                // 재스캔 모드: 잔여 경로 직접 사용 (경로 계산 카드 표시 생략)
-                // TODO(Phase 8): mock 흐름에서 drawPathNodes 폐기 — keyframe 단계 추적 모델 미지원.
-                self.delegate?.showRouteCalculating(false)
-                self.matchedARPose = frame.camera.transform
-                self.localizedPose = self.makeMockPose()
-                self.delegate?.setLoading(false)
-                self.delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
-                self.pendingRemainingSteps = []
-                self.isFloorTransitionRestart = false
-                return
-            }
-
-            self.delegate?.showRouteCalculating(true)
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                guard let self = self else { return }
-                self.delegate?.showRouteCalculating(false)
-
-                self.matchedARPose = frame.camera.transform
-                self.localizedPose = self.makeMockPose()
-                self.delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
-                // TODO(Phase 8): mock drawPathNodes(self.makeMockSteps()) 폐기 — keyframe 단계 추적 모델로 대체 예정.
-                _ = self.makeMockSteps()
-            }
-        }
-    }
-
-    private func makeMockPose() -> Pose {
-        return Pose(x: 0, y: 0, z: 0, qx: 0, qy: 0, qz: 0, qw: 1)
-    }
-
-    private func makeMockSteps() -> [PathStep] {
-        // RTAB-Map 좌표계: X-forward, Y-left, Z-up
-        // 0→50m 직진 → 50m 지점 90도 우회전(Y 감소 = 오른쪽) → 50m 직진 (총 100m)
-        let positions: [(Double, Double, Double, String)] = [
-            (0,   0,   0, "직진하세요"),
-            (25,  0,   0, "직진하세요"),
-            (50,  0,   0, "우회전하세요"),
-            (50, -25,  0, "직진하세요"),
-            (50, -50,  0, "목적지 근처입니다")
-        ]
-
-        return positions.enumerated().map { (index, tuple) in
-            let (x, y, z, instruction) = tuple
-            return PathStep(
-                stepNumber: index,
-                floorLevel: 1,
-                position: Position(x: x, y: y, z: z),
-                instruction: instruction
-            )
-        }
-    }
-
     // MARK: - 층 이동 인터렉션
 
     /// 현재 step → 다음 step 사이에 층 이동(계단/엘리베이터)이 발생하는지 감지.
@@ -1228,11 +673,6 @@ class ARNavigationLogic {
 
         capturedImages = []
         capturedARPoses = []
-
-        if Self.useMockData {
-            runMockFlow()
-            return
-        }
 
         captureTimer = Timer.scheduledTimer(withTimeInterval: captureInterval, repeats: true) { [weak self] _ in
             self?.captureOneFrame()
