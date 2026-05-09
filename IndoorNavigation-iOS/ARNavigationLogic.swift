@@ -422,6 +422,62 @@ class ARNavigationLogic {
         }
     }
 
+    /// V3 측위 응답 핸들러 — showScanComplete + V3 pathfinding 시작.
+    private func handleLocalizeV3Success(response: SLAMLocalizeResponse) {
+        // TODO(서버답): confidence 임계값 미정 → 0.3 잠정
+        guard response.confidence >= 0.3 else {
+            delegate?.setLoading(false)
+            delegate?.showScanFailed(message: "위치 인식 신뢰도가 낮아요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+
+        guard let _ = response.pose.toMatrix4x4(),
+              let translation = response.pose.translation,
+              let quat = response.pose.rotationQuaternion else {
+            delegate?.setLoading(false)
+            delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+
+        // V3 응답에 matchedImageIndex 있지만 미사용 — 마지막 프레임 fallback (TODO)
+        guard let lastARPose = capturedARPoses.last else {
+            delegate?.setLoading(false)
+            delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+        matchedARPose = lastARPose
+
+        let pose = Pose(
+            x: Double(translation.x), y: Double(translation.y), z: Double(translation.z),
+            qx: Double(quat.imag.x), qy: Double(quat.imag.y), qz: Double(quat.imag.z), qw: Double(quat.real)
+        )
+        localizedPose = pose
+        localizedFloorId = response.pose.floorId ?? self.floorId
+        localizedFloorLevel = response.pose.floorLevel
+        localizedScanId = response.mapId
+
+        delegate?.showScanComplete()
+
+        if isFloorTransitionRestart {
+            // 층 전환 잔여 경로 재시작 — 추적 모델에서 미지원 (TODO)
+            delegate?.showRouteCalculating(false)
+            delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
+            pendingRemainingSteps = []
+            isFloorTransitionRestart = false
+            delegate?.setLoading(false)
+        } else {
+            delegate?.showRouteCalculating(false)
+            delegate?.setLoading(false)
+            delegate?.updateStatus("\(destinationName) 방향으로 이동하세요.", color: .white)
+            delegate?.setHUDVisible(true)
+            startV3Pathfinding(scanId: response.mapId,
+                               startFloorLevel: response.pose.floorLevel,
+                               translation: translation)
+        }
+    }
 
     // MARK: - 경로 탐색
 
