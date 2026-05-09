@@ -72,7 +72,7 @@ final class LightGlueMatcherEngine {
     /// 앱 번들에 포함된 mlpackage 자동 로드.
     init() throws {
         let mlConfig = MLModelConfiguration()
-        mlConfig.computeUnits = .all
+        mlConfig.computeUnits = .cpuAndNeuralEngine
         do {
             self.model = try LightGlueMatcher(configuration: mlConfig)
         } catch {
@@ -83,7 +83,7 @@ final class LightGlueMatcherEngine {
     /// 컴파일된 .mlmodelc URL 직접 지정 (테스트/디버그).
     init(modelURL: URL) throws {
         let mlConfig = MLModelConfiguration()
-        mlConfig.computeUnits = .all
+        mlConfig.computeUnits = .cpuAndNeuralEngine
         do {
             self.model = try LightGlueMatcher(contentsOf: modelURL, configuration: mlConfig)
         } catch {

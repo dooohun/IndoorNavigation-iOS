@@ -157,7 +157,7 @@ final class SuperPointExtractorML: SuperPointExtracting {
     init(config: Config = Config()) throws {
         self.config = config
         let mlConfig = MLModelConfiguration()
-        mlConfig.computeUnits = .all
+        mlConfig.computeUnits = .cpuAndNeuralEngine
         self.model = try SuperPoint(configuration: mlConfig)
         self.preprocessor = PixelBufferPreprocessor()
         self.decoder = SuperPointHeatmapDecoder(config: SuperPointHeatmapDecoder.Config(
