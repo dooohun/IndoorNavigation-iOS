@@ -172,8 +172,6 @@ class ARNavigationLogic {
     private var pathNodes: [SCNNode] = []
     /// drawPathFromSteps 가 받은 마지막 steps — PnP 보정 후 재렌더용.
     private var lastPathSteps: [PathStep] = []
-    /// V3 측위 + lookup 후 첫 PnP 보정 1회만 적용. true 되면 이후 tick 은 prefix drop 만.
-    private var hasPerformedPnPRefinement: Bool = false
     /// trial counter — 화면 더블탭으로 측위 재시작 시 +1, 로그 prefix 용.
     private var trialNumber: Int = 0
 
@@ -339,7 +337,6 @@ class ARNavigationLogic {
         pathNodes.forEach { $0.removeFromParentNode() }
         pathNodes = []
         lastPathSteps = []
-        hasPerformedPnPRefinement = false
 
         // bundle 클리어
         localizationBundle = nil
@@ -847,9 +844,8 @@ class ARNavigationLogic {
         let intrinsicsSnapshot = bundle.manifest.intrinsics
 
         isTrackingTickInFlight = true
-        let pnpAttempt = !hasPerformedPnPRefinement
         let bundleSnapshot = bundle
-        print("[Tick] 시작 — candidates=\(candidatesSnapshot.count) pnpAttempt=\(pnpAttempt)")
+        print("[Tick] 시작 — candidates=\(candidatesSnapshot.count)")
         trackingQueue.async { [weak self] in
             guard let self = self else { return }
             let queryFrame = extractor.extract(
@@ -885,43 +881,40 @@ class ARNavigationLogic {
                 return
             }
 
-            // PnP 보정 — V3 측위 quat 오차 정정. 첫 성공 시점에 한 번만 적용.
+            // PnP 보정 — V3 측위 quat 오차 + ARKit drift 누적 정정. 매 tick 적용.
             var pnpRefinement: PoseEstimate? = nil
-            if pnpAttempt {
-                let bestRaw = allKfData.first { $0.idx == best.idx }?.matches ?? []
-                let bestKf = candidatesSnapshot[best.idx]
-                let pairs = MatchedPointExtractor.extract(
-                    lightGlueMatches: bestRaw,
-                    queryKeypoints: queryFrame.keypoints,
-                    bundleKeyframe: bestKf
-                )
-                if pairs.count >= self.pnpMinPairs {
-                    let mIntr = bundleSnapshot.manifest.intrinsics
-                    let K = simd_float3x3(rows: [
-                        SIMD3<Float>(Float(mIntr.fx), 0, Float(mIntr.cx)),
-                        SIMD3<Float>(0, Float(mIntr.fy), Float(mIntr.cy)),
-                        SIMD3<Float>(0, 0, 1),
-                    ])
-                    if let solved = self.pnpSolver.solve(
-                        objectPoints: pairs.map { $0.worldPoint },
-                        imagePoints: pairs.map { $0.imagePoint },
-                        intrinsics: K
-                    ), solved.reprojectionError < 30 {
-                        pnpRefinement = solved
-                        print(String(format: "[Tick] PnP 보정 성공 — pairs=%d reproj=%.2fpx", pairs.count, solved.reprojectionError))
-                    } else {
-                        print("[Tick] PnP fail (pairs=\(pairs.count) — reproj 초과 또는 solve 실패)")
-                    }
+            let bestRaw = allKfData.first { $0.idx == best.idx }?.matches ?? []
+            let bestKf = candidatesSnapshot[best.idx]
+            let pairs = MatchedPointExtractor.extract(
+                lightGlueMatches: bestRaw,
+                queryKeypoints: queryFrame.keypoints,
+                bundleKeyframe: bestKf
+            )
+            if pairs.count >= self.pnpMinPairs {
+                let mIntr = bundleSnapshot.manifest.intrinsics
+                let K = simd_float3x3(rows: [
+                    SIMD3<Float>(Float(mIntr.fx), 0, Float(mIntr.cx)),
+                    SIMD3<Float>(0, Float(mIntr.fy), Float(mIntr.cy)),
+                    SIMD3<Float>(0, 0, 1),
+                ])
+                if let solved = self.pnpSolver.solve(
+                    objectPoints: pairs.map { $0.worldPoint },
+                    imagePoints: pairs.map { $0.imagePoint },
+                    intrinsics: K
+                ), solved.reprojectionError < 30 {
+                    pnpRefinement = solved
+                    print(String(format: "[Tick] PnP 보정 성공 — pairs=%d reproj=%.2fpx", pairs.count, solved.reprojectionError))
                 } else {
-                    print("[Tick] PnP skip — pairs=\(pairs.count) < \(self.pnpMinPairs)")
+                    print("[Tick] PnP fail (pairs=\(pairs.count) — reproj 초과 또는 solve 실패)")
                 }
+            } else {
+                print("[Tick] PnP skip — pairs=\(pairs.count) < \(self.pnpMinPairs)")
             }
 
             DispatchQueue.main.async {
                 print("[Tick] best kf=\(best.idx) matched=\(best.matched) → prefix drop")
                 if let pnp = pnpRefinement {
                     self.applyPnPRefinement(pose: pnp, arPose: arPoseAtCapture)
-                    self.hasPerformedPnPRefinement = true
                 }
                 self.handleTrackingMatchResult(
                     bestIdx: best.idx,
@@ -1011,7 +1004,6 @@ class ARNavigationLogic {
         }
         trackingKeyframeCandidates = sorted
         lastBestKeyframeIndex = nil
-        hasPerformedPnPRefinement = false
         updateCheckpointNode()
     }
 
