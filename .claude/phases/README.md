@@ -6,44 +6,44 @@
 네이버 지도 (건물 마커 + 검색)
     → 건물 클릭 → POI(목적지) 선택
         → AR 실내 내비게이션 시작
-            → 주변 스캔 → 로컬라이즈
-            → 경로 렌더링 (거리 + 화살표)
-            → 계단/엘리베이터 도착 → 인터렉션 위임
-            → 층 이동 후 재스캔
-            → 목적지 도착 → 완료 UI
+            → 카메라 스캔 → V3 측위 → pathfinding → multi-query lookup
+            → keyframe pack 메모리 적재
+            → tick 마다 LightGlue 매칭 + prefix drop
+            → 후보열 끝 keyframe 위치에 체크포인트 표시
+            → 후보 소진 → 다음 query 좌표로 재 lookup → 후보 갱신
+            → 모든 query 소비 + 카메라 도달 → 도착 처리
 ```
 
 ## Phase 목록
 
 | Phase | 제목 | 상태 | 핵심 목표 |
 |-------|------|------|----------|
-| [Phase 1](phase1_map_building_markers.md) | 네이버 지도 - 건물 마커 & 탐색 | 구현됨 (개선 여지 있음) | 지도에 건물 마커 표시, 검색, InfoCard |
-| [Phase 2](phase2_ar_navigation_core.md) | AR 실내 내비게이션 - 핵심 플로우 | 부분 구현 | 스캔 → 로컬라이즈 → 경로 렌더링 |
-| [Phase 3](phase3_floor_transition.md) | 층 이동 인터렉션 | 구현됨 | 계단/엘리베이터 도착 감지 + 재스캔 |
-| [Phase 4](phase4_arrival_ux.md) | 도착 UX | 미구현 | 목적지 도착 감지 + 완료 화면 |
-| [Phase 5](phase5_directional_guidance_ux.md) | 방향 안내 UX (턴 카드 + 풀스크린 회전 안내) | 미구현 | 로컬라이즈 직후 헤딩 정렬, 턴-바이-턴 카드, 재정렬 오버레이 |
-| [Phase 6](phase6_superpoint_overview.md) | SuperPoint 온보드 내비게이션 — 개요 (전면 재설계) | 미구현 (신규 아키텍처) | 동기·아키텍처·롤아웃. 모듈별 상세는 Phase 7~11 |
-| [Phase 7](phase7_superpoint_extractor.md) | SuperPoint 추출 인프라 (Core ML) | 미구현 | 온디바이스 SuperPoint 추론, 추론 빈도 적응 |
-| [Phase 8](phase8_superpoint_localize.md) | 서버 SuperPoint 로컬라이즈 | 미구현 | 신규 `localize-sp` 엔드포인트, 초기 스캔, 재로컬라이즈 |
-| [Phase 9](phase9_feature_chunk_store.md) | 특징점 청크 저장소 + 프리페치 | 미구현 | `feature-chunks`, hot/cold 윈도우, LRU, 디스크 캐시 |
-| [Phase 10](phase10_pose_tracker.md) | 온보드 Pose 추적 (PnP 6DoF) | 미구현 | PnP 매칭·신뢰도, ARKit drift 보정 |
-| [Phase 11](phase11_checkpoint_guidance.md) | 체크포인트 엔진 + 안내 통합 + 복구 | 미구현 | 체크포인트 분해, GuidanceDirector wiring, 길 잃음 복구 |
+| [Phase 1](phase1_map_building_markers.md) | 네이버 지도 - 건물 마커 & 탐색 | 구현됨 (개선 여지) | 지도 마커, 검색, InfoCard |
+| [Phase 2](phase2_extractor_infra.md) | 온디바이스 SuperPoint + LightGlue 추출 인프라 | 구현됨 (M1) | Core ML 추론 레이어 — 모든 후속 phase 의 입력원 |
+| [Phase 3](phase3_initial_localize_route.md) | 초기 측위 + 경로 데이터 확보 | 부분 구현 (M2 진행 중) | V3 localize → pathfinding → multi-query lookup → keyframe pack 적재 |
+| [Phase 4](phase4_keyframe_tracking.md) | keyframe 추적 + 체크포인트 표시 | 구현됨 (M2 핵심부) | tick 마다 LightGlue 매칭 + prefix drop + checkpointNode UI |
+| [Phase 5](phase5_relocalize_arrival.md) | 재 lookup + 도착 처리 | 구현됨 (M2 마무리) | 후보 소진 시 재 lookup + 모든 query 소비 + 카메라 도달 시 도착 |
+
+## 측위 정책
+
+**측위 호출은 항상 V3** — `POST /api/slam/v3/localize`. legacy `/api/slam/localize`, `/api/slam/v2/localize`, `/api/v1/buildings/{id}/localize` 사용 X.
 
 ## 기술 스택
 
 - **지도**: NMapsMap (Naver Map SDK)
 - **AR**: ARKit + SceneKit
-- **측위**: Visual Positioning System (VPS) — 서버 localize API
+- **측위**: 서버 V3 localize (multipart) + 온디바이스 SuperPoint + Core ML LightGlue 매칭
 - **네트워크**: URLSession, Completion handler, `Result<T, Error>`
-- **API Base**: `http://218.150.183.198:8080/api/v1`
+- **API Base**: `http://218.150.183.198:8080/api/v1` (+ `/api/slam/v3` for localize)
 
 ## 주요 파일 → Phase 매핑
 
 | 파일 | 관련 Phase |
 |------|-----------|
-| `MapViewController.swift` | Phase 1 |
-| `POISelectionViewController.swift` | Phase 1 |
-| `NetworkManager.swift` | 공통 |
-| `ARNavigationViewController.swift` | Phase 2, 3, 4 |
-| `ARNavigationLogic.swift` | Phase 2, 3, 4 |
-| `CoordinateTransformer.swift` | Phase 2 |
+| `MapViewController.swift`, `POISelectionViewController.swift` | Phase 1 |
+| `Tracking/SuperPointExtractor.swift`, `Tracking/Matching/LightGlueMatcherEngine.swift` | Phase 2 |
+| `NetworkManager.swift`, `Network/SuperPointDTO.swift`, `Tracking/NetworkBundleProvider.swift` | Phase 3 |
+| `ARNavigationLogic.swift` (`runTrackingTick` / `handleTrackingMatchResult` / `setupTrackingCandidates` / `updateCheckpointNode`) | Phase 4 |
+| `ARNavigationLogic.swift` (`triggerNewLookup` / 도착 판정 분기) | Phase 5 |
+| `ARNavigationViewController.swift` | Phase 1, 3, 4, 5 (UI 호스팅) |
+| `CoordinateTransformer.swift` | Phase 4 (server↔AR 좌표 변환) |
