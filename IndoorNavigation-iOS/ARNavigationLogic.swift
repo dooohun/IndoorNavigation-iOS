@@ -1511,6 +1511,18 @@ class ARNavigationLogic {
             return Double(sqrt(dx * dx + dz * dz))
         }
 
+        /// lookahead 전용 거리 측정. 카메라 ↔ step 직선거리 우선, 불가하면 prev↔target server-world fallback.
+        /// 카드 dist 계산과 동일한 fallback 정책으로 통일하여 lookahead 가 cameraPos/측위 미가용 시에도 동작.
+        func lookaheadDistance(toStep i: Int) -> Double? {
+            if let d = cameraDistance(toStep: i) { return d }
+            guard i > 0 else { return nil }
+            guard let a = lastPathSteps[i - 1].position, let b = lastPathSteps[i].position,
+                  let ax = a.x, let az = a.z, let bx = b.x, let bz = b.z else { return nil }
+            let dx = bx - ax
+            let dz = bz - az
+            return Double((dx * dx + dz * dz).squareRoot())
+        }
+
         let isTurn: (NavigationActionKind) -> Bool = { a in
             switch a {
             case .turnLeft, .turnRight, .turnSlightLeft, .turnSlightRight, .uturn: return true
@@ -1518,14 +1530,16 @@ class ARNavigationLogic {
             }
         }
 
-        // 5m 이내 turn lookahead — 기본 idx 의 액션이 turn 이 아닐 때만 의미.
-        // 첫 turn step 만 검사. 거리 측정 불가하면 lookahead 포기 (기본 idx 유지).
+        // 10m 이내 turn lookahead — 기본 idx 의 액션이 turn 이 아닐 때만 의미.
+        // 첫 turn step 만 검사. cameraDistance 가용 시 그 거리, 아니면 server-world segment 합 fallback.
+        // 거리 측정 자체가 불가하면 lookahead 포기 (기본 idx 유지).
         if !isTurn(action(at: idx)), idx < lastIdx {
-            for i in (idx + 1)...lastIdx where isTurn(action(at: i)) {
-                if let d = cameraDistance(toStep: i), d <= 5.0 {
-                    idx = i
-                }
-                break
+            var firstTurnIdx: Int? = nil
+            for i in (idx + 1)...lastIdx {
+                if isTurn(action(at: i)) { firstTurnIdx = i; break }
+            }
+            if let ti = firstTurnIdx, let d = lookaheadDistance(toStep: ti), d <= 10.0 {
+                idx = ti
             }
         }
 
