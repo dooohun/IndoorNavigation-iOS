@@ -47,7 +47,7 @@ struct CoordinateTransformerTests {
     }
 
     // MARK: - 1) 앵커: 서버 카메라 위치 → ARKit 카메라 위치
-    // W = arPose · rtabMapToARKit · inv(rtabCameraPose) 의 정의에서
+    // W = arPose · rtabCameraToARKit · inv(T_W_from_C) 의 정의에서
     // serverPoint = serverPosition 을 넣으면 항상 arPose.translation 이 나와야 한다.
     // 이게 "두 좌표계를 정렬했다"의 본질.
 
