@@ -70,6 +70,11 @@ class ARNavigationLogic {
     private var capturedARPoses: [simd_float4x4] = []
     private var captureTimer: Timer?
 
+    // LocalizeDebugLogger 용 — drawPathFromSteps 까지 살아남을 데이터
+    private var lastLocalizeResponse: SLAMLocalizeResponse?
+    private var lastMatchedImage: UIImage?
+    private var lastMatchedImageIndex: Int?
+
     // 목적지 도착 감지
     private var destinationARPosition: simd_float3?
     private var arrivalCheckTimer: Timer?
@@ -494,14 +499,27 @@ class ARNavigationLogic {
             return
         }
 
-        // V3 응답에 matchedImageIndex 있지만 미사용 — 마지막 프레임 fallback (TODO)
-        guard let lastARPose = capturedARPoses.last else {
+        // 서버가 매칭에 사용한 프레임의 AR pose 와 짝지어야 변환식이 정합.
+        // matchedImageIndex 가 유효하면 그 인덱스, 아니면 마지막 프레임 fallback.
+        guard !capturedARPoses.isEmpty else {
             delegate?.setLoading(false)
             delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
             delegate?.setLocateButtonVisible(true)
             return
         }
-        matchedARPose = lastARPose
+        let arPoseIndex: Int = {
+            if let idx = response.matchedImageIndex, capturedARPoses.indices.contains(idx) {
+                return idx
+            }
+            return capturedARPoses.count - 1
+        }()
+        matchedARPose = capturedARPoses[arPoseIndex]
+        print("[Localize] matchedImageIndex=\(response.matchedImageIndex.map(String.init) ?? "nil") → AR pose index=\(arPoseIndex)/\(capturedARPoses.count - 1)")
+
+        // 디버그 로깅 — drawPathFromSteps 시점까지 보관
+        lastLocalizeResponse = response
+        lastMatchedImageIndex = arPoseIndex
+        lastMatchedImage = capturedImages.indices.contains(arPoseIndex) ? capturedImages[arPoseIndex] : nil
 
         let pose = Pose(
             x: Double(translation.x), y: Double(translation.y), z: Double(translation.z),
@@ -564,6 +582,7 @@ class ARNavigationLogic {
                     self.lastStartSnapDistance = nil
                     print("[V3-PATH] steps=\(steps.count), totalDistance=\(resp.totalDistance)m, floorTransitions=\(resp.floorTransitions?.count ?? 0)")
                     self.drawPathFromSteps(steps)
+                    self.dumpLocalizeDebug(rawSteps: resp.steps)
                     // steps[].position 좌표를 lookup multi-query 로 사용 → 경로 전체 영역 keyframe pack 받음.
                     self.fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
                 case .failure(let err):
@@ -1122,6 +1141,49 @@ class ARNavigationLogic {
             pathNodes.append(seg)
         }
         print("[Path] drew \(steps.count) steps as \(arPoints.count) points + \(arPoints.count - 1) segments")
+    }
+
+    /// V3 측위 + pathfinding 후 디버깅 데이터 일괄 dump.
+    /// 변환식 입력(matchedARPose, localizePose) + 출력(transformed AR points) + 매칭 사진 저장.
+    private func dumpLocalizeDebug(rawSteps: [PathStepResponse]) {
+        guard let response = lastLocalizeResponse,
+              let arPose = matchedARPose,
+              let pose = localizedPose else {
+            print("[LocalizeDebug] dump skip — 누락된 데이터")
+            return
+        }
+
+        // drawPathFromSteps 와 동일한 변환식 적용 (Y 는 floorY 가 아닌 변환된 그대로)
+        let serverPos = simd_float3(Float(pose.x ?? 0), Float(pose.y ?? 0), Float(pose.z ?? 0))
+        let quat = simd_quatf(
+            ix: Float(pose.qx ?? 0), iy: Float(pose.qy ?? 0),
+            iz: Float(pose.qz ?? 0), r: Float(pose.qw ?? 1)
+        )
+        let input = CoordinateTransformer.Input(
+            serverPosition: serverPos, serverQuaternion: quat, arCameraPose: arPose
+        )
+        let transformed: [(stepNumber: Int, ar: simd_float3)] = rawSteps.map { s in
+            let ar = CoordinateTransformer.transform(
+                serverPoint: simd_float3(Float(s.position.x), Float(s.position.y), Float(s.position.z)),
+                input: input
+            )
+            return (s.stepNumber, ar)
+        }
+
+        let snapshot = LocalizeDebugLogger.Snapshot(
+            matchedImageIndex: lastMatchedImageIndex,
+            matchedImage: lastMatchedImage,
+            matchedARPose: arPose,
+            localizePose: response.pose,
+            confidence: response.confidence,
+            mapId: response.mapId,
+            numMatches: response.numMatches,
+            floorId: response.floorId,
+            floorLevel: response.floorLevel,
+            steps: rawSteps,
+            transformedSteps: transformed
+        )
+        LocalizeDebugLogger.dump(snapshot)
     }
 
     /// 두 점 사이 cylinder. SCNCylinder 의 default 축은 Y. cross product 로 v 방향 회전.

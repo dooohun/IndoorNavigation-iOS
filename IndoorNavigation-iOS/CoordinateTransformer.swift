@@ -3,14 +3,19 @@ import Foundation
 
 struct CoordinateTransformer {
 
-    // R_z(π) = Z 축 기준 180° 회전. server camera frame 의 X, Y 결과 부호 반전.
-    // 실측 단서:
-    //  - server +Y (좌회전 5.4m) → ARKit +X (우측) 으로 매핑 → 좌우 반전 → X 부호 반전 필요
-    //  - server +Z (위 1.6m)    → ARKit -Y (아래) 로 매핑 → 위아래 반전 → Y 부호 반전 필요
-    //  - Z(forward) 는 정합 → Z 그대로
-    // 결과: rtabMapToARKit = R_z(π) (proper rotation, det +1)
+    // 디버그 테스트: portrait 에서 path 가 90° 회전된 채 렌더되는 문제 진단용.
+    // R_z(-π/2) (= R_z(3π/2)) — 카메라 sensor frame Z 축 기준 90° CW 회전. (X→-Y, Y→X)
+    // hand-calc 상 직진 + 좌회전 끝 패턴 예상 부호.
+    //
+    // 기존 (이전 운영값):
+    //   ROS(x=forward, y=left, z=up) → ARKit(x=right, y=up, z=back)
+    //   row-major:
+    //     [ 0  -1   0   0 ]
+    //     [ 0   0   1   0 ]
+    //     [-1   0   0   0 ]
+    //     [ 0   0   0   1 ]
     static let rtabMapToARKit: simd_float4x4 = simd_float4x4(
-        simd_quatf(angle: .pi, axis: SIMD3<Float>(0, 0, 1))
+        simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(0, 0, 1))
     )
 
     struct Input {
