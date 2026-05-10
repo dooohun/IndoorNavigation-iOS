@@ -25,6 +25,17 @@ struct NavigationStepViewModel {
     let destinationName: String
 }
 
+// MARK: - Phase 6 turn 3D 화살표 모델
+
+enum TurnArrowKind { case sharp, slight, uturn }
+
+struct TurnArrowViewModel {
+    let direction: TurnDirection   // 기존 Guidance/GuidanceDirector.swift 재사용
+    let kind: TurnArrowKind
+    let arPosition: simd_float3
+    let stepIndex: Int
+}
+
 // MARK: - Delegate
 
 protocol ARNavigationLogicDelegate: AnyObject {
@@ -37,6 +48,7 @@ protocol ARNavigationLogicDelegate: AnyObject {
     func showArrivalNotification()
     func updateHUD(destinationName: String, remainingDistance: Float, instruction: String?)
     func updateNavigationStep(_ vm: NavigationStepViewModel)
+    func updateTurnArrow(_ vm: TurnArrowViewModel?)
     func setHUDVisible(_ visible: Bool)
     func setLocateButtonVisible(_ visible: Bool)
     func showRouteCalculating(_ visible: Bool)
@@ -212,6 +224,8 @@ class ARNavigationLogic {
     private static let walkSpeedMps: Double = 1.2
     /// 보행 평균 보폭 (m) — approxSteps 계산. docs Phase 6.
     private static let walkStrideM: Double = 0.7
+    /// turn step 3D 화살표 진입 임계 (XZ, m). 카메라 ↔ turn step 거리 ≤ 5m 일 때만 표시.
+    private static let turnArrowLookaheadM: Double = 5.0
 
     /// LightGlue 매칭 엔진 — 토글 ON 시에만 init. mlpackage 미배치/load 실패 시 nil → fallback.
     // 비활성: useLightGlueMatcher=false. 인스턴스화 회피로 mlpackage 로드 비용 절감.
@@ -299,6 +313,8 @@ class ARNavigationLogic {
                 if let vm = makeNavigationStepViewModel(cameraPos: cam) {
                     delegate?.updateNavigationStep(vm)
                 }
+                let turnVM = makeTurnArrowViewModel(cameraPos: cam)
+                delegate?.updateTurnArrow(turnVM)
             }
         }
 
@@ -358,6 +374,7 @@ class ARNavigationLogic {
         checkpointNode = nil
         destinationPinNode = nil
         allChevronNodes.removeAll()
+        delegate?.updateTurnArrow(nil)
 
         // timer 정지
         pathProgressTimer?.invalidate()
@@ -858,6 +875,7 @@ class ARNavigationLogic {
 
         // Phase 6: step index 만 리셋. vm 발신은 다음 drawPathFromSteps 가 담당.
         currentStepIndex = 0
+        delegate?.updateTurnArrow(nil)
     }
 
     // MARK: - Phase 8 추적 측위 cadence (A 트랙)
@@ -1200,6 +1218,8 @@ class ARNavigationLogic {
         if let vm = makeNavigationStepViewModel(cameraPos: nil) {
             delegate?.updateNavigationStep(vm)
         }
+        // Phase 6: 새 경로 → turn arrow 정리. 다음 1Hz tick 에서 cameraPos 기반으로 재평가.
+        delegate?.updateTurnArrow(nil)
     }
 
     /// V3 측위 + pathfinding 후 디버깅 데이터 일괄 dump.
@@ -1382,6 +1402,69 @@ class ARNavigationLogic {
             return .straight
         }
         return .unknown
+    }
+
+    /// 5m 이내 turn step 진입 시 AR 공간에 띄울 3D 화살표 vm.
+    /// `currentStepIndex` 부터 마지막 step 까지 첫 turn(좌/우/살짝좌/살짝우/유턴) 을 검색,
+    /// 카메라 ↔ turn step XZ 거리 ≤ 5m 일 때만 vm 생성. 그 외엔 nil 반환.
+    /// arPosition Y 는 floorY + 1m (사용자 시야 가까이).
+    private func makeTurnArrowViewModel(cameraPos: simd_float3?) -> TurnArrowViewModel? {
+        guard let cam = cameraPos,
+              let arPose = matchedARPose,
+              let pose = localizedPose else { return nil }
+        guard !lastPathSteps.isEmpty else { return nil }
+
+        let serverPos = simd_float3(Float(pose.x ?? 0), Float(pose.y ?? 0), Float(pose.z ?? 0))
+        let quat = simd_quatf(
+            ix: Float(pose.qx ?? 0), iy: Float(pose.qy ?? 0),
+            iz: Float(pose.qz ?? 0), r: Float(pose.qw ?? 1)
+        )
+        let input = CoordinateTransformer.Input(
+            serverPosition: serverPos, serverQuaternion: quat, arCameraPose: arPose
+        )
+
+        let lastIdx = lastPathSteps.count - 1
+        let startIdx = max(0, min(currentStepIndex, lastIdx))
+
+        for i in startIdx...lastIdx {
+            let s = lastPathSteps[i]
+            let next: PathStep? = (i + 1 < lastPathSteps.count) ? lastPathSteps[i + 1] : nil
+            let kind = Self.navigationActionKind(
+                from: s.instruction,
+                currentFloor: s.floorLevel,
+                nextFloor: next?.floorLevel
+            )
+            let mapped: (TurnDirection, TurnArrowKind)?
+            switch kind {
+            case .turnLeft:        mapped = (.left, .sharp)
+            case .turnRight:       mapped = (.right, .sharp)
+            case .turnSlightLeft:  mapped = (.left, .slight)
+            case .turnSlightRight: mapped = (.right, .slight)
+            case .uturn:           mapped = (.uTurn, .uturn)
+            default:               mapped = nil
+            }
+            guard let (direction, arrowKind) = mapped else { continue }
+
+            // 첫 turn step 발견 — 거리 검사 후 결정. 5m 초과면 nil (그 너머 turn 은 무시).
+            guard let p = s.position,
+                  let sx = p.x, let sy = p.y, let sz = p.z else { return nil }
+            let serverPoint = simd_float3(Float(sx), Float(sy), Float(sz))
+            let arPoint = CoordinateTransformer.transform(serverPoint: serverPoint, input: input)
+            let dx = cam.x - arPoint.x
+            let dz = cam.z - arPoint.z
+            let distXZ = Double(sqrt(dx * dx + dz * dz))
+            if distXZ > Self.turnArrowLookaheadM { return nil }
+
+            let floorY = arPose.columns.3.y - 1.7
+            let arPosition = simd_float3(arPoint.x, floorY + 1.0, arPoint.z)
+            return TurnArrowViewModel(
+                direction: direction,
+                kind: arrowKind,
+                arPosition: arPosition,
+                stepIndex: i
+            )
+        }
+        return nil
     }
 
     /// 시맨틱: `currentStepIndex` 는 "다음에 도달해야 할 step".

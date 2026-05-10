@@ -69,6 +69,10 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     private var headingOverlayView: HeadingAlignmentOverlayView!
     private var turnCardView: TurnCardView!
 
+    // Phase 6: AR 공간 3D 회전 화살표 (Logic 의 updateTurnArrow delegate 로 갱신)
+    private var turnArrowNode: SCNNode?
+    private var turnArrowStepIndex: Int?
+
     // Phase 7: SuperPoint 디버그 시각화 (DEBUG 빌드 전용)
     #if DEBUG
     private var superPointDebug: SuperPointDebugController?
@@ -1000,6 +1004,65 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
         }
     }
 
+    func updateTurnArrow(_ vm: TurnArrowViewModel?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            guard let vm = vm else {
+                self.turnArrowNode?.removeFromParentNode()
+                self.turnArrowNode = nil
+                self.turnArrowStepIndex = nil
+                return
+            }
+            if self.turnArrowStepIndex != vm.stepIndex || self.turnArrowNode == nil {
+                self.turnArrowNode?.removeFromParentNode()
+                let node = self.makeTurnArrowSCNNode(direction: vm.direction, kind: vm.kind)
+                self.sceneView.scene.rootNode.addChildNode(node)
+                self.turnArrowNode = node
+                self.turnArrowStepIndex = vm.stepIndex
+            }
+            self.turnArrowNode?.position = SCNVector3(vm.arPosition.x, vm.arPosition.y, vm.arPosition.z)
+            self.turnArrowNode?.eulerAngles = SCNVector3(0, self.turnArrowYaw(direction: vm.direction, kind: vm.kind), 0)
+        }
+    }
+
+    /// 우회전 화살표 베이스 path. 좌/우 모두 동일 path 사용 — yaw 회전으로만 방향 차이.
+    /// SCNShape extrusionDepth 0.05m. brand-blue + emission 으로 어두운 환경 시인성 확보.
+    private func makeTurnArrowSCNNode(direction: TurnDirection, kind: TurnArrowKind) -> SCNNode {
+        let path = UIBezierPath()
+        path.move(to: CGPoint(x: 0, y: 0))
+        path.addLine(to: CGPoint(x: 0, y: 0.4))
+        path.addLine(to: CGPoint(x: 0.4, y: 0.4))
+        path.addLine(to: CGPoint(x: 0.4, y: 0.5))
+        path.addLine(to: CGPoint(x: 0.6, y: 0.3))
+        path.addLine(to: CGPoint(x: 0.4, y: 0.1))
+        path.addLine(to: CGPoint(x: 0.4, y: 0.2))
+        path.addLine(to: CGPoint(x: 0.2, y: 0.2))
+        path.addLine(to: CGPoint(x: 0.2, y: 0))
+        path.close()
+        let shape = SCNShape(path: path, extrusionDepth: 0.05)
+        let mat = SCNMaterial()
+        mat.diffuse.contents = UIColor(red: 0/255, green: 102/255, blue: 255/255, alpha: 1)
+        mat.emission.contents = UIColor(red: 0/255, green: 102/255, blue: 255/255, alpha: 1).withAlphaComponent(0.6)
+        mat.lightingModel = .constant
+        mat.writesToDepthBuffer = false
+        mat.isDoubleSided = true
+        shape.materials = [mat]
+        return SCNNode(geometry: shape)
+    }
+
+    /// TurnDirection × TurnArrowKind → SceneKit Y-yaw (rad).
+    /// SceneKit 좌수/+Y up 기준 가정 — 시뮬레이터 검증으로 부호 확정 권고. 필요시 반전.
+    private func turnArrowYaw(direction: TurnDirection, kind: TurnArrowKind) -> Float {
+        switch (direction, kind) {
+        case (.left, .sharp):   return Float.pi / 2
+        case (.right, .sharp):  return -Float.pi / 2
+        case (.left, .slight):  return Float.pi / 4
+        case (.right, .slight): return -Float.pi / 4
+        case (.uTurn, _):       return Float.pi
+        default:                return 0
+        }
+    }
+
     /// NavigationActionKind → 카드 아이콘. 핸드오프 매핑(Montage SVG)을 우선 사용하고,
     /// 매핑 표에 없는 액션은 SF Symbol 로 폴백한다.
     private func actionImage(for action: NavigationActionKind) -> UIImage? {
@@ -1058,6 +1121,10 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
             } completion: { _ in
                 self.hudContainerView.isHidden = true
             }
+            // Phase 6: HUD 숨김 시 AR 공간 turn 화살표도 동반 정리.
+            self.turnArrowNode?.removeFromParentNode()
+            self.turnArrowNode = nil
+            self.turnArrowStepIndex = nil
         }
     }
 
