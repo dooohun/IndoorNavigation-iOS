@@ -296,7 +296,7 @@ class ARNavigationLogic {
                                       frame.camera.transform.columns.3.y,
                                       frame.camera.transform.columns.3.z)
                 recomputeCurrentStepIndex(cameraPos: cam)
-                if let vm = makeNavigationStepViewModel() {
+                if let vm = makeNavigationStepViewModel(cameraPos: cam) {
                     delegate?.updateNavigationStep(vm)
                 }
             }
@@ -1195,8 +1195,9 @@ class ARNavigationLogic {
         print("[Path] drew \(steps.count) steps as \(arPoints.count) points + \(arPoints.count - 1) segments")
 
         // Phase 6: 경로가 새로 그려지면 step index 리셋 + 첫 vm 즉시 발신
+        // 첫 vm 은 cameraPos 가 없어 fallback 거리 사용 (다음 1Hz tick 에서 정확한 거리로 갱신).
         currentStepIndex = 0
-        if let vm = makeNavigationStepViewModel() {
+        if let vm = makeNavigationStepViewModel(cameraPos: nil) {
             delegate?.updateNavigationStep(vm)
         }
     }
@@ -1383,33 +1384,89 @@ class ARNavigationLogic {
         return .unknown
     }
 
-    /// lastPathSteps + currentStepIndex 로 NavigationStepViewModel 빌드.
-    /// 도착 step (next == nil) 이면 distance=0 + action=.arrive.
-    private func makeNavigationStepViewModel() -> NavigationStepViewModel? {
+    /// 시맨틱: `currentStepIndex` 는 "다음에 도달해야 할 step".
+    /// 카드 idx 는 기본적으로 currentStepIndex 이지만, 그 액션이 turn 이 아니라면 5m 이내 lookahead 로
+    /// 곧 다가올 turn(좌/우/살짝좌/살짝우/유턴) 을 미리 표시해 사용자가 준비할 시간을 확보.
+    /// 카드 거리 = 카메라 ↔ step[idx] XZ. cameraPos 가 nil 이면 server-world segment 거리로 fallback.
+    private func makeNavigationStepViewModel(cameraPos: simd_float3?) -> NavigationStepViewModel? {
         guard !lastPathSteps.isEmpty else { return nil }
-        let idx = max(0, min(currentStepIndex, lastPathSteps.count - 1))
-        let cur = lastPathSteps[idx]
-        let next: PathStep? = (idx + 1 < lastPathSteps.count) ? lastPathSteps[idx + 1] : nil
+        var idx = max(0, min(currentStepIndex, lastPathSteps.count - 1))
+        let lastIdx = lastPathSteps.count - 1
 
-        // 다음 step 까지 XZ 거리 (도착 시 0)
-        let dist: Double
-        if let nxt = next,
-           let curPos = cur.position, let nxtPos = nxt.position,
-           let cx = curPos.x, let cz = curPos.z,
-           let nx = nxtPos.x, let nz = nxtPos.z {
-            let dx = nx - cx
-            let dz = nz - cz
-            dist = (dx * dx + dz * dz).squareRoot()
-        } else {
-            dist = 0
+        // CoordinateTransformer.Input — cameraPos + 측위 정보 가용 시 1회 구성, lookahead 와 dist 양쪽에서 재사용.
+        let xform: CoordinateTransformer.Input? = {
+            guard cameraPos != nil, let arPose = matchedARPose, let pose = localizedPose else { return nil }
+            let serverPos = simd_float3(Float(pose.x ?? 0), Float(pose.y ?? 0), Float(pose.z ?? 0))
+            let quat = simd_quatf(
+                ix: Float(pose.qx ?? 0), iy: Float(pose.qy ?? 0),
+                iz: Float(pose.qz ?? 0), r: Float(pose.qw ?? 1)
+            )
+            return CoordinateTransformer.Input(
+                serverPosition: serverPos, serverQuaternion: quat, arCameraPose: arPose
+            )
+        }()
+
+        func action(at i: Int) -> NavigationActionKind {
+            if i >= lastIdx { return .arrive }
+            let s = lastPathSteps[i]
+            let next: PathStep? = (i + 1 < lastPathSteps.count) ? lastPathSteps[i + 1] : nil
+            return Self.navigationActionKind(
+                from: s.instruction,
+                currentFloor: s.floorLevel,
+                nextFloor: next?.floorLevel
+            )
         }
+
+        func cameraDistance(toStep i: Int) -> Double? {
+            guard let cam = cameraPos, let input = xform else { return nil }
+            guard let pos = lastPathSteps[i].position,
+                  let sx = pos.x, let sy = pos.y, let sz = pos.z else { return nil }
+            let serverPoint = simd_float3(Float(sx), Float(sy), Float(sz))
+            let arPoint = CoordinateTransformer.transform(serverPoint: serverPoint, input: input)
+            let dx = cam.x - arPoint.x
+            let dz = cam.z - arPoint.z
+            return Double(sqrt(dx * dx + dz * dz))
+        }
+
+        let isTurn: (NavigationActionKind) -> Bool = { a in
+            switch a {
+            case .turnLeft, .turnRight, .turnSlightLeft, .turnSlightRight, .uturn: return true
+            default: return false
+            }
+        }
+
+        // 5m 이내 turn lookahead — 기본 idx 의 액션이 turn 이 아닐 때만 의미.
+        // 첫 turn step 만 검사. 거리 측정 불가하면 lookahead 포기 (기본 idx 유지).
+        if !isTurn(action(at: idx)), idx < lastIdx {
+            for i in (idx + 1)...lastIdx where isTurn(action(at: i)) {
+                if let d = cameraDistance(toStep: i), d <= 5.0 {
+                    idx = i
+                }
+                break
+            }
+        }
+
+        let target = lastPathSteps[idx]
+        let isLast = (idx >= lastIdx)
+
+        // 카드 거리 — 카메라 ↔ target. 변환 안되면 prev↔target server-world fallback.
+        let dist: Double = cameraDistance(toStep: idx) ?? {
+            if idx > 0,
+               let a = lastPathSteps[idx - 1].position, let b = target.position,
+               let ax = a.x, let az = a.z, let bx = b.x, let bz = b.z {
+                let dx = bx - ax
+                let dz = bz - az
+                return (dx * dx + dz * dz).squareRoot()
+            }
+            return 0
+        }()
 
         let approxSteps = max(1, Int((dist / Self.walkStrideM).rounded()))
 
-        // 잔여 총 거리 — idx 부터 끝까지 인접 step 간 XZ 거리 합산
-        var remainingTotal: Double = 0
-        if idx < lastPathSteps.count - 1 {
-            for i in idx..<(lastPathSteps.count - 1) {
+        // 잔여 총 거리 — 카메라 ↔ target + (target↔end 인접 segment 합)
+        var remainingTotal: Double = dist
+        if idx < lastIdx {
+            for i in idx..<lastIdx {
                 guard let a = lastPathSteps[i].position,
                       let b = lastPathSteps[i + 1].position,
                       let ax = a.x, let az = a.z,
@@ -1421,23 +1478,12 @@ class ARNavigationLogic {
         }
 
         let remainingMinutes = max(1, Int((remainingTotal / Self.walkSpeedMps / 60.0).rounded()))
-        let remainingExtraStepsCount = max(0, lastPathSteps.count - 1 - idx)
+        let remainingExtraStepsCount = max(0, lastIdx - idx)
         let destinationFloorLevel = lastPathSteps.last?.floorLevel
-
-        // action — 마지막 step 이면 .arrive
-        let action: NavigationActionKind
-        if next == nil {
-            action = .arrive
-        } else {
-            action = Self.navigationActionKind(
-                from: cur.instruction,
-                currentFloor: cur.floorLevel,
-                nextFloor: next?.floorLevel
-            )
-        }
+        let resolvedAction: NavigationActionKind = isLast ? .arrive : action(at: idx)
 
         return NavigationStepViewModel(
-            action: action,
+            action: resolvedAction,
             distanceMeters: dist,
             approxSteps: approxSteps,
             remainingTotalMeters: remainingTotal,
@@ -1448,10 +1494,9 @@ class ARNavigationLogic {
         )
     }
 
-    /// 카메라 XZ 위치와 각 step 의 AR world 좌표 거리를 비교해 가장 가까운 step 인덱스로 갱신.
-    /// localizedFloorLevel 과 같은 floor 의 step (또는 floor nil 인 step) 만 후보.
-    /// 단조 증가 — 한 번 진행한 step 으로는 되돌아가지 않는다.
-    /// TODO(phase6+): 단조 증가는 docs 미명시 — 뒤로 점프 방지를 위해 임플리멘터 보강.
+    /// `currentStepIndex` advance: 카메라가 target step 의 advanceThreshold 이내에 들어오면 +1.
+    /// while 루프로 한 tick 에 여러 step 을 한꺼번에 통과 가능 (시작점 근처에서 step[0] 즉시 통과 등).
+    /// localizedFloorLevel 과 다른 floor step 은 한 칸씩 그냥 advance (층 전환 모달이 별도 처리).
     private func recomputeCurrentStepIndex(cameraPos: simd_float3) {
         guard !lastPathSteps.isEmpty else { return }
         guard let arPose = matchedARPose, let pose = localizedPose else { return }
@@ -1465,26 +1510,33 @@ class ARNavigationLogic {
             serverPosition: serverPos, serverQuaternion: quat, arCameraPose: arPose
         )
 
-        var bestIdx: Int = currentStepIndex
-        var bestDist: Float = .greatestFiniteMagnitude
-        for (i, step) in lastPathSteps.enumerated() {
-            // floor 가드: 같은 floor 또는 floor 정보 nil 인 step만 후보
-            if let stepFloor = step.floorLevel, let curFloor = localizedFloorLevel,
-               stepFloor != curFloor { continue }
-            guard let pos = step.position,
-                  let sx = pos.x, let sy = pos.y, let sz = pos.z else { continue }
+        let advanceThreshold: Float = 2.0
+        let lastIdx = lastPathSteps.count - 1
+        while currentStepIndex < lastIdx {
+            let target = lastPathSteps[currentStepIndex]
+            // 다른 floor 의 step 은 도달 판정 불가 → 한 칸 advance (현재 floor 의 다음 step 으로 진행).
+            if let stepFloor = target.floorLevel, let curFloor = localizedFloorLevel,
+               stepFloor != curFloor {
+                currentStepIndex += 1
+                continue
+            }
+            guard let pos = target.position,
+                  let sx = pos.x, let sy = pos.y, let sz = pos.z else {
+                // 좌표 누락 step 은 통과
+                currentStepIndex += 1
+                continue
+            }
             let serverPoint = simd_float3(Float(sx), Float(sy), Float(sz))
             let arPoint = CoordinateTransformer.transform(serverPoint: serverPoint, input: input)
             let dx = cameraPos.x - arPoint.x
             let dz = cameraPos.z - arPoint.z
             let d = sqrt(dx * dx + dz * dz)
-            if d < bestDist {
-                bestDist = d
-                bestIdx = i
+            if d < advanceThreshold {
+                currentStepIndex += 1
+            } else {
+                break
             }
         }
-        // 단조 증가 — 뒤로 점프 방지
-        currentStepIndex = max(currentStepIndex, bestIdx)
     }
 
     // MARK: - 헬퍼

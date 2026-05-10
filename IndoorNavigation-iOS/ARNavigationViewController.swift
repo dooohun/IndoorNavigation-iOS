@@ -50,12 +50,12 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var currentStepDistanceLabel: UILabel!
     var currentStepWalkLabel: UILabel!
 
-    // Phase 6: +N단계 펼침 버튼
-    var remainingStepsToggleButton: UIButton!
-
     // Phase 6: 하단 거리/시간 캡슐
     var remainingCapsuleView: UIView!
     var remainingCapsuleLabel: UILabel!
+
+    // Phase 6: 재측정 버튼 라벨 상태 추적 — 첫 측위 성공 전엔 "주변 스캔", 이후 "재측정".
+    private var hasLocalizedSuccessfully = false
 
     var routeCalculatingView: UIView!
     var routeCalculatingLabel: UILabel!
@@ -92,7 +92,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         setupHudContainer()
         setupDestinationPill()
         setupCurrentStepCard()
-        setupRemainingStepsToggle()
         setupRemainingCapsule()
         setupRouteCalculatingView()
         setupFloorTransitionOverlay()
@@ -107,16 +106,17 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         //          GuidanceDirector 인스턴스는 보존(향후 Phase 5 부활 가능성). delegate 미등록 → no-op.
         // TODO(phase8+): GuidanceDirector 인스턴스 자체 옵셔널화 또는 폐기.
 
-        // Phase 7: SuperPoint extractor + 디버그 시각화 (DEBUG 빌드 전용)
-        #if DEBUG
-        let debugController = SuperPointDebugController(hostView: self.view)
-        self.superPointDebug = debugController
-        logic.attachSuperPointDebug(debugController)
-        #endif
+        // Phase 7: SuperPoint extractor.
+        // Phase 6 UI 정리: 상단 SP / DUMP 디버그 버튼은 사용자 요청으로 비활성.
+        // SuperPointDebugController 인스턴스화 자체를 끔 — keypoint 오버레이/추론 시간/dump 버튼 모두 노출 X.
         logic.setupSuperPointExtractor()
 
         // Phase 8: 화면 더블탭 → 측위 재시작 (무한 테스트용)
         setupRetapGestureForTesting()
+
+        // Phase 6: 닫기 / 재측정 버튼이 scanningOverlay·floorTransitionOverlay 등에 가려지지 않도록 항상 최상단으로.
+        self.view.bringSubviewToFront(closeButton)
+        self.view.bringSubviewToFront(locateButton)
     }
 
     /// 화면 더블탭 시 측위 재시작 — 무한 테스트용. logic.startLocalizationFlow() 가 idempotent.
@@ -143,9 +143,11 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     private func setupCloseButton() {
         // Phase 6: 좌상단 원형 X 버튼 (44pt, blur, xmark 18pt semibold)
         closeButton = UIButton(type: .system)
-        let icon = UIImage(named: "closeThick")?
+        let assetIcon = UIImage(named: "closeThick")?
             .withRenderingMode(.alwaysTemplate)
             .resized(to: CGSize(width: 18, height: 18))
+        let fallbackConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+        let icon = assetIcon ?? UIImage(systemName: "xmark", withConfiguration: fallbackConfig)
         closeButton.setImage(icon, for: .normal)
         closeButton.tintColor = .white
         closeButton.backgroundColor = UIColor(white: 0.0, alpha: 0.45)
@@ -186,12 +188,15 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         // Phase 6: 하단 중앙 캡슐 (52pt 높이, blur, viewfinder + "재측정")
         // 인스턴스는 기존 locateButton 그대로 재사용.
         locateButton = UIButton(type: .system)
-        locateButton.setTitle("재측정", for: .normal)
+        // 초기 default — 첫 측위 성공(setLocateButtonVisible(true)) 시 "재측정" 으로 전환.
+        locateButton.setTitle("주변 스캔", for: .normal)
         locateButton.setTitleColor(.white, for: .normal)
         locateButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
-        let icon = UIImage(named: "compass")?
+        let assetIcon = UIImage(named: "compass")?
             .withRenderingMode(.alwaysTemplate)
             .resized(to: CGSize(width: 20, height: 20))
+        let fallbackConfig = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
+        let icon = assetIcon ?? UIImage(systemName: "viewfinder", withConfiguration: fallbackConfig)
         locateButton.setImage(icon, for: .normal)
         locateButton.tintColor = .white
         locateButton.imageEdgeInsets = UIEdgeInsets(top: 0, left: -6, bottom: 0, right: 6)
@@ -411,7 +416,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     private func setupHudContainer() {
         let bounds = self.view.bounds
         // Phase 6: PassthroughView 로 transparent 영역은 sceneView 의 더블탭 제스처에 위임.
-        // 자식 버튼(remainingStepsToggleButton 등) 은 정상 터치 수신.
+        // 자식 버튼은 정상 터치 수신.
         hudContainerView = HUDPassthroughView(frame: bounds)
         hudContainerView.isUserInteractionEnabled = true
         hudContainerView.isHidden = true
@@ -444,7 +449,9 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         destinationIconCircle.translatesAutoresizingMaskIntoConstraints = false
         pill.addSubview(destinationIconCircle)
 
-        let flagIcon = UIImageView(image: UIImage(named: "flagFill")?.withRenderingMode(.alwaysTemplate))
+        let flagAsset = UIImage(named: "flagFill")?.withRenderingMode(.alwaysTemplate)
+        let flagFallback = UIImage(systemName: "flag.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold))
+        let flagIcon = UIImageView(image: flagAsset ?? flagFallback)
         flagIcon.tintColor = .white
         flagIcon.contentMode = .scaleAspectFit
         flagIcon.translatesAutoresizingMaskIntoConstraints = false
@@ -470,8 +477,9 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         NSLayoutConstraint.activate([
             pill.heightAnchor.constraint(equalToConstant: 56),
             pill.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 12),
-            // 좌측: closeButton 우측 12pt
-            pill.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 12),
+            // 가운데 정렬 — closeButton 과의 충돌만 leading greaterThanOrEqual 로 방지.
+            pill.centerXAnchor.constraint(equalTo: hudContainerView.centerXAnchor),
+            pill.leadingAnchor.constraint(greaterThanOrEqualTo: closeButton.trailingAnchor, constant: 12),
             pill.trailingAnchor.constraint(lessThanOrEqualTo: safeArea.trailingAnchor, constant: -16),
 
             blur.topAnchor.constraint(equalTo: pill.topAnchor),
@@ -520,7 +528,9 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         currentStepIconBox.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(currentStepIconBox)
 
-        currentStepIconView = UIImageView(image: UIImage(named: "arrowUpThick")?.withRenderingMode(.alwaysTemplate))
+        let upAsset = UIImage(named: "arrowUpThick")?.withRenderingMode(.alwaysTemplate)
+        let upFallback = UIImage(systemName: "arrow.up", withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .bold))
+        currentStepIconView = UIImageView(image: upAsset ?? upFallback)
         currentStepIconView.tintColor = .white
         currentStepIconView.contentMode = .scaleAspectFit
         currentStepIconView.translatesAutoresizingMaskIntoConstraints = false
@@ -581,54 +591,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         ])
     }
 
-    /// docs Phase 6 §4 — "+N단계 ⌄" 펼침 버튼. 기본 isHidden = true.
-    private func setupRemainingStepsToggle() {
-        let btn = UIButton(type: .system)
-        btn.setTitle("+0단계", for: .normal)
-        btn.setTitleColor(.white, for: .normal)
-        btn.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
-        let chevImage = UIImage(named: "chevronDownThick")?
-            .withRenderingMode(.alwaysTemplate)
-            .resized(to: CGSize(width: 14, height: 14))
-        btn.setImage(chevImage, for: .normal)
-        btn.tintColor = .white
-        // 텍스트 좌측, 아이콘 우측 배치
-        btn.semanticContentAttribute = .forceRightToLeft
-        btn.imageEdgeInsets = UIEdgeInsets(top: 0, left: 6, bottom: 0, right: -6)
-        btn.titleEdgeInsets = UIEdgeInsets(top: 0, left: -6, bottom: 0, right: 6)
-        btn.contentEdgeInsets = UIEdgeInsets(top: 0, left: 14, bottom: 0, right: 14)
-        btn.backgroundColor = UIColor.white.withAlphaComponent(0.12)
-        btn.layer.cornerRadius = 18
-        btn.layer.masksToBounds = true
-        btn.translatesAutoresizingMaskIntoConstraints = false
-        btn.isHidden = true
-        btn.addTarget(self, action: #selector(onRemainingStepsToggleTapped), for: .touchUpInside)
-
-        // blur 백드롭
-        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
-        blur.translatesAutoresizingMaskIntoConstraints = false
-        blur.isUserInteractionEnabled = false
-        blur.layer.cornerRadius = 18
-        blur.layer.masksToBounds = true
-        btn.insertSubview(blur, at: 0)
-
-        hudContainerView.addSubview(btn)
-        remainingStepsToggleButton = btn
-
-        guard let card = currentStepCardView else { return }
-
-        NSLayoutConstraint.activate([
-            btn.topAnchor.constraint(equalTo: card.bottomAnchor, constant: 8),
-            btn.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-            btn.heightAnchor.constraint(equalToConstant: 36),
-
-            blur.topAnchor.constraint(equalTo: btn.topAnchor),
-            blur.leadingAnchor.constraint(equalTo: btn.leadingAnchor),
-            blur.trailingAnchor.constraint(equalTo: btn.trailingAnchor),
-            blur.bottomAnchor.constraint(equalTo: btn.bottomAnchor),
-        ])
-    }
-
     /// docs Phase 6 §5 — 하단 거리/시간 캡슐 (44pt 높이, blur, attributed).
     private func setupRemainingCapsule() {
         let capsule = UIView()
@@ -671,16 +633,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
             remainingCapsuleLabel.trailingAnchor.constraint(equalTo: capsule.trailingAnchor, constant: -18),
             remainingCapsuleLabel.centerYAnchor.constraint(equalTo: capsule.centerYAnchor),
         ])
-    }
-
-    @objc private func onRemainingStepsToggleTapped() {
-        // Phase 6 비범위 — 후속 phase 에서 풍부한 step 리스트 UI 채움.
-        let sheet = UIViewController()
-        sheet.view.backgroundColor = .systemBackground
-        if let pres = sheet.sheetPresentationController {
-            pres.detents = [.medium()]
-        }
-        present(sheet, animated: true)
     }
 
     private func setupRouteCalculatingView() {
@@ -1014,15 +966,7 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
             // 5. 걸음 수
             self.currentStepWalkLabel.text = "약 \(vm.approxSteps)걸음"
 
-            // 6. +N단계 가시성
-            if vm.remainingExtraStepsCount > 0 {
-                self.remainingStepsToggleButton.isHidden = false
-                self.remainingStepsToggleButton.setTitle("+\(vm.remainingExtraStepsCount)단계", for: .normal)
-            } else {
-                self.remainingStepsToggleButton.isHidden = true
-            }
-
-            // 7. 하단 거리/시간 캡슐 — attributed
+            // 6. 하단 거리/시간 캡슐 — attributed
             let totalInt = max(0, Int(vm.remainingTotalMeters.rounded()))
             let cap = NSMutableAttributedString(
                 string: "남은 거리 ",
@@ -1119,6 +1063,11 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
 
     func setLocateButtonVisible(_ visible: Bool) {
         if visible {
+            // 첫 측위 성공 이후엔 "재측정" 으로 라벨 전환.
+            if !hasLocalizedSuccessfully {
+                hasLocalizedSuccessfully = true
+                locateButton.setTitle("재측정", for: .normal)
+            }
             locateButton.alpha = 0
             locateButton.isHidden = false
             UIView.animate(withDuration: 0.2) {
