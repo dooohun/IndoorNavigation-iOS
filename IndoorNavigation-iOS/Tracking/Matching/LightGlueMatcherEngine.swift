@@ -2,6 +2,7 @@ import Foundation
 import CoreML
 import Accelerate
 
+/// 2026-05-10: 호출자(ARNavigationLogic) 측 토글 OFF. 본 wrapper 는 dead code 상태이지만 컴파일 단위 보존(추후 재활성화 위해).
 /// LightGlue Core ML 모델 wrapper. 두 SuperPoint feature set 간 학습된 매칭.
 ///
 /// Phase 8 — 운영 단계에서 `DescriptorMatcher` (NN+ratio) 를 본 클래스로 교체 (S1).

@@ -24,17 +24,15 @@ protocol ARNavigationLogicDelegate: AnyObject {
 
 class ARNavigationLogic {
 
-    // LightGlue 매처 토글 — RELEASE 에서 false 면 lightGlueMatcher lazy init skip.
-    static let useLightGlueMatcher: Bool = {
-        #if DEBUG
-        if UserDefaults.standard.object(forKey: "useLightGlueMatcher") != nil {
-            return UserDefaults.standard.bool(forKey: "useLightGlueMatcher")
-        }
-        return true
-        #else
-        return false
-        #endif
-    }()
+    /// LightGlue 비활성 (2026-05-10) — 매처 정확도 한계 확정으로 Phase 4 추적 루프 정지.
+    /// SuperPoint 추출 + V3 측위 + path 렌더 + 정적 checkpoint 만 유지.
+    /// 모델 자원(LightGlueMatcher.mlpackage) 은 추후 재활성화 위해 보존.
+    static let useLightGlueMatcher: Bool = false
+
+    /// SuperPoint 추출 비활성 (2026-05-10) — 발열/배터리 절감용 일시 OFF.
+    /// V3 측위는 서버 측 SuperPoint 추출이라 클라 추출 없이도 정상 동작.
+    /// 모델 자원(SuperPoint.mlpackage) 은 추후 재활성화 위해 보존.
+    static let useSuperPointExtractor: Bool = false
 
     weak var delegate: ARNavigationLogicDelegate?
     weak var arSession: ARSession?
@@ -181,14 +179,8 @@ class ARNavigationLogic {
     private var trialNumber: Int = 0
 
     /// LightGlue 매칭 엔진 — 토글 ON 시에만 init. mlpackage 미배치/load 실패 시 nil → fallback.
-    private lazy var lightGlueMatcher: LightGlueMatcherEngine? = {
-        do {
-            let e = try LightGlueMatcherEngine()
-            return e
-        } catch {
-            return nil
-        }
-    }()
+    // 비활성: useLightGlueMatcher=false. 인스턴스화 회피로 mlpackage 로드 비용 절감.
+    private lazy var lightGlueMatcher: LightGlueMatcherEngine? = { return nil }()
 
     // MARK: - 외부 노출
 
@@ -200,6 +192,10 @@ class ARNavigationLogic {
     /// 기본 경로: SuperPointExtractorML (Core ML 추론). DEBUG 빌드에서 UserDefaults
     /// `useSuperPointStub` 가 true 면 stub 으로 강제 폴백. ML init 실패 시에도 stub 폴백.
     func setupSuperPointExtractor() {
+        guard Self.useSuperPointExtractor else {
+            print("[SuperPoint] 비활성 — 발열 절감용 OFF. mlpackage 로드/warmUp 회피.")
+            return
+        }
         let useStub: Bool = {
             #if DEBUG
             return UserDefaults.standard.bool(forKey: "useSuperPointStub")
@@ -256,6 +252,7 @@ class ARNavigationLogic {
     /// ARSessionDelegate.session(_:didUpdate:) 에서 매 프레임 호출.
     /// cadence 통과 시에만 extract 수행하고, DEBUG 빌드에서 디버그 오버레이로 결과 전달.
     func processARFrame(_ frame: ARFrame) {
+        guard Self.useSuperPointExtractor else { return }
         guard let extractor = superPointExtractor else { return }
 
         let thermal = ProcessInfo.processInfo.thermalState
@@ -813,7 +810,7 @@ class ARNavigationLogic {
     /// 추적 측위 시작 — V3 측위 + lookup 완료 후 호출. cadence 마다 background 측위.
     func startTracking() {
         guard Self.useLightGlueMatcher else {
-            print("[Tracking] start 실패 — useLightGlueMatcher=false")
+            print("[Tracking] 비활성 — LightGlue OFF (SuperPoint 단독 모드). V3 측위 + 정적 path/checkpoint 만 표시.")
             return
         }
         guard let bundle = localizationBundle, !bundle.keyframes.isEmpty else {
