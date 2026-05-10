@@ -2,6 +2,16 @@ import UIKit
 import SceneKit
 import ARKit
 
+/// Phase 6: HUD 컨테이너용 pass-through view. 자식이 잡지 않은 터치는 sceneView 로 통과.
+/// transparent HUD 영역에서 sceneView 의 더블탭 제스처(측위 재시작) 가 정상 동작하도록.
+private final class HUDPassthroughView: UIView {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        // 자기 자신은 통과시키고, 자식이 잡으면 그 자식 반환
+        return hit === self ? nil : hit
+    }
+}
+
 class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
 
     var buildingId: String = ""
@@ -20,11 +30,32 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var arrivalBadge: UIView!
 
     var hudContainerView: UIView!
-    var destinationPillView: UIView!
-    var destinationLabel: UILabel!
-    var remainingDistanceLabel: UILabel!
-    var instructionCardView: UIView!
-    var instructionLabel: UILabel!
+    // Phase 6: 기존 HUD 멤버는 신규 카드 UX 흐름에서 미사용 — 옵셔널화로 nil 안전
+    var destinationPillView: UIView?
+    var destinationLabel: UILabel?
+    var remainingDistanceLabel: UILabel?
+    var instructionCardView: UIView?
+    var instructionLabel: UILabel?
+
+    // Phase 6: 신규 목적지 pill 내부 컴포넌트
+    var destinationIconCircle: UIView!
+    var destinationFloorLabel: UILabel!
+    var destinationNameLabel: UILabel!
+
+    // Phase 6: 현재 스텝 카드
+    var currentStepCardView: UIView!
+    var currentStepIconBox: UIView!
+    var currentStepIconView: UIImageView!
+    var currentStepActionLabel: UILabel!
+    var currentStepDistanceLabel: UILabel!
+    var currentStepWalkLabel: UILabel!
+
+    // Phase 6: +N단계 펼침 버튼
+    var remainingStepsToggleButton: UIButton!
+
+    // Phase 6: 하단 거리/시간 캡슐
+    var remainingCapsuleView: UIView!
+    var remainingCapsuleLabel: UILabel!
 
     var routeCalculatingView: UIView!
     var routeCalculatingLabel: UILabel!
@@ -52,12 +83,17 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
 
         setupARView()
         setupCloseButton()
-        setupLocateButton()
+        setupRelocalizeButton()
         setupScanningOverlay()
         setupScanCompleteBadge()
         setupScanFailedView()
         setupArrivalBadge()
-        setupHUD()
+        // Phase 6: setupHUD() 폐기 → 5개 신규 setup 으로 대체
+        setupHudContainer()
+        setupDestinationPill()
+        setupCurrentStepCard()
+        setupRemainingStepsToggle()
+        setupRemainingCapsule()
         setupRouteCalculatingView()
         setupFloorTransitionOverlay()
         // Phase 8: setupHeadingOverlay() / setupTurnCard() 호출 제거 — keyframe 단계 추적 모델
@@ -105,30 +141,91 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     }
 
     private func setupCloseButton() {
+        // Phase 6: 좌상단 원형 X 버튼 (44pt, blur, xmark 18pt semibold)
         closeButton = UIButton(type: .system)
-        let config = UIImage.SymbolConfiguration(pointSize: 16, weight: .bold)
-        closeButton.setImage(UIImage(systemName: "xmark", withConfiguration: config), for: .normal)
+        let icon = UIImage(named: "closeThick")?
+            .withRenderingMode(.alwaysTemplate)
+            .resized(to: CGSize(width: 18, height: 18))
+        closeButton.setImage(icon, for: .normal)
         closeButton.tintColor = .white
-        closeButton.backgroundColor = UIColor.black.withAlphaComponent(0.5)
-        closeButton.layer.cornerRadius = 20
-        closeButton.frame = CGRect(x: 16, y: 60, width: 40, height: 40)
+        closeButton.backgroundColor = UIColor(white: 0.0, alpha: 0.45)
+        closeButton.layer.cornerRadius = 22
+        closeButton.layer.masksToBounds = true
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.addTarget(self, action: #selector(onCloseButtonTapped), for: .touchUpInside)
+
+        // blur 백드롭
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+        blur.translatesAutoresizingMaskIntoConstraints = false
+        blur.isUserInteractionEnabled = false
+        blur.layer.cornerRadius = 22
+        blur.layer.masksToBounds = true
+        closeButton.insertSubview(blur, at: 0)
+
         self.view.addSubview(closeButton)
+
+        let safeArea = self.view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            closeButton.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 12),
+            closeButton.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor, constant: 16),
+            closeButton.widthAnchor.constraint(equalToConstant: 44),
+            closeButton.heightAnchor.constraint(equalToConstant: 44),
+
+            blur.topAnchor.constraint(equalTo: closeButton.topAnchor),
+            blur.leadingAnchor.constraint(equalTo: closeButton.leadingAnchor),
+            blur.trailingAnchor.constraint(equalTo: closeButton.trailingAnchor),
+            blur.bottomAnchor.constraint(equalTo: closeButton.bottomAnchor),
+        ])
     }
 
     @objc private func onCloseButtonTapped() {
         dismiss(animated: true)
     }
 
-    private func setupLocateButton() {
+    private func setupRelocalizeButton() {
+        // Phase 6: 하단 중앙 캡슐 (52pt 높이, blur, viewfinder + "재측정")
+        // 인스턴스는 기존 locateButton 그대로 재사용.
         locateButton = UIButton(type: .system)
-        locateButton.setTitle("\(destinationName) 길찾기 시작", for: .normal)
-        locateButton.backgroundColor = .systemBlue
+        locateButton.setTitle("재측정", for: .normal)
         locateButton.setTitleColor(.white, for: .normal)
-        locateButton.layer.cornerRadius = 10
-        locateButton.frame = CGRect(x: 20, y: self.view.bounds.height - 100, width: self.view.bounds.width - 40, height: 50)
+        locateButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        let icon = UIImage(named: "compass")?
+            .withRenderingMode(.alwaysTemplate)
+            .resized(to: CGSize(width: 20, height: 20))
+        locateButton.setImage(icon, for: .normal)
+        locateButton.tintColor = .white
+        locateButton.imageEdgeInsets = UIEdgeInsets(top: 0, left: -6, bottom: 0, right: 6)
+        locateButton.titleEdgeInsets = UIEdgeInsets(top: 0, left: 6, bottom: 0, right: -6)
+        locateButton.contentEdgeInsets = UIEdgeInsets(top: 0, left: 22, bottom: 0, right: 22)
+        locateButton.backgroundColor = UIColor(white: 0.0, alpha: 0.55)
+        locateButton.layer.cornerRadius = 26
+        locateButton.layer.masksToBounds = true
+        locateButton.layer.borderWidth = 1
+        locateButton.layer.borderColor = UIColor.white.withAlphaComponent(0.2).cgColor
+        locateButton.translatesAutoresizingMaskIntoConstraints = false
         locateButton.addTarget(self, action: #selector(onLocateButtonTapped), for: .touchUpInside)
+
+        // blur 백드롭
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+        blur.translatesAutoresizingMaskIntoConstraints = false
+        blur.isUserInteractionEnabled = false
+        blur.layer.cornerRadius = 26
+        blur.layer.masksToBounds = true
+        locateButton.insertSubview(blur, at: 0)
+
         self.view.addSubview(locateButton)
+
+        let safeArea = self.view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            locateButton.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor, constant: -16),
+            locateButton.centerXAnchor.constraint(equalTo: safeArea.centerXAnchor),
+            locateButton.heightAnchor.constraint(equalToConstant: 52),
+
+            blur.topAnchor.constraint(equalTo: locateButton.topAnchor),
+            blur.leadingAnchor.constraint(equalTo: locateButton.leadingAnchor),
+            blur.trailingAnchor.constraint(equalTo: locateButton.trailingAnchor),
+            blur.bottomAnchor.constraint(equalTo: locateButton.bottomAnchor),
+        ])
     }
 
     private func setupScanningOverlay() {
@@ -309,88 +406,281 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         ])
     }
 
-    private func setupHUD() {
-        let bounds = self.view.bounds
+    // MARK: - Phase 6 신규 HUD setup (setupHUD 분해)
 
-        // 컨테이너 (visibility 토글용)
-        hudContainerView = UIView(frame: bounds)
-        hudContainerView.isUserInteractionEnabled = false
+    private func setupHudContainer() {
+        let bounds = self.view.bounds
+        // Phase 6: PassthroughView 로 transparent 영역은 sceneView 의 더블탭 제스처에 위임.
+        // 자식 버튼(remainingStepsToggleButton 등) 은 정상 터치 수신.
+        hudContainerView = HUDPassthroughView(frame: bounds)
+        hudContainerView.isUserInteractionEnabled = true
         hudContainerView.isHidden = true
         self.view.addSubview(hudContainerView)
+    }
 
-        // 상단 목적지 pill
-        destinationPillView = UIView()
-        destinationPillView.backgroundColor = UIColor.black.withAlphaComponent(0.6)
-        destinationPillView.layer.cornerRadius = 18
-        destinationPillView.translatesAutoresizingMaskIntoConstraints = false
-        hudContainerView.addSubview(destinationPillView)
+    /// docs Phase 6 §2 — 상단 목적지 pill (높이 56pt, 좌측 36pt 원 아이콘 + 2행 텍스트).
+    private func setupDestinationPill() {
+        let pill = UIView()
+        pill.backgroundColor = UIColor(white: 0.0, alpha: 0.55)
+        pill.layer.cornerRadius = 28
+        pill.layer.masksToBounds = true
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        hudContainerView.addSubview(pill)
+        destinationPillView = pill
 
-        destinationLabel = UILabel()
-        destinationLabel.text = destinationName
-        destinationLabel.textColor = .white
-        destinationLabel.font = .systemFont(ofSize: 16, weight: .semibold)
-        destinationLabel.translatesAutoresizingMaskIntoConstraints = false
-        destinationPillView.addSubview(destinationLabel)
+        // blur 백드롭
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+        blur.translatesAutoresizingMaskIntoConstraints = false
+        blur.isUserInteractionEnabled = false
+        blur.layer.cornerRadius = 28
+        blur.layer.masksToBounds = true
+        pill.insertSubview(blur, at: 0)
 
-        // 남은 거리 라벨
-        remainingDistanceLabel = UILabel()
-        remainingDistanceLabel.text = "약 ―m"
-        remainingDistanceLabel.textColor = .white
-        remainingDistanceLabel.font = .systemFont(ofSize: 28, weight: .bold)
-        remainingDistanceLabel.textAlignment = .center
-        remainingDistanceLabel.layer.shadowColor = UIColor.black.cgColor
-        remainingDistanceLabel.layer.shadowOpacity = 0.6
-        remainingDistanceLabel.layer.shadowRadius = 4
-        remainingDistanceLabel.layer.shadowOffset = .zero
-        remainingDistanceLabel.translatesAutoresizingMaskIntoConstraints = false
-        hudContainerView.addSubview(remainingDistanceLabel)
+        // 좌측 36pt 원 (systemBlue)
+        destinationIconCircle = UIView()
+        destinationIconCircle.backgroundColor = .systemBlue
+        destinationIconCircle.layer.cornerRadius = 18
+        destinationIconCircle.layer.masksToBounds = true
+        destinationIconCircle.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(destinationIconCircle)
 
-        // 하단 안내 카드
-        instructionCardView = UIView()
-        instructionCardView.backgroundColor = UIColor.white.withAlphaComponent(0.95)
-        instructionCardView.layer.cornerRadius = 16
-        instructionCardView.layer.shadowColor = UIColor.black.cgColor
-        instructionCardView.layer.shadowOpacity = 0.15
-        instructionCardView.layer.shadowRadius = 8
-        instructionCardView.layer.shadowOffset = CGSize(width: 0, height: 2)
-        instructionCardView.translatesAutoresizingMaskIntoConstraints = false
-        hudContainerView.addSubview(instructionCardView)
+        let flagIcon = UIImageView(image: UIImage(named: "flagFill")?.withRenderingMode(.alwaysTemplate))
+        flagIcon.tintColor = .white
+        flagIcon.contentMode = .scaleAspectFit
+        flagIcon.translatesAutoresizingMaskIntoConstraints = false
+        destinationIconCircle.addSubview(flagIcon)
 
-        instructionLabel = UILabel()
-        instructionLabel.text = "경로를 계산 중입니다…"
-        instructionLabel.textColor = .darkText
-        instructionLabel.font = .systemFont(ofSize: 16, weight: .medium)
-        instructionLabel.numberOfLines = 0
-        instructionLabel.translatesAutoresizingMaskIntoConstraints = false
-        instructionCardView.addSubview(instructionLabel)
+        // 1행: "3F · 목적지"
+        destinationFloorLabel = UILabel()
+        destinationFloorLabel.text = "—F · 목적지"
+        destinationFloorLabel.textColor = UIColor.white.withAlphaComponent(0.7)
+        destinationFloorLabel.font = .systemFont(ofSize: 12, weight: .regular)
+        destinationFloorLabel.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(destinationFloorLabel)
+
+        // 2행: POI 이름
+        destinationNameLabel = UILabel()
+        destinationNameLabel.text = destinationName
+        destinationNameLabel.textColor = .white
+        destinationNameLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        destinationNameLabel.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(destinationNameLabel)
 
         let safeArea = self.view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            pill.heightAnchor.constraint(equalToConstant: 56),
+            pill.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 12),
+            // 좌측: closeButton 우측 12pt
+            pill.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 12),
+            pill.trailingAnchor.constraint(lessThanOrEqualTo: safeArea.trailingAnchor, constant: -16),
+
+            blur.topAnchor.constraint(equalTo: pill.topAnchor),
+            blur.leadingAnchor.constraint(equalTo: pill.leadingAnchor),
+            blur.trailingAnchor.constraint(equalTo: pill.trailingAnchor),
+            blur.bottomAnchor.constraint(equalTo: pill.bottomAnchor),
+
+            destinationIconCircle.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 10),
+            destinationIconCircle.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+            destinationIconCircle.widthAnchor.constraint(equalToConstant: 36),
+            destinationIconCircle.heightAnchor.constraint(equalToConstant: 36),
+
+            flagIcon.centerXAnchor.constraint(equalTo: destinationIconCircle.centerXAnchor),
+            flagIcon.centerYAnchor.constraint(equalTo: destinationIconCircle.centerYAnchor),
+            flagIcon.widthAnchor.constraint(equalToConstant: 18),
+            flagIcon.heightAnchor.constraint(equalToConstant: 18),
+
+            destinationFloorLabel.leadingAnchor.constraint(equalTo: destinationIconCircle.trailingAnchor, constant: 10),
+            destinationFloorLabel.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -16),
+            destinationFloorLabel.topAnchor.constraint(equalTo: pill.topAnchor, constant: 10),
+
+            destinationNameLabel.leadingAnchor.constraint(equalTo: destinationIconCircle.trailingAnchor, constant: 10),
+            destinationNameLabel.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -16),
+            destinationNameLabel.topAnchor.constraint(equalTo: destinationFloorLabel.bottomAnchor, constant: 2),
+        ])
+    }
+
+    /// docs Phase 6 §3 — 현재 스텝 카드 (systemBlue 배경, 56pt 아이콘 박스 + 3행 텍스트).
+    private func setupCurrentStepCard() {
+        let card = UIView()
+        card.backgroundColor = .systemBlue
+        card.layer.cornerRadius = 20
+        card.layer.shadowColor = UIColor.black.cgColor
+        card.layer.shadowOpacity = 0.25
+        card.layer.shadowRadius = 12
+        card.layer.shadowOffset = CGSize(width: 0, height: 4)
+        card.translatesAutoresizingMaskIntoConstraints = false
+        hudContainerView.addSubview(card)
+        currentStepCardView = card
+
+        // 좌측 56pt 아이콘 박스
+        currentStepIconBox = UIView()
+        currentStepIconBox.backgroundColor = UIColor.white.withAlphaComponent(0.18)
+        currentStepIconBox.layer.cornerRadius = 16
+        currentStepIconBox.layer.masksToBounds = true
+        currentStepIconBox.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(currentStepIconBox)
+
+        currentStepIconView = UIImageView(image: UIImage(named: "arrowUpThick")?.withRenderingMode(.alwaysTemplate))
+        currentStepIconView.tintColor = .white
+        currentStepIconView.contentMode = .scaleAspectFit
+        currentStepIconView.translatesAutoresizingMaskIntoConstraints = false
+        currentStepIconBox.addSubview(currentStepIconView)
+
+        // 1행: 동작 단어
+        currentStepActionLabel = UILabel()
+        currentStepActionLabel.text = "—"
+        currentStepActionLabel.textColor = UIColor.white.withAlphaComponent(0.85)
+        currentStepActionLabel.font = .systemFont(ofSize: 14, weight: .regular)
+        currentStepActionLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(currentStepActionLabel)
+
+        // 2행: 큰 거리 숫자 + m (attributedText 로 갱신됨)
+        currentStepDistanceLabel = UILabel()
+        currentStepDistanceLabel.textColor = .white
+        currentStepDistanceLabel.font = .systemFont(ofSize: 28, weight: .heavy)
+        currentStepDistanceLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(currentStepDistanceLabel)
+
+        // 3행: "약 N걸음"
+        currentStepWalkLabel = UILabel()
+        currentStepWalkLabel.text = "약 —걸음"
+        currentStepWalkLabel.textColor = UIColor.white.withAlphaComponent(0.85)
+        currentStepWalkLabel.font = .systemFont(ofSize: 13, weight: .regular)
+        currentStepWalkLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(currentStepWalkLabel)
+
+        guard let pill = destinationPillView else { return }
 
         NSLayoutConstraint.activate([
-            // pill
-            destinationPillView.centerXAnchor.constraint(equalTo: hudContainerView.centerXAnchor),
-            destinationPillView.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 16),
-            destinationPillView.heightAnchor.constraint(equalToConstant: 36),
+            card.topAnchor.constraint(equalTo: pill.bottomAnchor, constant: 16),
+            card.leadingAnchor.constraint(equalTo: hudContainerView.leadingAnchor, constant: 16),
+            card.trailingAnchor.constraint(equalTo: hudContainerView.trailingAnchor, constant: -16),
 
-            destinationLabel.leadingAnchor.constraint(equalTo: destinationPillView.leadingAnchor, constant: 16),
-            destinationLabel.trailingAnchor.constraint(equalTo: destinationPillView.trailingAnchor, constant: -16),
-            destinationLabel.topAnchor.constraint(equalTo: destinationPillView.topAnchor, constant: 8),
-            destinationLabel.bottomAnchor.constraint(equalTo: destinationPillView.bottomAnchor, constant: -8),
+            currentStepIconBox.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            currentStepIconBox.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            currentStepIconBox.widthAnchor.constraint(equalToConstant: 56),
+            currentStepIconBox.heightAnchor.constraint(equalToConstant: 56),
 
-            // 남은 거리
-            remainingDistanceLabel.centerXAnchor.constraint(equalTo: hudContainerView.centerXAnchor),
-            remainingDistanceLabel.topAnchor.constraint(equalTo: destinationPillView.bottomAnchor, constant: 12),
+            currentStepIconView.centerXAnchor.constraint(equalTo: currentStepIconBox.centerXAnchor),
+            currentStepIconView.centerYAnchor.constraint(equalTo: currentStepIconBox.centerYAnchor),
+            currentStepIconView.widthAnchor.constraint(equalToConstant: 32),
+            currentStepIconView.heightAnchor.constraint(equalToConstant: 32),
 
-            // 안내 카드
-            instructionCardView.centerXAnchor.constraint(equalTo: hudContainerView.centerXAnchor),
-            instructionCardView.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor, constant: -100),
-            instructionCardView.widthAnchor.constraint(equalTo: hudContainerView.widthAnchor, constant: -40),
+            currentStepActionLabel.leadingAnchor.constraint(equalTo: currentStepIconBox.trailingAnchor, constant: 14),
+            currentStepActionLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            currentStepActionLabel.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
 
-            instructionLabel.leadingAnchor.constraint(equalTo: instructionCardView.leadingAnchor, constant: 20),
-            instructionLabel.trailingAnchor.constraint(equalTo: instructionCardView.trailingAnchor, constant: -20),
-            instructionLabel.topAnchor.constraint(equalTo: instructionCardView.topAnchor, constant: 14),
-            instructionLabel.bottomAnchor.constraint(equalTo: instructionCardView.bottomAnchor, constant: -14),
+            currentStepDistanceLabel.leadingAnchor.constraint(equalTo: currentStepIconBox.trailingAnchor, constant: 14),
+            currentStepDistanceLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            currentStepDistanceLabel.topAnchor.constraint(equalTo: currentStepActionLabel.bottomAnchor, constant: 2),
+
+            currentStepWalkLabel.leadingAnchor.constraint(equalTo: currentStepIconBox.trailingAnchor, constant: 14),
+            currentStepWalkLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            currentStepWalkLabel.topAnchor.constraint(equalTo: currentStepDistanceLabel.bottomAnchor, constant: 2),
+            currentStepWalkLabel.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
         ])
+    }
+
+    /// docs Phase 6 §4 — "+N단계 ⌄" 펼침 버튼. 기본 isHidden = true.
+    private func setupRemainingStepsToggle() {
+        let btn = UIButton(type: .system)
+        btn.setTitle("+0단계", for: .normal)
+        btn.setTitleColor(.white, for: .normal)
+        btn.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+        let chevImage = UIImage(named: "chevronDownThick")?
+            .withRenderingMode(.alwaysTemplate)
+            .resized(to: CGSize(width: 14, height: 14))
+        btn.setImage(chevImage, for: .normal)
+        btn.tintColor = .white
+        // 텍스트 좌측, 아이콘 우측 배치
+        btn.semanticContentAttribute = .forceRightToLeft
+        btn.imageEdgeInsets = UIEdgeInsets(top: 0, left: 6, bottom: 0, right: -6)
+        btn.titleEdgeInsets = UIEdgeInsets(top: 0, left: -6, bottom: 0, right: 6)
+        btn.contentEdgeInsets = UIEdgeInsets(top: 0, left: 14, bottom: 0, right: 14)
+        btn.backgroundColor = UIColor.white.withAlphaComponent(0.12)
+        btn.layer.cornerRadius = 18
+        btn.layer.masksToBounds = true
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.isHidden = true
+        btn.addTarget(self, action: #selector(onRemainingStepsToggleTapped), for: .touchUpInside)
+
+        // blur 백드롭
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+        blur.translatesAutoresizingMaskIntoConstraints = false
+        blur.isUserInteractionEnabled = false
+        blur.layer.cornerRadius = 18
+        blur.layer.masksToBounds = true
+        btn.insertSubview(blur, at: 0)
+
+        hudContainerView.addSubview(btn)
+        remainingStepsToggleButton = btn
+
+        guard let card = currentStepCardView else { return }
+
+        NSLayoutConstraint.activate([
+            btn.topAnchor.constraint(equalTo: card.bottomAnchor, constant: 8),
+            btn.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            btn.heightAnchor.constraint(equalToConstant: 36),
+
+            blur.topAnchor.constraint(equalTo: btn.topAnchor),
+            blur.leadingAnchor.constraint(equalTo: btn.leadingAnchor),
+            blur.trailingAnchor.constraint(equalTo: btn.trailingAnchor),
+            blur.bottomAnchor.constraint(equalTo: btn.bottomAnchor),
+        ])
+    }
+
+    /// docs Phase 6 §5 — 하단 거리/시간 캡슐 (44pt 높이, blur, attributed).
+    private func setupRemainingCapsule() {
+        let capsule = UIView()
+        capsule.backgroundColor = UIColor(white: 0.0, alpha: 0.55)
+        capsule.layer.cornerRadius = 22
+        capsule.layer.masksToBounds = true
+        capsule.translatesAutoresizingMaskIntoConstraints = false
+        hudContainerView.addSubview(capsule)
+        remainingCapsuleView = capsule
+
+        // blur 백드롭
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+        blur.translatesAutoresizingMaskIntoConstraints = false
+        blur.isUserInteractionEnabled = false
+        blur.layer.cornerRadius = 22
+        blur.layer.masksToBounds = true
+        capsule.insertSubview(blur, at: 0)
+
+        remainingCapsuleLabel = UILabel()
+        remainingCapsuleLabel.text = "남은 거리 —"
+        remainingCapsuleLabel.textColor = .white
+        remainingCapsuleLabel.font = .systemFont(ofSize: 15, weight: .regular)
+        remainingCapsuleLabel.textAlignment = .center
+        remainingCapsuleLabel.translatesAutoresizingMaskIntoConstraints = false
+        capsule.addSubview(remainingCapsuleLabel)
+
+        let safeArea = self.view.safeAreaLayoutGuide
+        // 재측정 버튼 위 16pt — locateButton 은 setupRelocalizeButton 에서 생성됨
+        NSLayoutConstraint.activate([
+            capsule.heightAnchor.constraint(equalToConstant: 44),
+            capsule.centerXAnchor.constraint(equalTo: safeArea.centerXAnchor),
+            capsule.bottomAnchor.constraint(equalTo: locateButton.topAnchor, constant: -16),
+
+            blur.topAnchor.constraint(equalTo: capsule.topAnchor),
+            blur.leadingAnchor.constraint(equalTo: capsule.leadingAnchor),
+            blur.trailingAnchor.constraint(equalTo: capsule.trailingAnchor),
+            blur.bottomAnchor.constraint(equalTo: capsule.bottomAnchor),
+
+            remainingCapsuleLabel.leadingAnchor.constraint(equalTo: capsule.leadingAnchor, constant: 18),
+            remainingCapsuleLabel.trailingAnchor.constraint(equalTo: capsule.trailingAnchor, constant: -18),
+            remainingCapsuleLabel.centerYAnchor.constraint(equalTo: capsule.centerYAnchor),
+        ])
+    }
+
+    @objc private func onRemainingStepsToggleTapped() {
+        // Phase 6 비범위 — 후속 phase 에서 풍부한 step 리스트 UI 채움.
+        let sheet = UIViewController()
+        sheet.view.backgroundColor = .systemBackground
+        if let pres = sheet.sheetPresentationController {
+            pres.detents = [.medium()]
+        }
+        present(sheet, animated: true)
     }
 
     private func setupRouteCalculatingView() {
@@ -588,8 +878,9 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
 extension ARNavigationViewController: ARNavigationLogicDelegate {
 
     func updateStatus(_ message: String, color: UIColor) {
-        instructionLabel.text = message
-        instructionLabel.textColor = color == .white ? .darkText : color
+        // Phase 6: instructionLabel 은 신규 흐름에서 미사용 — 옵셔널 체이닝.
+        instructionLabel?.text = message
+        instructionLabel?.textColor = color == .white ? .darkText : color
     }
 
     func setLoading(_ loading: Bool) {
@@ -678,9 +969,136 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
     }
 
     func updateHUD(destinationName: String, remainingDistance: Float, instruction: String?) {
-        destinationLabel.text = destinationName
-        remainingDistanceLabel.text = String(format: "약 %.0fm", remainingDistance)
-        instructionLabel.text = instruction ?? "경로를 따라가세요"
+        // Phase 6: 기존 IUO 라벨들은 신규 카드 UX 에서 미사용 — 옵셔널 체이닝.
+        destinationLabel?.text = destinationName
+        remainingDistanceLabel?.text = String(format: "약 %.0fm", remainingDistance)
+        instructionLabel?.text = instruction ?? "경로를 따라가세요"
+    }
+
+    func updateNavigationStep(_ vm: NavigationStepViewModel) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            // 1. 목적지 pill
+            if let floor = vm.destinationFloorLevel {
+                self.destinationFloorLabel.text = "\(floor)F · 목적지"
+            } else {
+                self.destinationFloorLabel.text = "목적지"
+            }
+            self.destinationNameLabel.text = vm.destinationName
+
+            // 2. 현재 step 카드 — 아이콘 (Montage SVG 우선, 폴백 SF Symbol)
+            self.currentStepIconView.image = self.actionImage(for: vm.action)
+
+            // 3. 동작 한국어 라벨
+            self.currentStepActionLabel.text = self.actionLabel(for: vm.action)
+
+            // 4. 거리 attributed (큰 숫자 28 heavy + m 16 regular)
+            let distInt = max(0, Int(vm.distanceMeters.rounded()))
+            let attr = NSMutableAttributedString(
+                string: "\(distInt)",
+                attributes: [
+                    .font: UIFont.systemFont(ofSize: 28, weight: .heavy),
+                    .foregroundColor: UIColor.white,
+                ]
+            )
+            attr.append(NSAttributedString(
+                string: "m",
+                attributes: [
+                    .font: UIFont.systemFont(ofSize: 16, weight: .regular),
+                    .foregroundColor: UIColor.white,
+                ]
+            ))
+            self.currentStepDistanceLabel.attributedText = attr
+
+            // 5. 걸음 수
+            self.currentStepWalkLabel.text = "약 \(vm.approxSteps)걸음"
+
+            // 6. +N단계 가시성
+            if vm.remainingExtraStepsCount > 0 {
+                self.remainingStepsToggleButton.isHidden = false
+                self.remainingStepsToggleButton.setTitle("+\(vm.remainingExtraStepsCount)단계", for: .normal)
+            } else {
+                self.remainingStepsToggleButton.isHidden = true
+            }
+
+            // 7. 하단 거리/시간 캡슐 — attributed
+            let totalInt = max(0, Int(vm.remainingTotalMeters.rounded()))
+            let cap = NSMutableAttributedString(
+                string: "남은 거리 ",
+                attributes: [
+                    .font: UIFont.systemFont(ofSize: 15, weight: .regular),
+                    .foregroundColor: UIColor.white,
+                ]
+            )
+            cap.append(NSAttributedString(
+                string: "\(totalInt)m",
+                attributes: [
+                    .font: UIFont.systemFont(ofSize: 16, weight: .heavy),
+                    .foregroundColor: UIColor.systemBlue,
+                ]
+            ))
+            cap.append(NSAttributedString(
+                string: " | ",
+                attributes: [
+                    .font: UIFont.systemFont(ofSize: 15, weight: .regular),
+                    .foregroundColor: UIColor.white.withAlphaComponent(0.5),
+                ]
+            ))
+            cap.append(NSAttributedString(
+                string: "약 \(vm.remainingMinutes)분",
+                attributes: [
+                    .font: UIFont.systemFont(ofSize: 15, weight: .regular),
+                    .foregroundColor: UIColor.white,
+                ]
+            ))
+            self.remainingCapsuleLabel.attributedText = cap
+        }
+    }
+
+    /// NavigationActionKind → 카드 아이콘. 핸드오프 매핑(Montage SVG)을 우선 사용하고,
+    /// 매핑 표에 없는 액션은 SF Symbol 로 폴백한다.
+    private func actionImage(for action: NavigationActionKind) -> UIImage? {
+        let assetName: String?
+        let sfSymbol: String?
+        switch action {
+        case .straight:        assetName = "arrowUpThick";        sfSymbol = "arrow.up"
+        case .turnLeft:        assetName = "arrowTurnDownLeft";   sfSymbol = "arrow.turn.up.left"
+        case .turnRight:       assetName = "arrowTurnDownRight";  sfSymbol = "arrow.turn.up.right"
+        case .arrive:          assetName = "flagFill";            sfSymbol = "flag.checkered"
+        case .unknown:         assetName = "arrowUpThick";        sfSymbol = "arrow.up"
+        case .turnSlightLeft:  assetName = nil;                   sfSymbol = "arrow.up.left"
+        case .turnSlightRight: assetName = nil;                   sfSymbol = "arrow.up.right"
+        case .uturn:           assetName = nil;                   sfSymbol = "arrow.uturn.down"
+        case .stairsUp,
+             .stairsDown:      assetName = nil;                   sfSymbol = "figure.stairs"
+        case .elevator:        assetName = nil;                   sfSymbol = "arrow.up.arrow.down.square"
+        }
+        if let name = assetName, let img = UIImage(named: name) {
+            return img.withRenderingMode(.alwaysTemplate)
+        }
+        if let sf = sfSymbol {
+            let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .bold)
+            return UIImage(systemName: sf, withConfiguration: cfg)
+        }
+        return nil
+    }
+
+    /// NavigationActionKind → 한국어 라벨.
+    private func actionLabel(for action: NavigationActionKind) -> String {
+        switch action {
+        case .straight: return "직진"
+        case .turnLeft: return "좌회전"
+        case .turnRight: return "우회전"
+        case .turnSlightLeft: return "좌측 진행"
+        case .turnSlightRight: return "우측 진행"
+        case .uturn: return "유턴"
+        case .stairsUp: return "계단 (오르기)"
+        case .stairsDown: return "계단 (내려가기)"
+        case .elevator: return "엘리베이터"
+        case .arrive: return "도착"
+        case .unknown: return "진행"
+        }
     }
 
     func setHUDVisible(_ visible: Bool) {
@@ -804,6 +1222,18 @@ extension ARNavigationViewController: GuidanceDirectorDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.turnCardView.hideSlideOut()
+        }
+    }
+}
+
+// MARK: - UIImage 리사이즈 헬퍼 (Phase 6)
+
+private extension UIImage {
+    /// vector 자산을 button 표시 사이즈로 리샘플링.
+    func resized(to size: CGSize) -> UIImage {
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { _ in
+            self.draw(in: CGRect(origin: .zero, size: size))
         }
     }
 }

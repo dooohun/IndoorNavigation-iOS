@@ -2,6 +2,29 @@ import UIKit
 import ARKit
 import SceneKit
 
+// MARK: - Phase 6 UI 모델 (Step 기반 카드 UX)
+
+enum NavigationActionKind {
+    case straight
+    case turnLeft, turnRight, turnSlightLeft, turnSlightRight
+    case uturn
+    case stairsUp, stairsDown
+    case elevator
+    case arrive
+    case unknown
+}
+
+struct NavigationStepViewModel {
+    let action: NavigationActionKind
+    let distanceMeters: Double
+    let approxSteps: Int
+    let remainingTotalMeters: Double
+    let remainingMinutes: Int
+    let remainingExtraStepsCount: Int
+    let destinationFloorLevel: Int?
+    let destinationName: String
+}
+
 // MARK: - Delegate
 
 protocol ARNavigationLogicDelegate: AnyObject {
@@ -13,6 +36,7 @@ protocol ARNavigationLogicDelegate: AnyObject {
     func showScanFailed(message: String)
     func showArrivalNotification()
     func updateHUD(destinationName: String, remainingDistance: Float, instruction: String?)
+    func updateNavigationStep(_ vm: NavigationStepViewModel)
     func setHUDVisible(_ visible: Bool)
     func setLocateButtonVisible(_ visible: Bool)
     func showRouteCalculating(_ visible: Bool)
@@ -178,6 +202,17 @@ class ARNavigationLogic {
     /// trial counter — 화면 더블탭으로 측위 재시작 시 +1, 로그 prefix 용.
     private var trialNumber: Int = 0
 
+    // MARK: - Phase 6 step UI 추적 상태
+    /// 현재 사용자가 진행 중인 step index (lastPathSteps 기준).
+    /// recomputeCurrentStepIndex 가 단조 증가로 갱신.
+    private var currentStepIndex: Int = 0
+    /// processARFrame 내 1Hz throttle 용 마지막 tick 시각 (CACurrentMediaTime).
+    private var lastNavStepTickAt: TimeInterval = 0
+    /// 보행 평균 속도 (m/s) — remainingMinutes 계산. docs Phase 6.
+    private static let walkSpeedMps: Double = 1.2
+    /// 보행 평균 보폭 (m) — approxSteps 계산. docs Phase 6.
+    private static let walkStrideM: Double = 0.7
+
     /// LightGlue 매칭 엔진 — 토글 ON 시에만 init. mlpackage 미배치/load 실패 시 nil → fallback.
     // 비활성: useLightGlueMatcher=false. 인스턴스화 회피로 mlpackage 로드 비용 절감.
     private lazy var lightGlueMatcher: LightGlueMatcherEngine? = { return nil }()
@@ -252,6 +287,21 @@ class ARNavigationLogic {
     /// ARSessionDelegate.session(_:didUpdate:) 에서 매 프레임 호출.
     /// cadence 통과 시에만 extract 수행하고, DEBUG 빌드에서 디버그 오버레이로 결과 전달.
     func processARFrame(_ frame: ARFrame) {
+        // Phase 6: 1Hz throttle 로 navigation step vm 갱신 (SuperPoint 토글과 독립)
+        if !lastPathSteps.isEmpty {
+            let now = CACurrentMediaTime()
+            if now - lastNavStepTickAt >= 1.0 {
+                lastNavStepTickAt = now
+                let cam = simd_float3(frame.camera.transform.columns.3.x,
+                                      frame.camera.transform.columns.3.y,
+                                      frame.camera.transform.columns.3.z)
+                recomputeCurrentStepIndex(cameraPos: cam)
+                if let vm = makeNavigationStepViewModel() {
+                    delegate?.updateNavigationStep(vm)
+                }
+            }
+        }
+
         guard Self.useSuperPointExtractor else { return }
         guard let extractor = superPointExtractor else { return }
 
@@ -339,6 +389,8 @@ class ARNavigationLogic {
         pathNodes.forEach { $0.removeFromParentNode() }
         pathNodes = []
         lastPathSteps = []
+        currentStepIndex = 0
+        lastNavStepTickAt = 0
 
         // bundle 클리어
         localizationBundle = nil
@@ -803,6 +855,9 @@ class ARNavigationLogic {
         captureTimer = Timer.scheduledTimer(withTimeInterval: captureInterval, repeats: true) { [weak self] _ in
             self?.captureOneFrame()
         }
+
+        // Phase 6: step index 만 리셋. vm 발신은 다음 drawPathFromSteps 가 담당.
+        currentStepIndex = 0
     }
 
     // MARK: - Phase 8 추적 측위 cadence (A 트랙)
@@ -1138,6 +1193,12 @@ class ARNavigationLogic {
             pathNodes.append(seg)
         }
         print("[Path] drew \(steps.count) steps as \(arPoints.count) points + \(arPoints.count - 1) segments")
+
+        // Phase 6: 경로가 새로 그려지면 step index 리셋 + 첫 vm 즉시 발신
+        currentStepIndex = 0
+        if let vm = makeNavigationStepViewModel() {
+            delegate?.updateNavigationStep(vm)
+        }
     }
 
     /// V3 측위 + pathfinding 후 디버깅 데이터 일괄 dump.
@@ -1276,6 +1337,154 @@ class ARNavigationLogic {
                 print("[NetworkBundle] new lookup 실패: \(err) — 기존 후보 유지")
             }
         }
+    }
+
+    // MARK: - Phase 6 UI 모델
+
+    /// PathStep.instruction 문자열 + floor 변화로 NavigationActionKind 매핑.
+    /// docs phase6_ui_redesign.md Action 매핑 규칙 참조.
+    private static func navigationActionKind(from instruction: String?,
+                                             currentFloor: Int?,
+                                             nextFloor: Int?) -> NavigationActionKind {
+        let raw = (instruction ?? "").uppercased()
+
+        // STAIRS — floor 비교로 up/down 결정. floor 정보 없으면 기본 up.
+        if raw.contains("STAIRS") || raw.contains("계단") {
+            if let cf = currentFloor, let nf = nextFloor {
+                return nf > cf ? .stairsUp : .stairsDown
+            }
+            return .stairsUp
+        }
+
+        if raw.contains("ELEVATOR") || raw.contains("엘리베이터") {
+            return .elevator
+        }
+        if raw.contains("ARRIVE") || raw.contains("도착") {
+            return .arrive
+        }
+        if raw.contains("UTURN") || raw.contains("유턴") {
+            return .uturn
+        }
+        if raw.contains("SLIGHT_LEFT") {
+            return .turnSlightLeft
+        }
+        if raw.contains("SLIGHT_RIGHT") {
+            return .turnSlightRight
+        }
+        if raw.contains("TURN_LEFT") || raw.contains("좌회전") {
+            return .turnLeft
+        }
+        if raw.contains("TURN_RIGHT") || raw.contains("우회전") {
+            return .turnRight
+        }
+        if raw.contains("STRAIGHT") || raw.contains("직진") || raw.contains("GO_STRAIGHT") {
+            return .straight
+        }
+        return .unknown
+    }
+
+    /// lastPathSteps + currentStepIndex 로 NavigationStepViewModel 빌드.
+    /// 도착 step (next == nil) 이면 distance=0 + action=.arrive.
+    private func makeNavigationStepViewModel() -> NavigationStepViewModel? {
+        guard !lastPathSteps.isEmpty else { return nil }
+        let idx = max(0, min(currentStepIndex, lastPathSteps.count - 1))
+        let cur = lastPathSteps[idx]
+        let next: PathStep? = (idx + 1 < lastPathSteps.count) ? lastPathSteps[idx + 1] : nil
+
+        // 다음 step 까지 XZ 거리 (도착 시 0)
+        let dist: Double
+        if let nxt = next,
+           let curPos = cur.position, let nxtPos = nxt.position,
+           let cx = curPos.x, let cz = curPos.z,
+           let nx = nxtPos.x, let nz = nxtPos.z {
+            let dx = nx - cx
+            let dz = nz - cz
+            dist = (dx * dx + dz * dz).squareRoot()
+        } else {
+            dist = 0
+        }
+
+        let approxSteps = max(1, Int((dist / Self.walkStrideM).rounded()))
+
+        // 잔여 총 거리 — idx 부터 끝까지 인접 step 간 XZ 거리 합산
+        var remainingTotal: Double = 0
+        if idx < lastPathSteps.count - 1 {
+            for i in idx..<(lastPathSteps.count - 1) {
+                guard let a = lastPathSteps[i].position,
+                      let b = lastPathSteps[i + 1].position,
+                      let ax = a.x, let az = a.z,
+                      let bx = b.x, let bz = b.z else { continue }
+                let dx = bx - ax
+                let dz = bz - az
+                remainingTotal += (dx * dx + dz * dz).squareRoot()
+            }
+        }
+
+        let remainingMinutes = max(1, Int((remainingTotal / Self.walkSpeedMps / 60.0).rounded()))
+        let remainingExtraStepsCount = max(0, lastPathSteps.count - 1 - idx)
+        let destinationFloorLevel = lastPathSteps.last?.floorLevel
+
+        // action — 마지막 step 이면 .arrive
+        let action: NavigationActionKind
+        if next == nil {
+            action = .arrive
+        } else {
+            action = Self.navigationActionKind(
+                from: cur.instruction,
+                currentFloor: cur.floorLevel,
+                nextFloor: next?.floorLevel
+            )
+        }
+
+        return NavigationStepViewModel(
+            action: action,
+            distanceMeters: dist,
+            approxSteps: approxSteps,
+            remainingTotalMeters: remainingTotal,
+            remainingMinutes: remainingMinutes,
+            remainingExtraStepsCount: remainingExtraStepsCount,
+            destinationFloorLevel: destinationFloorLevel,
+            destinationName: self.destinationName
+        )
+    }
+
+    /// 카메라 XZ 위치와 각 step 의 AR world 좌표 거리를 비교해 가장 가까운 step 인덱스로 갱신.
+    /// localizedFloorLevel 과 같은 floor 의 step (또는 floor nil 인 step) 만 후보.
+    /// 단조 증가 — 한 번 진행한 step 으로는 되돌아가지 않는다.
+    /// TODO(phase6+): 단조 증가는 docs 미명시 — 뒤로 점프 방지를 위해 임플리멘터 보강.
+    private func recomputeCurrentStepIndex(cameraPos: simd_float3) {
+        guard !lastPathSteps.isEmpty else { return }
+        guard let arPose = matchedARPose, let pose = localizedPose else { return }
+
+        let serverPos = simd_float3(Float(pose.x ?? 0), Float(pose.y ?? 0), Float(pose.z ?? 0))
+        let quat = simd_quatf(
+            ix: Float(pose.qx ?? 0), iy: Float(pose.qy ?? 0),
+            iz: Float(pose.qz ?? 0), r: Float(pose.qw ?? 1)
+        )
+        let input = CoordinateTransformer.Input(
+            serverPosition: serverPos, serverQuaternion: quat, arCameraPose: arPose
+        )
+
+        var bestIdx: Int = currentStepIndex
+        var bestDist: Float = .greatestFiniteMagnitude
+        for (i, step) in lastPathSteps.enumerated() {
+            // floor 가드: 같은 floor 또는 floor 정보 nil 인 step만 후보
+            if let stepFloor = step.floorLevel, let curFloor = localizedFloorLevel,
+               stepFloor != curFloor { continue }
+            guard let pos = step.position,
+                  let sx = pos.x, let sy = pos.y, let sz = pos.z else { continue }
+            let serverPoint = simd_float3(Float(sx), Float(sy), Float(sz))
+            let arPoint = CoordinateTransformer.transform(serverPoint: serverPoint, input: input)
+            let dx = cameraPos.x - arPoint.x
+            let dz = cameraPos.z - arPoint.z
+            let d = sqrt(dx * dx + dz * dz)
+            if d < bestDist {
+                bestDist = d
+                bestIdx = i
+            }
+        }
+        // 단조 증가 — 뒤로 점프 방지
+        currentStepIndex = max(currentStepIndex, bestIdx)
     }
 
     // MARK: - 헬퍼
