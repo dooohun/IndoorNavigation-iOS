@@ -3,41 +3,48 @@ import Foundation
 
 struct CoordinateTransformer {
 
-    // 디버그 테스트: portrait 에서 path 가 90° 회전된 채 렌더되는 문제 진단용.
-    // R_z(-π/2) (= R_z(3π/2)) — 카메라 sensor frame Z 축 기준 90° CW 회전. (X→-Y, Y→X)
-    // hand-calc 상 직진 + 좌회전 끝 패턴 예상 부호.
-    //
-    // 기존 (이전 운영값):
-    //   ROS(x=forward, y=left, z=up) → ARKit(x=right, y=up, z=back)
-    //   row-major:
-    //     [ 0  -1   0   0 ]
-    //     [ 0   0   1   0 ]
-    //     [-1   0   0   0 ]
-    //     [ 0   0   0   1 ]
-    static let rtabMapToARKit: simd_float4x4 = simd_float4x4(
-        simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(0, 0, 1))
-    )
+    /// OpenCV sensor frame (X right, Y down, Z forward) → ARKit camera frame (X right, Y up, Z back).
+    /// Y·Z 부호 flip = diag(1, -1, -1, 1). det = +1 (X축 기준 180° 회전).
+    static let openCVToARKit: simd_float4x4 =
+        simd_float4x4(diagonal: SIMD4<Float>(1, -1, -1, 1))
+
+    /// RTABMap world (X forward, Y left, Z up) → ARKit world axes (X right, Y up, Z back).
+    /// 컨벤션 문서의 정적 frame 변환:
+    ///   ARKit X = -RTAB Y, ARKit Y = RTAB Z, ARKit Z = -RTAB X
+    /// position 좌표 (translation, path point) 에만 적용. quat 은 OpenCV camera frame 처리 별도.
+    static let rtabWorldToARKitWorld: simd_float3x3 = simd_float3x3(rows: [
+        SIMD3<Float>( 0, -1,  0),
+        SIMD3<Float>( 0,  0,  1),
+        SIMD3<Float>(-1,  0,  0)
+    ])
 
     struct Input {
-        let serverPosition: simd_float3     // localize (x, y, z)
-        let serverQuaternion: simd_quatf    // localize (qx, qy, qz, qw)
-        let arCameraPose: simd_float4x4     // matchedARPose
+        /// camera position in RTABMap world (X forward, Y left, Z up)
+        let serverPosition: simd_float3
+        /// W2C = R_camera_from_world. simd_float4x4(quat.inverse) 가 R_world_from_camera.
+        let serverQuaternion: simd_quatf
+        /// ARKit world ← camera (frame.camera.transform 시점값)
+        let arCameraPose: simd_float4x4
     }
 
-    /// 서버 좌표(RTAB-Map) → ARKit 월드 좌표 변환
+    /// 서버 좌표(RTAB-Map world) → ARKit world 변환.
     ///
-    /// 서버 quaternion 은 R_camera_from_world (W2C). SE(3) 조립 시 inverse 사용해 R_world_from_camera 로.
+    /// 분리 처리:
+    /// - position (serverPosition, serverPoint) : rtabWorldToARKitWorld 정적 행렬로 RTAB → ARKit world axes
+    /// - quat (serverQuaternion) : OpenCV camera frame → openCVToARKit 적용
+    ///
+    /// p_ARKit_world = arCameraPose · openCVToARKit · T_W_from_C^{-1} · p_arkitAxes
+    /// - p_arkitAxes = rtabWorldToARKitWorld · p_RTAB
+    /// - T_W_from_C : [R_W_from_C | t_arkitAxes; 0 0 0 1]  (translation 도 ARKit axes 로 변환됨)
     static func transform(serverPoint: simd_float3, input: Input) -> simd_float3 {
-        var rtabCameraPose = simd_float4x4(input.serverQuaternion.inverse)
-        rtabCameraPose.columns.3 = simd_float4(
-            input.serverPosition.x,
-            input.serverPosition.y,
-            input.serverPosition.z,
-            1
-        )
+        let t_arkitAxes = rtabWorldToARKitWorld * input.serverPosition
+        let p_arkitAxes = rtabWorldToARKitWorld * serverPoint
 
-        let W = input.arCameraPose * rtabMapToARKit * rtabCameraPose.inverse
-        let point = simd_float4(serverPoint.x, serverPoint.y, serverPoint.z, 1)
+        var T_W_from_C = simd_float4x4(input.serverQuaternion.inverse)
+        T_W_from_C.columns.3 = simd_float4(t_arkitAxes.x, t_arkitAxes.y, t_arkitAxes.z, 1)
+
+        let W = input.arCameraPose * openCVToARKit * T_W_from_C.inverse
+        let point = simd_float4(p_arkitAxes.x, p_arkitAxes.y, p_arkitAxes.z, 1)
         let result = W * point
 
         return simd_float3(result.x, result.y, result.z)
