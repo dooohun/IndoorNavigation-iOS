@@ -147,12 +147,13 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     private func setupCloseButton() {
         // Phase 6: 좌상단 원형 X 버튼 (44pt, blur, xmark 18pt semibold)
         closeButton = UIButton(type: .system)
-        let assetIcon = UIImage(named: "closeThick")?
-            .withRenderingMode(.alwaysTemplate)
-            .resized(to: CGSize(width: 18, height: 18))
+        let assetIcon = UIImage(named: "closeThick")?.withRenderingMode(.alwaysTemplate)
         let fallbackConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
-        let icon = assetIcon ?? UIImage(systemName: "xmark", withConfiguration: fallbackConfig)
+        let fallback = UIImage(systemName: "xmark", withConfiguration: fallbackConfig)
+        let icon = assetIcon ?? fallback
         closeButton.setImage(icon, for: .normal)
+        closeButton.imageView?.contentMode = .scaleAspectFit
+        closeButton.imageEdgeInsets = UIEdgeInsets(top: 11, left: 11, bottom: 11, right: 11)
         closeButton.tintColor = .white
         closeButton.backgroundColor = UIColor(white: 0.0, alpha: 0.45)
         closeButton.layer.cornerRadius = 22
@@ -196,12 +197,12 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         locateButton.setTitle("주변 스캔", for: .normal)
         locateButton.setTitleColor(.white, for: .normal)
         locateButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
-        let assetIcon = UIImage(named: "compass")?
-            .withRenderingMode(.alwaysTemplate)
-            .resized(to: CGSize(width: 20, height: 20))
-        let fallbackConfig = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
-        let icon = assetIcon ?? UIImage(systemName: "viewfinder", withConfiguration: fallbackConfig)
+        let assetIcon = UIImage(named: "scan")?.withRenderingMode(.alwaysTemplate)
+        let fallbackConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+        let fallback = UIImage(systemName: "viewfinder", withConfiguration: fallbackConfig)
+        let icon = assetIcon ?? fallback
         locateButton.setImage(icon, for: .normal)
+        locateButton.imageView?.contentMode = .scaleAspectFit
         locateButton.tintColor = .white
         locateButton.imageEdgeInsets = UIEdgeInsets(top: 0, left: -6, bottom: 0, right: 6)
         locateButton.titleEdgeInsets = UIEdgeInsets(top: 0, left: 6, bottom: 0, right: -6)
