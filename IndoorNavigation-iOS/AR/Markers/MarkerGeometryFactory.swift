@@ -11,6 +11,8 @@ enum MarkerGeometryFactory {
 
     private static var distanceTextureCache: [Int: CGImage] = [:]
     private static var cachedNextTexture: CGImage?
+    private static var cachedElevatorTexture: CGImage?
+    private static var cachedStairsTexture: CGImage?
     private static let textureCacheLock = NSLock()
 
     // MARK: - 다이아몬드 본체
@@ -245,5 +247,203 @@ enum MarkerGeometryFactory {
             textureCacheLock.unlock()
         }
         return cg
+    }
+
+    // MARK: - 한글 라벨 텍스처 (Elevator/Stairs 중앙)
+
+    /// "엘리베이터" — 한글 5자, initial fontSize 100pt. 폭 78% 초과 시 4pt 단위 축소 fitter (사양 §2-4).
+    static func makeElevatorTextTexture() -> CGImage? {
+        textureCacheLock.lock()
+        if let cached = cachedElevatorTexture {
+            textureCacheLock.unlock()
+            return cached
+        }
+        textureCacheLock.unlock()
+
+        let cg = makeKoreanLabelTexture(text: "엘리베이터", initialFontSize: 100)
+        if let cg = cg {
+            textureCacheLock.lock()
+            cachedElevatorTexture = cg
+            textureCacheLock.unlock()
+        }
+        return cg
+    }
+
+    /// "계단" — 한글 2자, initial fontSize 175pt (DistanceMarker "21m" 스케일 ≈ 34%, 사양 §2-4).
+    static func makeStairsTextTexture() -> CGImage? {
+        textureCacheLock.lock()
+        if let cached = cachedStairsTexture {
+            textureCacheLock.unlock()
+            return cached
+        }
+        textureCacheLock.unlock()
+
+        let cg = makeKoreanLabelTexture(text: "계단", initialFontSize: 175)
+        if let cg = cg {
+            textureCacheLock.lock()
+            cachedStairsTexture = cg
+            textureCacheLock.unlock()
+        }
+        return cg
+    }
+
+    /// 한글 라벨 공통 렌더러. 512² 캔버스, AppleSDGothicNeo-Bold → systemFont(.heavy) 폴백.
+    /// 너비 > 캔버스 폭 78% (= 399.4pt) 면 fontSize 를 4pt 단위로 축소 (사양 §2-4 fitter, 하한 24pt).
+    /// 그림자: y-offset 5, blur 14, rgba(0,30,90,0.35) — Next 텍스처 패턴.
+    private static func makeKoreanLabelTexture(text: String, initialFontSize: CGFloat) -> CGImage? {
+        let size = CGSize(width: 512, height: 512)
+        let maxWidth: CGFloat = size.width * 0.78  // 399.4
+
+        // 폰트 선택 헬퍼: AppleSDGothicNeo-Bold 우선, nil 시 systemFont(.heavy) 폴백.
+        func font(for pt: CGFloat) -> UIFont {
+            if let f = UIFont(name: "AppleSDGothicNeo-Bold", size: pt) {
+                return f
+            }
+            return UIFont.systemFont(ofSize: pt, weight: .heavy)
+        }
+
+        // fitter: 측정 → 폭 초과 시 4pt 단위 축소 (하한 24pt)
+        var fontSize: CGFloat = initialFontSize
+        var fittedFont = font(for: fontSize)
+        let nsText = text as NSString
+        while fontSize > 24 {
+            let attrs: [NSAttributedString.Key: Any] = [.font: fittedFont]
+            let w = nsText.size(withAttributes: attrs).width
+            if w <= maxWidth { break }
+            fontSize -= 4
+            fittedFont = font(for: fontSize)
+        }
+
+        let renderer = UIGraphicsImageRenderer(size: size)
+        let img = renderer.image { ctx in
+            let cg = ctx.cgContext
+            cg.setShadow(
+                offset: CGSize(width: 0, height: 5),
+                blur: 14,
+                color: UIColor(red: 0, green: 30/255, blue: 90/255, alpha: 0.35).cgColor
+            )
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: fittedFont,
+                .foregroundColor: UIColor.white
+            ]
+            let textSize = nsText.size(withAttributes: attrs)
+            let drawAt = CGPoint(
+                x: (size.width - textSize.width) / 2.0,
+                y: (size.height - textSize.height) / 2.0
+            )
+            nsText.draw(at: drawAt, withAttributes: attrs)
+        }
+        return img.cgImage
+    }
+
+    // MARK: - DestinationPin 본체
+
+    /// 빨강 지도 핀 형상 (사양 §2-3). 본체폭:외곽:두께 = 100:6:28.
+    /// 구성: 흰 outer shell + 빨강 inner (bulb 중심에 hole through-cut, EO fill rule).
+    /// size 는 본체 폭 (m). 높이 ≈ size * 1.56, bulb 반지름 ≈ size * 0.38, hole 반지름 ≈ bulb * 0.44.
+    /// tip 이 노드 원점 y=0 에 오도록 평행이동 (배치 직관: worldPosition 이 핀 끝점이 됨).
+    static func makeDestinationPinBody(size: CGFloat) -> SCNNode {
+        let depth: CGFloat = size * 0.28
+        let borderFrac: CGFloat = 0.06
+        let innerSize: CGFloat = size * (1.0 - borderFrac)
+        let innerDepth: CGFloat = depth * 1.04  // inner 가 outer 보다 약간 앞으로
+
+        let group = SCNNode()
+        group.name = "destinationPinBody"
+
+        // outer shell (흰)
+        let outerShape = destinationPinPath(size: size, holeRadius: 0)  // outer: hole 없음
+        let outerGeo = SCNShape(path: outerShape, extrusionDepth: depth)
+        outerGeo.chamferRadius = 0
+        let outerMat = SCNMaterial()
+        outerMat.lightingModel = .physicallyBased
+        outerMat.diffuse.contents = UIColor.white
+        outerMat.roughness.contents = 0.40
+        outerMat.metalness.contents = 0.0
+        outerMat.clearCoat.contents = 0.55
+        outerMat.clearCoatRoughness.contents = 0.22
+        outerMat.isDoubleSided = true
+        outerGeo.materials = [outerMat]
+        let outerNode = SCNNode(geometry: outerGeo)
+        outerNode.position = SCNVector3(0, 0, Float(-depth / 2))
+        group.addChildNode(outerNode)
+
+        // inner (빨강 #FF2D2D) — bulb 중심에 hole (반지름 = bulbR * 0.44) 관통
+        let innerBulbR: CGFloat = innerSize * 0.38
+        let innerHoleR: CGFloat = innerBulbR * 0.44
+        let innerShape = destinationPinPath(size: innerSize, holeRadius: innerHoleR)
+        innerShape.usesEvenOddFillRule = true
+        let innerGeo = SCNShape(path: innerShape, extrusionDepth: innerDepth)
+        innerGeo.chamferRadius = 0
+        let innerMat = SCNMaterial()
+        innerMat.lightingModel = .physicallyBased
+        innerMat.diffuse.contents = UIColor(red: 0xFF/255.0, green: 0x2D/255.0, blue: 0x2D/255.0, alpha: 1.0)
+        innerMat.roughness.contents = 0.40
+        innerMat.metalness.contents = 0.0
+        innerMat.clearCoat.contents = 0.55
+        innerMat.clearCoatRoughness.contents = 0.22
+        innerMat.isDoubleSided = true
+        innerGeo.materials = [innerMat]
+        let innerNode = SCNNode(geometry: innerGeo)
+        // 다이아몬드 inner 패턴: 살짝 앞쪽(+z)으로 돌출
+        innerNode.position = SCNVector3(0, 0, Float(-innerDepth / 2 + depth * 0.04))
+        group.addChildNode(innerNode)
+
+        // tip 이 노드 원점 y=0 에 오도록 평행이동.
+        // pinHeight = size * 1.56, bulbCenter.y = pinHeight * 0.20, tip.y = bulbCenter.y - pinHeight * 0.65.
+        // path local 에서 tip.y = size * 1.56 * (0.20 - 0.65) = size * 1.56 * -0.45 = -size * 0.702
+        // → group.position.y 로 보정해 노드 원점 y=0 이 tip 위치가 되도록.
+        let pinHeight: CGFloat = size * 1.56
+        let tipLocalY: CGFloat = pinHeight * 0.20 - pinHeight * 0.65  // = -pinHeight * 0.45
+        group.position = SCNVector3(0, Float(-tipLocalY), 0)
+        return group
+    }
+
+    /// DestinationPin path (지도 핀 실루엣). bulb 위 반원 + 좌우 quadCurve 가 tip 으로 수렴.
+    /// holeRadius > 0 이면 bulb 중심에 추가 원을 그려 EO fill rule 로 관통 처리.
+    /// 비율: pinHeight = size * 1.56, bulbR = size * 0.38, bulbCenter.y = pinHeight * 0.20,
+    ///        tip.y = bulbCenter.y - pinHeight * 0.65.
+    private static func destinationPinPath(size: CGFloat, holeRadius: CGFloat) -> UIBezierPath {
+        let pinHeight: CGFloat = size * 1.56
+        let bulbR: CGFloat = size * 0.38
+        let bulbCenter = CGPoint(x: 0, y: pinHeight * 0.20)
+        let tip = CGPoint(x: 0, y: bulbCenter.y - pinHeight * 0.65)
+        let leftTangent = CGPoint(x: -bulbR, y: bulbCenter.y)
+        let rightTangent = CGPoint(x: bulbR, y: bulbCenter.y)
+
+        let path = UIBezierPath()
+        // bulb 위 반원: leftTangent → rightTangent (UIBezierPath 의 flipped y 좌표계 주의 — clockwise 토글로 처리)
+        path.move(to: leftTangent)
+        path.addArc(
+            withCenter: bulbCenter,
+            radius: bulbR,
+            startAngle: .pi,
+            endAngle: 0,
+            clockwise: false
+        )
+        // 오른쪽 곡선: rightTangent → tip (control 포인트: x = bulbR * 0.55, y = bulbCenter.y - bulbR * 0.85)
+        path.addQuadCurve(
+            to: tip,
+            controlPoint: CGPoint(x: bulbR * 0.55, y: bulbCenter.y - bulbR * 0.85)
+        )
+        // 왼쪽 곡선: tip → leftTangent
+        path.addQuadCurve(
+            to: leftTangent,
+            controlPoint: CGPoint(x: -bulbR * 0.55, y: bulbCenter.y - bulbR * 0.85)
+        )
+        path.close()
+
+        // hole: bulb 중심에 정원 추가 (EO fill rule 로 관통)
+        if holeRadius > 0 {
+            let holePath = UIBezierPath(
+                arcCenter: bulbCenter,
+                radius: holeRadius,
+                startAngle: 0,
+                endAngle: .pi * 2,
+                clockwise: true
+            )
+            path.append(holePath)
+        }
+        return path
     }
 }

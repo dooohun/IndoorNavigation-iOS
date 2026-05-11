@@ -1613,15 +1613,19 @@ class ARNavigationLogic {
     }
 
     // MARK: - AR 마커 후보 발신 (사양 §3)
-    /// 1Hz tick 마다 호출. DistanceMarker / NextArrow 후보 1~2개를 단일 ARMarkerNode 리스트로 발신.
-    /// 후보 선택 규칙:
-    ///   - turn step (좌/우/살짝좌/살짝우) 이 `currentStepIndex` 이후에 존재하면 그 step 좌표를 .nextTurn 으로 발신.
-    ///   - 그 외 (turn 없음 / 마지막 도착 step) → trackingKeyframeCandidates.last 좌표를 .distance 로 발신.
+    /// 1Hz tick 마다 호출. 후보 4분기 누적 후 controller `pickDesired` 가 우선순위 적용.
+    /// 후보 분기:
+    ///   0) Destination — 마지막 step (사양 §2-3) → controller 가 3m 이내일 때만 표시.
+    ///   1) Elevator/Stairs — currentStepIndex 부터 첫 floor-transition step (사양 §2-4).
+    ///   2) NextArrow — currentStepIndex 이후 첫 turn step.
+    ///   3) Distance — trackingKeyframeCandidates.last (목적지 쪽 keyframe).
     /// kind 의 meters 값은 controller 가 raw 거리로 재계산하므로 round(d) 로 채워 보낸다.
-    /// 카메라 ↔ marker XZ 거리 50m 초과시 hidden 후보로 만들지 않고 빈 배열 반환 (controller 가 정리).
+    /// 카메라 ↔ marker XZ 거리 50m 초과면 해당 후보 누락 (controller 가 정리).
     private func makeActiveMarkerList(cameraPos: simd_float3) -> [ARMarkerNode] {
-        guard let arPose = matchedARPose, let pose = localizedPose else { return [] }
-        guard !lastPathSteps.isEmpty else { return [] }
+        var candidates: [ARMarkerNode] = []
+
+        guard let arPose = matchedARPose, let pose = localizedPose else { return candidates }
+        guard !lastPathSteps.isEmpty else { return candidates }
 
         let serverPos = simd_float3(Float(pose.x ?? 0), Float(pose.y ?? 0), Float(pose.z ?? 0))
         let quat = simd_quatf(
@@ -1635,36 +1639,94 @@ class ARNavigationLogic {
         // 사용자 시선 가까이로 띄움 (turn arrow 와 동일 패턴)
         let markerY = floorY + 1.0
 
-        // 1) NextArrow 후보 — currentStepIndex 이후 첫 turn step
         let lastIdx = lastPathSteps.count - 1
         let startIdx = max(0, min(currentStepIndex, lastIdx))
-        for i in startIdx...lastIdx {
-            let kind = Self.navigationActionKind(steps: lastPathSteps, at: i)
-            let dir: TurnDirection?
-            switch kind {
-            case .turnLeft, .turnSlightLeft:   dir = .left
-            case .turnRight, .turnSlightRight: dir = .right
-            case .uturn:                        dir = .uTurn  // controller 가 hidden 처리
-            default:                            dir = nil
-            }
-            guard let direction = dir else { continue }
-            guard let p = lastPathSteps[i].position,
-                  let sx = p.x, let sy = p.y, let sz = p.z else { return [] }
+
+        // 0) Destination — 마지막 step
+        if let last = lastPathSteps.last,
+           let p = last.position,
+           let sx = p.x, let sy = p.y, let sz = p.z {
             let serverPoint = simd_float3(Float(sx), Float(sy), Float(sz))
             let arPoint = CoordinateTransformer.transform(serverPoint: serverPoint, input: input)
             let worldPos = simd_float3(arPoint.x, markerY, arPoint.z)
             let dx = cameraPos.x - worldPos.x
             let dz = cameraPos.z - worldPos.z
             let d = sqrt(dx * dx + dz * dz)
-            if d > 50.0 { return [] }
-            // turn step 발견 — NextArrow 후보 단일 발신 (controller 가 거리 임계로 distance/nextTurn 결정).
-            let id = "step_\(i)"
-            // 거리 50m 이하: 항상 발신. controller 가 d>10 이면 distance 로, d≤10 이면 nextTurn 으로 결정.
-            // controller 가 raw kind 의 direction 을 신뢰하므로 nextTurn 으로 발신.
-            return [ARMarkerNode(id: id, worldPosition: worldPos, kind: .nextTurn(direction: direction))]
+            if d <= 50.0 {
+                candidates.append(ARMarkerNode(
+                    id: "destination",
+                    worldPosition: worldPos,
+                    kind: .destination
+                ))
+            }
         }
 
-        // 2) turn step 없음 → DistanceMarker 후보 (trackingKeyframeCandidates.last → 목적지 쪽 keyframe)
+        // 1) Elevator/Stairs — currentStepIndex 부터 첫 floor-transition step (가장 가까운 1개만)
+        if startIdx <= lastIdx {
+            for i in startIdx...lastIdx {
+                let actionKind = Self.navigationActionKind(steps: lastPathSteps, at: i)
+                guard actionKind == .elevator || actionKind == .stairsUp || actionKind == .stairsDown else { continue }
+                guard let p = lastPathSteps[i].position,
+                      let sx = p.x, let sy = p.y, let sz = p.z else { continue }
+                let serverPoint = simd_float3(Float(sx), Float(sy), Float(sz))
+                let arPoint = CoordinateTransformer.transform(serverPoint: serverPoint, input: input)
+                let worldPos = simd_float3(arPoint.x, markerY, arPoint.z)
+                let dx = cameraPos.x - worldPos.x
+                let dz = cameraPos.z - worldPos.z
+                let d = sqrt(dx * dx + dz * dz)
+                if d > 50.0 { break }
+                // instruction 키워드로 elevator/stairs 결정 (서버 instruction 우선, fallback actionKind)
+                let instr = lastPathSteps[i].instruction ?? ""
+                let upper = instr.uppercased()
+                let markerKind: MarkerKind
+                if upper.contains("ELEVATOR") || instr.contains("엘리베이터") {
+                    markerKind = .elevator
+                } else if upper.contains("STAIRS") || instr.contains("계단") || actionKind == .stairsUp || actionKind == .stairsDown {
+                    markerKind = .stairs
+                } else {
+                    markerKind = .stairs
+                }
+                candidates.append(ARMarkerNode(
+                    id: "floor_\(i)",
+                    worldPosition: worldPos,
+                    kind: markerKind
+                ))
+                break
+            }
+        }
+
+        // 2) NextArrow — currentStepIndex 이후 첫 turn step
+        if startIdx <= lastIdx {
+            for i in startIdx...lastIdx {
+                let kind = Self.navigationActionKind(steps: lastPathSteps, at: i)
+                let dir: TurnDirection?
+                switch kind {
+                case .turnLeft, .turnSlightLeft:   dir = .left
+                case .turnRight, .turnSlightRight: dir = .right
+                case .uturn:                        dir = .uTurn  // controller 가 hidden 처리
+                default:                            dir = nil
+                }
+                guard let direction = dir else { continue }
+                guard let p = lastPathSteps[i].position,
+                      let sx = p.x, let sy = p.y, let sz = p.z else { break }
+                let serverPoint = simd_float3(Float(sx), Float(sy), Float(sz))
+                let arPoint = CoordinateTransformer.transform(serverPoint: serverPoint, input: input)
+                let worldPos = simd_float3(arPoint.x, markerY, arPoint.z)
+                let dx = cameraPos.x - worldPos.x
+                let dz = cameraPos.z - worldPos.z
+                let d = sqrt(dx * dx + dz * dz)
+                if d > 50.0 { break }
+                let id = "step_\(i)"
+                candidates.append(ARMarkerNode(
+                    id: id,
+                    worldPosition: worldPos,
+                    kind: .nextTurn(direction: direction)
+                ))
+                break
+            }
+        }
+
+        // 3) Distance — trackingKeyframeCandidates.last (목적지 쪽 keyframe)
         if let lastKf = trackingKeyframeCandidates.last {
             let kfTr = lastKf.pose4x4
             let kfPos = simd_float3(Float(kfTr[0][3]), Float(kfTr[1][3]), Float(kfTr[2][3]))
@@ -1673,12 +1735,17 @@ class ARNavigationLogic {
             let dx = cameraPos.x - worldPos.x
             let dz = cameraPos.z - worldPos.z
             let d = sqrt(dx * dx + dz * dz)
-            if d > 50.0 { return [] }
-            let id = "kf_\(lastKf.index)"
-            return [ARMarkerNode(id: id, worldPosition: worldPos, kind: .distance(meters: Int(d.rounded())))]
+            if d <= 50.0 {
+                let id = "kf_\(lastKf.index)"
+                candidates.append(ARMarkerNode(
+                    id: id,
+                    worldPosition: worldPos,
+                    kind: .distance(meters: Int(d.rounded()))
+                ))
+            }
         }
 
-        return []
+        return candidates
     }
 
     /// 시맨틱: `currentStepIndex` 는 "다음에 도달해야 할 step".
@@ -1809,6 +1876,7 @@ class ARNavigationLogic {
     /// `currentStepIndex` advance: 카메라가 target step 의 advanceThreshold 이내에 들어오면 +1.
     /// while 루프로 한 tick 에 여러 step 을 한꺼번에 통과 가능 (시작점 근처에서 step[0] 즉시 통과 등).
     /// localizedFloorLevel 과 다른 floor step 은 한 칸씩 그냥 advance (층 전환 모달이 별도 처리).
+    // destination/elevator/stairs 마커는 본 로직의 advance 가드(다른 floor 의 step 은 자동 통과, 도착 step 은 lastIdx 정체) 로 자연스럽게 유지/교체된다.
     private func recomputeCurrentStepIndex(cameraPos: simd_float3) {
         guard !lastPathSteps.isEmpty else { return }
         guard let arPose = matchedARPose, let pose = localizedPose else { return }

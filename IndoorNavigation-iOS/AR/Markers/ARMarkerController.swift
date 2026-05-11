@@ -77,7 +77,7 @@ final class ARMarkerController {
             // 0.5s fadeOut 후 정리. 새 마커 enter 는 다음 tick 의 다른 후보가 담당.
             removeCurrentIfAny()
             return
-        case .distance, .nextTurn:
+        case .distance, .nextTurn, .elevator, .stairs, .destination:
             applyOrSwap(
                 desiredId: desired.id,
                 desiredKind: resolvedKind,
@@ -179,17 +179,43 @@ final class ARMarkerController {
 
     /// 후보 중 우선 마커 선택.
     /// 단일 마커 정책 — 후보가 여러 개여도 controller 가 1개만 표시.
-    /// nextTurn 후보 우선 (회전 직전이라는 강한 신호), 없으면 distance.
+    /// 우선순위 (사양 §2-3 / §2-4):
+    ///   1) destination — 3m 이내일 때만 최우선 (최종 목적지 도착 직전 신호)
+    ///   2) nextTurn — 회전 직전 강한 신호
+    ///   3) elevator — 층 이동 노드
+    ///   4) stairs — 층 이동 노드
+    ///   5) distance — 일반 거리 마커
     private func pickDesired(from candidates: [ARMarkerNode], cameraPos: simd_float3) -> ARMarkerNode? {
         if candidates.isEmpty { return nil }
-        let nextTurn = candidates.first { c in
+        // 1) destination (3m 이내일 때만 최우선)
+        if let dst = candidates.first(where: { c in
+            if case .destination = c.kind { return true } else { return false }
+        }) {
+            let d = horizontalDistance(from: cameraPos, to: dst.worldPosition)
+            if d <= 3.0 { return dst }
+        }
+        // 2) nextTurn
+        if let nt = candidates.first(where: { c in
             if case .nextTurn = c.kind { return true } else { return false }
+        }) {
+            return nt
         }
-        if let nt = nextTurn { return nt }
-        let dist = candidates.first { c in
+        // 3) elevator
+        if let ev = candidates.first(where: { c in
+            if case .elevator = c.kind { return true } else { return false }
+        }) {
+            return ev
+        }
+        // 4) stairs
+        if let st = candidates.first(where: { c in
+            if case .stairs = c.kind { return true } else { return false }
+        }) {
+            return st
+        }
+        // 5) distance
+        return candidates.first(where: { c in
             if case .distance = c.kind { return true } else { return false }
-        }
-        return dist
+        })
     }
 
     /// 거리 + raw kind + 방향성 → 실제 표시 kind. 사양 §3 상태 전이 매핑 + 인계 시점 B+D 보정.
@@ -204,21 +230,34 @@ final class ARMarkerController {
     /// 노이즈로 부호가 흔들릴 수 있으나 통과 직후엔 명확히 양수가 되므로 안정적.
     private func resolveKind(rawKind: MarkerKind, distance: Float, markerBehind: Bool) -> MarkerKind {
         if distance > 50.0 { return .hidden }
-        // B + D: 3m 이내 + 사용자가 마커 등진 상태일 때만 passed. 정면 3m 안에 있어도 아직 통과 전.
-        if distance <= 3.0 && markerBehind { return .passed }
 
         switch rawKind {
+        case .destination:
+            // 사양 §3: 3m 이내일 때만 표시. 통과해도 유지 (passed 처리 X — 도착지 인식 유지).
+            return distance > 3.0 ? .hidden : .destination
+
+        case .elevator, .stairs:
+            // 사양 §2-4: DistanceMarker 와 동일 거리 임계. 단 통과 처리 X
+            // (층 전환 시 logic 의 advance 가드가 자동으로 노드 교체).
+            return rawKind
+
         case .nextTurn(let dir):
             // uTurn 입력은 hidden (사양: NextArrow 는 회전(좌/우) 전용).
             if dir == .uTurn { return .hidden }
+            // B + D: 3m 이내 + 사용자가 마커 등진 상태일 때만 passed.
+            if distance <= 3.0 && markerBehind { return .passed }
             // 사양 §3: 10m 초과면 distance 강등 (같은 worldPos 에서 DistanceMarker 로 표시).
             if distance > 10.0 {
                 return .distance(meters: Int(distance.rounded()))
             }
             return rawKind
+
         case .distance:
+            // B + D: 3m 이내 + 사용자가 마커 등진 상태일 때만 passed.
+            if distance <= 3.0 && markerBehind { return .passed }
             // 거리 갱신은 controller 가 raw distance 로 덮어씀 (round).
             return .distance(meters: Int(distance.rounded()))
+
         case .hidden, .passed:
             return rawKind
         }
@@ -228,6 +267,9 @@ final class ARMarkerController {
         switch (a, b) {
         case (.distance, .distance): return true
         case (.nextTurn(let da), .nextTurn(let db)): return da == db
+        case (.elevator, .elevator): return true
+        case (.stairs, .stairs): return true
+        case (.destination, .destination): return true
         default: return false
         }
     }
@@ -240,6 +282,12 @@ final class ARMarkerController {
             // .left / .right 만 빌드 (uTurn 은 resolveKind 에서 hidden 처리됨 — 방어적 fallback).
             let direction: TurnDirection = (dir == .left) ? .left : .right
             return ARMarkerNodeBuilder.buildNextArrow(direction: direction)
+        case .elevator:
+            return ARMarkerNodeBuilder.buildElevatorMarker()
+        case .stairs:
+            return ARMarkerNodeBuilder.buildStairsMarker()
+        case .destination:
+            return ARMarkerNodeBuilder.buildDestinationPin()
         case .hidden, .passed:
             return SCNNode()
         }

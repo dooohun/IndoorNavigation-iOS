@@ -2,7 +2,7 @@ import UIKit
 import SceneKit
 
 // MARK: - 마커 SCNNode 빌더
-// 사양 §2 / §4 (AR_MARKER_3D.md). DistanceMarker / NextArrow 두 빌더 + 공통 부유 모션.
+// 사양 §2 / §4 (AR_MARKER_3D.md). DistanceMarker / NextArrow / Elevator / Stairs / DestinationPin 다섯 빌더 + 공통 부유 모션.
 // caller (ARMarkerController) 가 노드 트리에 추가하고 scale/position/transparency 만 조절한다.
 //
 // 노드 계층 (사용자 요청: 글씨 항상 사용자 향함 — Y축 빌보드 제약 적용):
@@ -137,6 +137,105 @@ enum ARMarkerNodeBuilder {
 
             attachSequentialBlink(to: chev, index: i)
         }
+
+        attachFloatingMotion(to: motionNode)
+        return root
+    }
+
+    // MARK: - ElevatorMarker
+
+    /// 다이아몬드 본체 + "엘리베이터" 한글 텍스트 plane. 사양 §2-4 — 하단 삼각형/셰브론 등 보조 그래픽 없음.
+    /// node.name = "elevatorMarker", 자식 textPlane.name = "elevatorText".
+    static func buildElevatorMarker() -> SCNNode {
+        let root = SCNNode()
+        root.name = "elevatorMarker"
+
+        let motionNode = SCNNode()
+        motionNode.name = "motionNode"
+        root.addChildNode(motionNode)
+
+        let billboardNode = makeBillboardNode()
+        motionNode.addChildNode(billboardNode)
+
+        let body = MarkerGeometryFactory.makeDiamondBody(size: baseSize)
+        billboardNode.addChildNode(body)
+
+        let texSize: CGFloat = baseSize * 0.95
+        let textPlane = SCNPlane(width: texSize, height: texSize)
+        let textMat = SCNMaterial()
+        textMat.lightingModel = .constant
+        let tex = MarkerGeometryFactory.makeElevatorTextTexture()
+        textMat.diffuse.contents = tex
+        textMat.transparent.contents = tex
+        textMat.isDoubleSided = false
+        textMat.writesToDepthBuffer = false
+        textPlane.materials = [textMat]
+        let textNode = SCNNode(geometry: textPlane)
+        textNode.name = "elevatorText"
+        textNode.position = SCNVector3(0, 0, Float(baseSize * 0.05 / 2 + 0.02))
+        billboardNode.addChildNode(textNode)
+
+        attachFloatingMotion(to: motionNode)
+        return root
+    }
+
+    // MARK: - StairsMarker
+
+    /// 다이아몬드 본체 + "계단" 한글 텍스트 plane. 사양 §2-4 — 하단 삼각형/셰브론 등 보조 그래픽 없음.
+    /// node.name = "stairsMarker", 자식 textPlane.name = "stairsText".
+    static func buildStairsMarker() -> SCNNode {
+        let root = SCNNode()
+        root.name = "stairsMarker"
+
+        let motionNode = SCNNode()
+        motionNode.name = "motionNode"
+        root.addChildNode(motionNode)
+
+        let billboardNode = makeBillboardNode()
+        motionNode.addChildNode(billboardNode)
+
+        let body = MarkerGeometryFactory.makeDiamondBody(size: baseSize)
+        billboardNode.addChildNode(body)
+
+        let texSize: CGFloat = baseSize * 0.95
+        let textPlane = SCNPlane(width: texSize, height: texSize)
+        let textMat = SCNMaterial()
+        textMat.lightingModel = .constant
+        let tex = MarkerGeometryFactory.makeStairsTextTexture()
+        textMat.diffuse.contents = tex
+        textMat.transparent.contents = tex
+        textMat.isDoubleSided = false
+        textMat.writesToDepthBuffer = false
+        textPlane.materials = [textMat]
+        let textNode = SCNNode(geometry: textPlane)
+        textNode.name = "stairsText"
+        textNode.position = SCNVector3(0, 0, Float(baseSize * 0.05 / 2 + 0.02))
+        billboardNode.addChildNode(textNode)
+
+        attachFloatingMotion(to: motionNode)
+        return root
+    }
+
+    // MARK: - DestinationPin
+
+    /// 10m 거리 기준 핀 본체 폭 (m). 사양 §2-3 — 5m 거리 0.45m 기준에서 baseSize 와 균형 잡힌 0.9m.
+    static let pinBaseSize: CGFloat = 0.9
+
+    /// 빨강 지도 핀 (사양 §2-3). 다이아몬드 마커와 동일한 motion + Y축 빌보드 구조 유지.
+    /// node.name = "destinationPin".
+    static func buildDestinationPin() -> SCNNode {
+        let root = SCNNode()
+        root.name = "destinationPin"
+
+        let motionNode = SCNNode()
+        motionNode.name = "motionNode"
+        root.addChildNode(motionNode)
+
+        let billboardNode = makeBillboardNode()
+        motionNode.addChildNode(billboardNode)
+
+        let pinBody = MarkerGeometryFactory.makeDestinationPinBody(size: Self.pinBaseSize)
+        billboardNode.addChildNode(pinBody)
 
         attachFloatingMotion(to: motionNode)
         return root
