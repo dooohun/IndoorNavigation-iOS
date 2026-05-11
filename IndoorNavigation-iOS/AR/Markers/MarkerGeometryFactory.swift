@@ -338,21 +338,21 @@ enum MarkerGeometryFactory {
 
     // MARK: - DestinationPin 본체
 
-    /// 빨강 지도 핀 형상 (사양 §2-3). 본체폭:외곽:두께 = 100:6:28.
+    /// 빨강 지도 핀 형상 (사양 §2-3 재정밀화). bulb 폭 ≈ 본체 폭, 좌우 cubic Bezier 로 부드럽게 tip 수렴.
     /// 구성: 흰 outer shell + 빨강 inner (bulb 중심에 hole through-cut, EO fill rule).
-    /// size 는 본체 폭 (m). 높이 ≈ size * 1.56, bulb 반지름 ≈ size * 0.38, hole 반지름 ≈ bulb * 0.44.
-    /// tip 이 노드 원점 y=0 에 오도록 평행이동 (배치 직관: worldPosition 이 핀 끝점이 됨).
+    /// 외곽선은 등거리 inset (borderInset) — bulbR / tip y 만 inset 적용해 bulb 동심원·tip 일정 거리 유지.
+    /// 비율: pinHeight = size * 1.35, outerR = size * 0.48 (bulb 가 본체 폭 거의 차지), bulbCenter.y = pinHeight * 0.32.
+    /// tip 이 노드 원점 y=0 에 오도록 평행이동.
     static func makeDestinationPinBody(size: CGFloat) -> SCNNode {
         let depth: CGFloat = size * 0.28
-        let borderFrac: CGFloat = 0.06
-        let innerSize: CGFloat = size * (1.0 - borderFrac)
-        let innerDepth: CGFloat = depth * 1.04  // inner 가 outer 보다 약간 앞으로
+        let borderThickness: CGFloat = size * 0.035
+        let innerDepth: CGFloat = depth * 1.04
 
         let group = SCNNode()
         group.name = "destinationPinBody"
 
-        // outer shell (흰)
-        let outerShape = destinationPinPath(size: size, holeRadius: 0)  // outer: hole 없음
+        // outer shell (흰) — borderInset=0
+        let outerShape = destinationPinPath(size: size, holeRadius: 0, borderInset: 0)
         let outerGeo = SCNShape(path: outerShape, extrusionDepth: depth)
         outerGeo.chamferRadius = 0
         let outerMat = SCNMaterial()
@@ -368,10 +368,10 @@ enum MarkerGeometryFactory {
         outerNode.position = SCNVector3(0, 0, Float(-depth / 2))
         group.addChildNode(outerNode)
 
-        // inner (빨강 #FF2D2D) — bulb 중심에 hole (반지름 = bulbR * 0.44) 관통
-        let innerBulbR: CGFloat = innerSize * 0.38
-        let innerHoleR: CGFloat = innerBulbR * 0.44
-        let innerShape = destinationPinPath(size: innerSize, holeRadius: innerHoleR)
+        // inner (빨강 #FF2D2D) — borderInset = borderThickness, bulb 중심에 hole 관통
+        let innerBulbR: CGFloat = size * 0.48 - borderThickness
+        let innerHoleR: CGFloat = innerBulbR * 0.50
+        let innerShape = destinationPinPath(size: size, holeRadius: innerHoleR, borderInset: borderThickness)
         innerShape.usesEvenOddFillRule = true
         let innerGeo = SCNShape(path: innerShape, extrusionDepth: innerDepth)
         innerGeo.chamferRadius = 0
@@ -385,74 +385,75 @@ enum MarkerGeometryFactory {
         innerMat.isDoubleSided = true
         innerGeo.materials = [innerMat]
         let innerNode = SCNNode(geometry: innerGeo)
-        // 다이아몬드 inner 패턴: 살짝 앞쪽(+z)으로 돌출
         innerNode.position = SCNVector3(0, 0, Float(-innerDepth / 2 + depth * 0.04))
         group.addChildNode(innerNode)
 
-        // tip 이 노드 원점 y=0 에 오도록 평행이동.
-        // pinHeight = size * 1.56, bulbCenter.y = pinHeight * 0.20, tip.y = bulbCenter.y - pinHeight * 0.65.
-        // path local 에서 tip.y = size * 1.56 * (0.20 - 0.65) = size * 1.56 * -0.45 = -size * 0.702
-        // → group.position.y 로 보정해 노드 원점 y=0 이 tip 위치가 되도록.
-        let pinHeight: CGFloat = size * 1.56
-        let tipLocalY: CGFloat = pinHeight * 0.20 - pinHeight * 0.65  // = -pinHeight * 0.45
+        // tip 이 노드 원점 y=0 에 오도록 보정.
+        // path local 에서 tip.y = -pinHeight * 0.4 = -size * 0.54.
+        let pinHeight: CGFloat = size * 1.35
+        let tipLocalY: CGFloat = -pinHeight * 0.4
         group.position = SCNVector3(0, Float(-tipLocalY), 0)
         return group
     }
 
-    /// DestinationPin path (지도 핀 실루엣). bulb 위 반원 + 좌우 quadCurve 가 tip 으로 수렴.
-    /// holeRadius > 0 이면 bulb 중심에 추가 원을 그려 EO fill rule 로 관통 처리.
-    /// 비율: pinHeight = size * 1.56, bulbR = size * 0.38, bulbCenter.y = pinHeight * 0.20,
-    ///        tip.y = bulbCenter.y - pinHeight * 0.65.
-    /// polyline 분할로 SCNShape flatness 영향 회피 (arc/quadCurve → addLine 분해).
-    private static func destinationPinPath(size: CGFloat, holeRadius: CGFloat) -> UIBezierPath {
-        let pinHeight: CGFloat = size * 1.56
-        let bulbR: CGFloat = size * 0.38
-        let bulbCenter = CGPoint(x: 0, y: pinHeight * 0.20)
-        let tip = CGPoint(x: 0, y: bulbCenter.y - pinHeight * 0.65)
+    /// DestinationPin path. bulb 동심 반원 + 좌우 cubic Bezier 가 tip 으로 부드럽게 수렴.
+    /// borderInset > 0 이면 bulbR 축소 + tip 위로 이동해 등거리 외곽선 형성 (bulb 동심원 정확).
+    /// polyline 분할로 SCNShape 의 path flattening 영향 회피.
+    private static func destinationPinPath(size: CGFloat, holeRadius: CGFloat, borderInset: CGFloat = 0) -> UIBezierPath {
+        let pinHeight: CGFloat = size * 1.35
+        let outerR: CGFloat = size * 0.48
+        let bulbR: CGFloat = outerR - borderInset
+        let bulbCenter = CGPoint(x: 0, y: pinHeight * 0.32)
+        let tip = CGPoint(x: 0, y: -pinHeight * 0.4 + borderInset)
         let leftTangent = CGPoint(x: -bulbR, y: bulbCenter.y)
         let rightTangent = CGPoint(x: bulbR, y: bulbCenter.y)
 
         let path = UIBezierPath()
         path.move(to: leftTangent)
 
-        // 위 반원: leftTangent (π) → rightTangent (0). y 가 위쪽 + 좌표계 가정 (SCNShape extrusion 컨벤션).
-        // 40 segment 로 분할 — SCNShape default flatness(0.6) 대비 충분히 세밀.
+        // 위 반원 polyline (40 seg). bulb 동심원 — bulbR 만 차이.
         let bulbSegments = 40
         for i in 1...bulbSegments {
             let t = CGFloat(i) / CGFloat(bulbSegments)
-            let angle = CGFloat.pi - CGFloat.pi * t   // π → 0
+            let angle = CGFloat.pi - CGFloat.pi * t
             let x = bulbCenter.x + cos(angle) * bulbR
-            let y = bulbCenter.y + sin(angle) * bulbR  // sin > 0 → 위쪽 반원
-            path.addLine(to: CGPoint(x: x, y: y))
-        }
-        // 끝점 = rightTangent
-
-        // 오른쪽 곡선: rightTangent → tip, quadratic Bezier polyline 분해 (30 segment)
-        let quadSegments = 30
-        let cpRight = CGPoint(x: bulbR * 0.55, y: bulbCenter.y - bulbR * 0.85)
-        for i in 1...quadSegments {
-            let t = CGFloat(i) / CGFloat(quadSegments)
-            let oneMinusT = 1.0 - t
-            let x = oneMinusT * oneMinusT * rightTangent.x
-                  + 2 * oneMinusT * t * cpRight.x
-                  + t * t * tip.x
-            let y = oneMinusT * oneMinusT * rightTangent.y
-                  + 2 * oneMinusT * t * cpRight.y
-                  + t * t * tip.y
+            let y = bulbCenter.y + sin(angle) * bulbR
             path.addLine(to: CGPoint(x: x, y: y))
         }
 
-        // 왼쪽 곡선: tip → leftTangent (대칭)
-        let cpLeft = CGPoint(x: -bulbR * 0.55, y: bulbCenter.y - bulbR * 0.85)
-        for i in 1...quadSegments {
-            let t = CGFloat(i) / CGFloat(quadSegments)
-            let oneMinusT = 1.0 - t
-            let x = oneMinusT * oneMinusT * tip.x
-                  + 2 * oneMinusT * t * cpLeft.x
-                  + t * t * leftTangent.x
-            let y = oneMinusT * oneMinusT * tip.y
-                  + 2 * oneMinusT * t * cpLeft.y
-                  + t * t * leftTangent.y
+        // 우측 cubic Bezier: rightTangent → tip. control point 가 bulbR 비례 → 외곽선 균등성 유지.
+        // cp1: bulb 접선 연장 (수직 하향), cp2: tip 근처에서 부드럽게 좁아짐.
+        let cubicSegments = 40
+        let cp1Right = CGPoint(x: bulbR, y: bulbCenter.y - bulbR * 0.55)
+        let cp2Right = CGPoint(x: bulbR * 0.20, y: tip.y + bulbR * 0.30)
+        for i in 1...cubicSegments {
+            let t = CGFloat(i) / CGFloat(cubicSegments)
+            let oneT = 1.0 - t
+            let x = oneT*oneT*oneT * rightTangent.x
+                  + 3*oneT*oneT*t * cp1Right.x
+                  + 3*oneT*t*t * cp2Right.x
+                  + t*t*t * tip.x
+            let y = oneT*oneT*oneT * rightTangent.y
+                  + 3*oneT*oneT*t * cp1Right.y
+                  + 3*oneT*t*t * cp2Right.y
+                  + t*t*t * tip.y
+            path.addLine(to: CGPoint(x: x, y: y))
+        }
+
+        // 좌측 cubic Bezier: tip → leftTangent (대칭)
+        let cp1Left = CGPoint(x: -bulbR * 0.20, y: tip.y + bulbR * 0.30)
+        let cp2Left = CGPoint(x: -bulbR, y: bulbCenter.y - bulbR * 0.55)
+        for i in 1...cubicSegments {
+            let t = CGFloat(i) / CGFloat(cubicSegments)
+            let oneT = 1.0 - t
+            let x = oneT*oneT*oneT * tip.x
+                  + 3*oneT*oneT*t * cp1Left.x
+                  + 3*oneT*t*t * cp2Left.x
+                  + t*t*t * leftTangent.x
+            let y = oneT*oneT*oneT * tip.y
+                  + 3*oneT*oneT*t * cp1Left.y
+                  + 3*oneT*t*t * cp2Left.y
+                  + t*t*t * leftTangent.y
             path.addLine(to: CGPoint(x: x, y: y))
         }
         path.close()
