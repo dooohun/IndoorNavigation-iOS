@@ -70,6 +70,28 @@ class ARNavigationLogic {
     /// 모델 자원(SuperPoint.mlpackage) 은 추후 재활성화 위해 보존.
     static let useSuperPointExtractor: Bool = false
 
+    /// 임시 mock (2026-05-11) — 턴 카드 UX 검증용. 서버 path 응답 대신 24m 직진→좌회전→5m→도착 시나리오로 덮어씀.
+    /// 사용자 측위 좌표(translation) 기준 +x 24m → +y 5m, RTAB convention(z=수직).
+    /// 검증 끝나면 false 로 끄거나 브랜치째 폐기.
+    static let useMockTurnScenario: Bool = true
+
+    static func makeMockTurnScenarioSteps(start translation: simd_float3, floorLevel: Int?) -> [PathStep] {
+        let sx = Double(translation.x)
+        let sy = Double(translation.y)
+        let sz = Double(translation.z)
+        return [
+            PathStep(stepNumber: 0, floorLevel: floorLevel,
+                     position: Position(x: sx,        y: sy,       z: sz),
+                     instruction: "직진"),
+            PathStep(stepNumber: 1, floorLevel: floorLevel,
+                     position: Position(x: sx + 24.0, y: sy,       z: sz),
+                     instruction: "좌회전"),
+            PathStep(stepNumber: 2, floorLevel: floorLevel,
+                     position: Position(x: sx + 24.0, y: sy + 5.0, z: sz),
+                     instruction: "도착"),
+        ]
+    }
+
     weak var delegate: ARNavigationLogicDelegate?
     weak var arSession: ARSession?
     weak var scene: SCNScene?
@@ -644,11 +666,20 @@ class ARNavigationLogic {
                 guard let self = self else { return }
                 switch result {
                 case .success(let resp):
-                    let steps = resp.toPathSteps()
+                    let realSteps = resp.toPathSteps()
+                    let steps: [PathStep]
+                    if Self.useMockTurnScenario {
+                        steps = Self.makeMockTurnScenarioSteps(start: translation, floorLevel: startFloorLevel)
+                        print("[MOCK] turn scenario active — overriding server steps (\(realSteps.count)) with mock (\(steps.count))")
+                    } else {
+                        steps = realSteps
+                    }
                     self.lastStartSnapDistance = nil
                     print("[V3-PATH] steps=\(steps.count), totalDistance=\(resp.totalDistance)m, floorTransitions=\(resp.floorTransitions?.count ?? 0)")
                     self.drawPathFromSteps(steps)
-                    self.dumpLocalizeDebug(rawSteps: resp.steps)
+                    if !Self.useMockTurnScenario {
+                        self.dumpLocalizeDebug(rawSteps: resp.steps)
+                    }
                     // steps[].position 좌표를 lookup multi-query 로 사용 → 경로 전체 영역 keyframe pack 받음.
                     self.fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
                 case .failure(let err):
