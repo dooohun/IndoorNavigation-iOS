@@ -231,7 +231,7 @@ class NetworkManager {
         // 다운샘플링: 원본 1920×1440 → longer side 960. 업로드 75% 감소 + 서버 SP 처리 빠름.
         for (index, image) in images.enumerated() {
             let resized = Self.resizeForLocalize(image, longerSide: 960)
-            guard let imageData = resized.jpegData(compressionQuality: 0.4) else { continue }
+            guard let imageData = resized.jpegData(compressionQuality: 0.9) else { continue }
             body.append("--\(boundary)\r\n".data(using: .utf8)!)
             body.append("Content-Disposition: form-data; name=\"images\"; filename=\"image\(index).jpg\"\r\n".data(using: .utf8)!)
             body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)

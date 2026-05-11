@@ -1167,6 +1167,12 @@ class ARNavigationLogic {
     /// V3 측위 + lookup 직후 1회 호출. 매 tick 갱신 X.
     private func drawPathFromSteps(_ steps: [PathStep]) {
         lastPathSteps = steps
+        print("[NAV] path with \(lastPathSteps.count) steps:")
+        for (i, s) in lastPathSteps.enumerated() {
+            let kind = Self.navigationActionKind(steps: lastPathSteps, at: i)
+            let pStr = s.position.map { p in "(\(p.x ?? -999),\(p.y ?? -999))" } ?? "nil"
+            print("[NAV]  [\(i)] floor=\(s.floorLevel ?? -1) pos=\(pStr) kind=\(kind) instruction=\"\(s.instruction ?? "")\"")
+        }
         pathNodes.forEach { $0.removeFromParentNode() }
         pathNodes.removeAll()
 
@@ -1362,46 +1368,58 @@ class ARNavigationLogic {
 
     // MARK: - Phase 6 UI 모델
 
-    /// PathStep.instruction 문자열 + floor 변화로 NavigationActionKind 매핑.
-    /// docs phase6_ui_redesign.md Action 매핑 규칙 참조.
-    private static func navigationActionKind(from instruction: String?,
-                                             currentFloor: Int?,
-                                             nextFloor: Int?) -> NavigationActionKind {
-        let raw = (instruction ?? "").uppercased()
+    /// RTAB-Map 컨벤션: server.z 는 수직, 수평 평면은 server.x, server.y. 1m 미만 segment 는 noise → straight 로 분류 (도어웨이/클러스터 필터).
+    /// i 부터 양방향 walk 으로 ≥1m 떨어진 의미 있는 step 의 position 을 inbound/outbound 로 사용.
+    /// 서버가 코너에 노드 클러스터 박는 케이스 대응. cross > 0 → LEFT 가정.
+    private static func navigationActionKind(steps: [PathStep], at i: Int) -> NavigationActionKind {
+        let lastIdx = steps.count - 1
+        guard i >= 0, i <= lastIdx else { return .unknown }
+        let curr = steps[i]
 
-        // STAIRS — floor 비교로 up/down 결정. floor 정보 없으면 기본 up.
-        if raw.contains("STAIRS") || raw.contains("계단") {
-            if let cf = currentFloor, let nf = nextFloor {
-                return nf > cf ? .stairsUp : .stairsDown
+        if i >= lastIdx { return .arrive }
+
+        let next = steps[i + 1]
+        if let cf = curr.floorLevel, let nf = next.floorLevel, cf != nf {
+            return nf > cf ? .stairsUp : .stairsDown
+        }
+
+        guard let cx = curr.position?.x, let cy = curr.position?.y else { return .unknown }
+
+        var prevPos: (Double, Double)? = nil
+        var j = i - 1
+        while j >= 0 {
+            if let px = steps[j].position?.x, let py = steps[j].position?.y {
+                let dx = cx - px, dy = cy - py
+                if (dx*dx + dy*dy) >= 1.0 { prevPos = (px, py); break }
             }
-            return .stairsUp
+            j -= 1
         }
+        if prevPos == nil { return .straight }
 
-        if raw.contains("ELEVATOR") || raw.contains("엘리베이터") {
-            return .elevator
+        var nextPos: (Double, Double)? = nil
+        var k = i + 1
+        while k <= lastIdx {
+            if let nx = steps[k].position?.x, let ny = steps[k].position?.y {
+                let dx = nx - cx, dy = ny - cy
+                if (dx*dx + dy*dy) >= 1.0 { nextPos = (nx, ny); break }
+            }
+            k += 1
         }
-        if raw.contains("ARRIVE") || raw.contains("도착") {
-            return .arrive
-        }
-        if raw.contains("UTURN") || raw.contains("유턴") {
-            return .uturn
-        }
-        if raw.contains("SLIGHT_LEFT") {
-            return .turnSlightLeft
-        }
-        if raw.contains("SLIGHT_RIGHT") {
-            return .turnSlightRight
-        }
-        if raw.contains("TURN_LEFT") || raw.contains("좌회전") {
-            return .turnLeft
-        }
-        if raw.contains("TURN_RIGHT") || raw.contains("우회전") {
-            return .turnRight
-        }
-        if raw.contains("STRAIGHT") || raw.contains("직진") || raw.contains("GO_STRAIGHT") {
-            return .straight
-        }
-        return .unknown
+        if nextPos == nil { return .straight }
+
+        let (px, py) = prevPos!
+        let (nx, ny) = nextPos!
+        let ix = cx - px, iy = cy - py
+        let ox = nx - cx, oy = ny - cy
+        let cross = ix * oy - iy * ox
+        let dot = ix * ox + iy * oy
+        let angleDeg = atan2(cross, dot) * 180.0 / .pi
+        let absA = abs(angleDeg)
+
+        if absA < 25.0 { return .straight }
+        if absA < 50.0 { return cross > 0 ? .turnSlightLeft : .turnSlightRight }
+        if absA < 135.0 { return cross > 0 ? .turnLeft : .turnRight }
+        return .uturn
     }
 
     /// 5m 이내 turn step 진입 시 AR 공간에 띄울 3D 화살표 vm.
@@ -1428,12 +1446,7 @@ class ARNavigationLogic {
 
         for i in startIdx...lastIdx {
             let s = lastPathSteps[i]
-            let next: PathStep? = (i + 1 < lastPathSteps.count) ? lastPathSteps[i + 1] : nil
-            let kind = Self.navigationActionKind(
-                from: s.instruction,
-                currentFloor: s.floorLevel,
-                nextFloor: next?.floorLevel
-            )
+            let kind = Self.navigationActionKind(steps: lastPathSteps, at: i)
             let mapped: (TurnDirection, TurnArrowKind)?
             switch kind {
             case .turnLeft:        mapped = (.left, .sharp)
@@ -1491,13 +1504,7 @@ class ARNavigationLogic {
 
         func action(at i: Int) -> NavigationActionKind {
             if i >= lastIdx { return .arrive }
-            let s = lastPathSteps[i]
-            let next: PathStep? = (i + 1 < lastPathSteps.count) ? lastPathSteps[i + 1] : nil
-            return Self.navigationActionKind(
-                from: s.instruction,
-                currentFloor: s.floorLevel,
-                nextFloor: next?.floorLevel
-            )
+            return Self.navigationActionKind(steps: lastPathSteps, at: i)
         }
 
         func cameraDistance(toStep i: Int) -> Double? {
@@ -1517,10 +1524,10 @@ class ARNavigationLogic {
             if let d = cameraDistance(toStep: i) { return d }
             guard i > 0 else { return nil }
             guard let a = lastPathSteps[i - 1].position, let b = lastPathSteps[i].position,
-                  let ax = a.x, let az = a.z, let bx = b.x, let bz = b.z else { return nil }
+                  let ax = a.x, let ay = a.y, let bx = b.x, let by = b.y else { return nil }
             let dx = bx - ax
-            let dz = bz - az
-            return Double((dx * dx + dz * dz).squareRoot())
+            let dy = by - ay
+            return Double((dx * dx + dy * dy).squareRoot())
         }
 
         let isTurn: (NavigationActionKind) -> Bool = { a in
@@ -1530,18 +1537,16 @@ class ARNavigationLogic {
             }
         }
 
-        // 10m 이내 turn lookahead — 기본 idx 의 액션이 turn 이 아닐 때만 의미.
-        // 첫 turn step 만 검사. cameraDistance 가용 시 그 거리, 아니면 server-world segment 합 fallback.
-        // 거리 측정 자체가 불가하면 lookahead 포기 (기본 idx 유지).
-        if !isTurn(action(at: idx)), idx < lastIdx {
-            var firstTurnIdx: Int? = nil
-            for i in (idx + 1)...lastIdx {
-                if isTurn(action(at: i)) { firstTurnIdx = i; break }
-            }
-            if let ti = firstTurnIdx, let d = lookaheadDistance(toStep: ti), d <= 10.0 {
-                idx = ti
-            }
+        // 카드 표시 idx: currentStepIndex 부터 첫 "실제 이벤트" (turn 또는 arrive) 찾기.
+        // 멀면 .straight 로 강등 표시 (turn 은 ≤10m, arrive 는 ≤2m 일 때만 실제 액션).
+        let baseIdx = idx
+        var eventIdx = lastIdx
+        for i in baseIdx...lastIdx {
+            let a = action(at: i)
+            if isTurn(a) || a == .arrive { eventIdx = i; break }
         }
+        idx = eventIdx
+        print("[NAV] event: cur=\(currentStepIndex) baseIdx=\(baseIdx) eventIdx=\(eventIdx) action=\(action(at: eventIdx))")
 
         let target = lastPathSteps[idx]
         let isLast = (idx >= lastIdx)
@@ -1550,10 +1555,10 @@ class ARNavigationLogic {
         let dist: Double = cameraDistance(toStep: idx) ?? {
             if idx > 0,
                let a = lastPathSteps[idx - 1].position, let b = target.position,
-               let ax = a.x, let az = a.z, let bx = b.x, let bz = b.z {
+               let ax = a.x, let ay = a.y, let bx = b.x, let by = b.y {
                 let dx = bx - ax
-                let dz = bz - az
-                return (dx * dx + dz * dz).squareRoot()
+                let dy = by - ay
+                return (dx * dx + dy * dy).squareRoot()
             }
             return 0
         }()
@@ -1566,18 +1571,27 @@ class ARNavigationLogic {
             for i in idx..<lastIdx {
                 guard let a = lastPathSteps[i].position,
                       let b = lastPathSteps[i + 1].position,
-                      let ax = a.x, let az = a.z,
-                      let bx = b.x, let bz = b.z else { continue }
+                      let ax = a.x, let ay = a.y,
+                      let bx = b.x, let by = b.y else { continue }
                 let dx = bx - ax
-                let dz = bz - az
-                remainingTotal += (dx * dx + dz * dz).squareRoot()
+                let dy = by - ay
+                remainingTotal += (dx * dx + dy * dy).squareRoot()
             }
         }
 
         let remainingMinutes = max(1, Int((remainingTotal / Self.walkSpeedMps / 60.0).rounded()))
         let remainingExtraStepsCount = max(0, lastIdx - idx)
         let destinationFloorLevel = lastPathSteps.last?.floorLevel
-        let resolvedAction: NavigationActionKind = isLast ? .arrive : action(at: idx)
+        let nativeAction: NavigationActionKind = isLast ? .arrive : action(at: idx)
+        let resolvedAction: NavigationActionKind = {
+            if isTurn(nativeAction) {
+                return dist <= 10.0 ? nativeAction : .straight
+            }
+            if nativeAction == .arrive {
+                return dist <= 2.0 ? .arrive : .straight
+            }
+            return nativeAction
+        }()
 
         return NavigationStepViewModel(
             action: resolvedAction,

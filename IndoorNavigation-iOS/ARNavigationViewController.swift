@@ -1104,7 +1104,7 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
         case .stairsDown: return "계단 (내려가기)"
         case .elevator: return "엘리베이터"
         case .arrive: return "도착"
-        case .unknown: return "진행"
+        case .unknown: return "직진"
         }
     }
 
