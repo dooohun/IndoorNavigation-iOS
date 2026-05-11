@@ -3,15 +3,12 @@ import SceneKit
 import simd
 
 // MARK: - ARMarkerController
-// 사양 §3 / §8 (AR_MARKER_3D.md). 단일 마커 라이프사이클 manager.
-// Logic 이 makeActiveMarkerList 로 발신한 1~2개의 후보 중 controller 가 단일 표시를 보장한다.
+// 단일 마커 라이프사이클 manager. Logic 이 보낸 단일 후보를 받아 표시.
 //
-// 상태 전이 (사양 §3 + 인계 시점 B+D 보정):
-//   d > 50m  → hidden (제거 또는 fadeOut)
-//   d ≤ 50m  → DistanceMarker
-//   d ≤ 10m  → NextArrow (회전 step 일 때) — 크로스페이드
-//   d ≤ 3m AND markerBehind → passed (fadeOut 후 정리)  ← B(3m) + D(방향성) 적용
-//   d ≤ 3m 이지만 마커가 카메라 앞쪽이면 → 그대로 NextArrow 유지 (아직 통과 전)
+// 거리 임계 (controller 보유분):
+//   nextTurn 입력 d > 10m → distance 강등 (Logic 1Hz throttle 과 tick 사이 불일치 안전망)
+//   d ≤ 3m AND markerBehind → passed (fadeOut 후 정리, 통과 UX 목적)
+//   그 외 → Logic 이 보낸 kind 그대로 표시 (destination/elevator/stairs 는 거리 무관)
 //
 // 거리 스케일 (시인성 보정):
 //   worldScale = clamp(d / 10, 0.8, 2.5)
@@ -179,20 +176,20 @@ final class ARMarkerController {
 
     /// 후보 중 우선 마커 선택.
     /// 단일 마커 정책 — 후보가 여러 개여도 controller 가 1개만 표시.
-    /// 우선순위 (사양 §2-3 / §2-4):
-    ///   1) destination — 3m 이내일 때만 최우선 (최종 목적지 도착 직전 신호)
+    /// 우선순위:
+    ///   1) destination — 거리 무관 최우선 (Logic 단순화 정책: arrive step 도달 시 즉시 발신)
     ///   2) nextTurn — 회전 직전 강한 신호
     ///   3) elevator — 층 이동 노드
     ///   4) stairs — 층 이동 노드
-    ///   5) distance — 일반 거리 마커
+    ///   5) distance — 일반 거리 마커 (Logic 단순화 후 dead path, 안전망 유지)
+    /// cameraPos 시그니처는 호출 흐름 안전망으로 유지.
     private func pickDesired(from candidates: [ARMarkerNode], cameraPos: simd_float3) -> ARMarkerNode? {
         if candidates.isEmpty { return nil }
-        // 1) destination (3m 이내일 때만 최우선)
+        // 1) destination (거리 무관 최우선)
         if let dst = candidates.first(where: { c in
             if case .destination = c.kind { return true } else { return false }
         }) {
-            let d = horizontalDistance(from: cameraPos, to: dst.worldPosition)
-            if d <= 3.0 { return dst }
+            return dst
         }
         // 2) nextTurn
         if let nt = candidates.first(where: { c in
@@ -218,44 +215,38 @@ final class ARMarkerController {
         })
     }
 
-    /// 거리 + raw kind + 방향성 → 실제 표시 kind. 사양 §3 상태 전이 매핑 + 인계 시점 B+D 보정.
-    ///   d > 50m                          → hidden
-    ///   d ≤ 3m AND markerBehind          → passed  (B: 임계 3m + D: 방향성)
-    ///   d > 10m                          → distance (rawKind 가 .nextTurn 이어도 강등)
-    ///   d ≤ 10m AND rawKind == nextTurn  → nextTurn
-    ///   그 외                            → distance
-    /// rawKind 가 .nextTurn(.uTurn) 이면 hidden (NextArrow 는 좌/우 전용).
+    /// raw kind + 거리 + 방향성 → 실제 표시 kind.
+    ///   nextTurn  : >10m → distance 강등, ≤3m + behind → passed, 그 외 그대로
+    ///   distance  : ≤3m + behind → passed, 그 외 meters 갱신
+    ///   destination/elevator/stairs : 거리 무관 그대로 (통과 처리 X)
+    ///   nextTurn(uTurn) : hidden
     ///
-    /// markerBehind: 카메라가 마커를 등진 상태 (XZ 평면 dot 부호로 판정). 짧은 거리에서 ARKit
-    /// 노이즈로 부호가 흔들릴 수 있으나 통과 직후엔 명확히 양수가 되므로 안정적.
+    /// markerBehind: 카메라가 마커를 등진 상태 (XZ 평면 dot 부호). 통과 직후 명확히 양수.
     private func resolveKind(rawKind: MarkerKind, distance: Float, markerBehind: Bool) -> MarkerKind {
-        if distance > 50.0 { return .hidden }
-
         switch rawKind {
         case .destination:
-            // 사양 §3: 3m 이내일 때만 표시. 통과해도 유지 (passed 처리 X — 도착지 인식 유지).
-            return distance > 3.0 ? .hidden : .destination
+            // 거리 무관 표시. 통과해도 유지 (도착지 인식 유지).
+            return .destination
 
         case .elevator, .stairs:
-            // 사양 §2-4: DistanceMarker 와 동일 거리 임계. 단 통과 처리 X
-            // (층 전환 시 logic 의 advance 가드가 자동으로 노드 교체).
+            // 거리 무관 표시. 통과 처리 X (층 전환 시 logic 의 advance 가드가 자동으로 노드 교체).
             return rawKind
 
         case .nextTurn(let dir):
-            // uTurn 입력은 hidden (사양: NextArrow 는 회전(좌/우) 전용).
+            // uTurn 입력은 hidden (NextArrow 는 회전(좌/우) 전용).
             if dir == .uTurn { return .hidden }
-            // B + D: 3m 이내 + 사용자가 마커 등진 상태일 때만 passed.
+            // 3m 이내 + 마커 등진 상태 → passed (통과 fadeOut UX).
             if distance <= 3.0 && markerBehind { return .passed }
-            // 사양 §3: 10m 초과면 distance 강등 (같은 worldPos 에서 DistanceMarker 로 표시).
+            // >10m 면 거리 마커로 강등. Logic 의 1Hz throttle 과 controller tick 사이의 거리 불일치 안전망.
             if distance > 10.0 {
                 return .distance(meters: Int(distance.rounded()))
             }
             return rawKind
 
         case .distance:
-            // B + D: 3m 이내 + 사용자가 마커 등진 상태일 때만 passed.
+            // 3m 이내 + 마커 등진 상태 → passed.
             if distance <= 3.0 && markerBehind { return .passed }
-            // 거리 갱신은 controller 가 raw distance 로 덮어씀 (round).
+            // 거리 갱신은 raw distance 로 덮어씀 (round).
             return .distance(meters: Int(distance.rounded()))
 
         case .hidden, .passed:
