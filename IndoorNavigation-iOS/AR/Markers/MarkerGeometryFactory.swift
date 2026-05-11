@@ -354,6 +354,7 @@ enum MarkerGeometryFactory {
         // outer shell (흰)
         let outerShape = destinationPinPath(size: size, holeRadius: 0)  // outer: hole 없음
         let outerGeo = SCNShape(path: outerShape, extrusionDepth: depth)
+        outerGeo.flatness = 0.05
         outerGeo.chamferRadius = 0
         let outerMat = SCNMaterial()
         outerMat.lightingModel = .physicallyBased
@@ -374,6 +375,7 @@ enum MarkerGeometryFactory {
         let innerShape = destinationPinPath(size: innerSize, holeRadius: innerHoleR)
         innerShape.usesEvenOddFillRule = true
         let innerGeo = SCNShape(path: innerShape, extrusionDepth: innerDepth)
+        innerGeo.flatness = 0.05
         innerGeo.chamferRadius = 0
         let innerMat = SCNMaterial()
         innerMat.lightingModel = .physicallyBased
@@ -403,6 +405,7 @@ enum MarkerGeometryFactory {
     /// holeRadius > 0 이면 bulb 중심에 추가 원을 그려 EO fill rule 로 관통 처리.
     /// 비율: pinHeight = size * 1.56, bulbR = size * 0.38, bulbCenter.y = pinHeight * 0.20,
     ///        tip.y = bulbCenter.y - pinHeight * 0.65.
+    /// polyline 분할로 SCNShape flatness 영향 회피 (arc/quadCurve → addLine 분해).
     private static func destinationPinPath(size: CGFloat, holeRadius: CGFloat) -> UIBezierPath {
         let pinHeight: CGFloat = size * 1.56
         let bulbR: CGFloat = size * 0.38
@@ -412,36 +415,64 @@ enum MarkerGeometryFactory {
         let rightTangent = CGPoint(x: bulbR, y: bulbCenter.y)
 
         let path = UIBezierPath()
-        // bulb 위 반원: leftTangent → rightTangent (UIBezierPath 의 flipped y 좌표계 주의 — clockwise 토글로 처리)
         path.move(to: leftTangent)
-        path.addArc(
-            withCenter: bulbCenter,
-            radius: bulbR,
-            startAngle: .pi,
-            endAngle: 0,
-            clockwise: false
-        )
-        // 오른쪽 곡선: rightTangent → tip (control 포인트: x = bulbR * 0.55, y = bulbCenter.y - bulbR * 0.85)
-        path.addQuadCurve(
-            to: tip,
-            controlPoint: CGPoint(x: bulbR * 0.55, y: bulbCenter.y - bulbR * 0.85)
-        )
-        // 왼쪽 곡선: tip → leftTangent
-        path.addQuadCurve(
-            to: leftTangent,
-            controlPoint: CGPoint(x: -bulbR * 0.55, y: bulbCenter.y - bulbR * 0.85)
-        )
+
+        // 위 반원: leftTangent (π) → rightTangent (0). y 가 위쪽 + 좌표계 가정 (SCNShape extrusion 컨벤션).
+        // 40 segment 로 분할 — SCNShape default flatness(0.6) 대비 충분히 세밀.
+        let bulbSegments = 40
+        for i in 1...bulbSegments {
+            let t = CGFloat(i) / CGFloat(bulbSegments)
+            let angle = CGFloat.pi - CGFloat.pi * t   // π → 0
+            let x = bulbCenter.x + cos(angle) * bulbR
+            let y = bulbCenter.y + sin(angle) * bulbR  // sin > 0 → 위쪽 반원
+            path.addLine(to: CGPoint(x: x, y: y))
+        }
+        // 끝점 = rightTangent
+
+        // 오른쪽 곡선: rightTangent → tip, quadratic Bezier polyline 분해 (30 segment)
+        let quadSegments = 30
+        let cpRight = CGPoint(x: bulbR * 0.55, y: bulbCenter.y - bulbR * 0.85)
+        for i in 1...quadSegments {
+            let t = CGFloat(i) / CGFloat(quadSegments)
+            let oneMinusT = 1.0 - t
+            let x = oneMinusT * oneMinusT * rightTangent.x
+                  + 2 * oneMinusT * t * cpRight.x
+                  + t * t * tip.x
+            let y = oneMinusT * oneMinusT * rightTangent.y
+                  + 2 * oneMinusT * t * cpRight.y
+                  + t * t * tip.y
+            path.addLine(to: CGPoint(x: x, y: y))
+        }
+
+        // 왼쪽 곡선: tip → leftTangent (대칭)
+        let cpLeft = CGPoint(x: -bulbR * 0.55, y: bulbCenter.y - bulbR * 0.85)
+        for i in 1...quadSegments {
+            let t = CGFloat(i) / CGFloat(quadSegments)
+            let oneMinusT = 1.0 - t
+            let x = oneMinusT * oneMinusT * tip.x
+                  + 2 * oneMinusT * t * cpLeft.x
+                  + t * t * leftTangent.x
+            let y = oneMinusT * oneMinusT * tip.y
+                  + 2 * oneMinusT * t * cpLeft.y
+                  + t * t * leftTangent.y
+            path.addLine(to: CGPoint(x: x, y: y))
+        }
         path.close()
 
-        // hole: bulb 중심에 정원 추가 (EO fill rule 로 관통)
+        // hole: bulb 중심 정원, polyline 분할 (40 segment) — SCNShape 가 arc 를 4점 직선화하던 문제 회피
         if holeRadius > 0 {
-            let holePath = UIBezierPath(
-                arcCenter: bulbCenter,
-                radius: holeRadius,
-                startAngle: 0,
-                endAngle: .pi * 2,
-                clockwise: true
-            )
+            let holeSegments = 40
+            let holePath = UIBezierPath()
+            // 시작점: 0 라디안 위치 (오른쪽)
+            holePath.move(to: CGPoint(x: bulbCenter.x + holeRadius, y: bulbCenter.y))
+            for i in 1...holeSegments {
+                let t = CGFloat(i) / CGFloat(holeSegments)
+                let angle = CGFloat.pi * 2 * t
+                let x = bulbCenter.x + cos(angle) * holeRadius
+                let y = bulbCenter.y + sin(angle) * holeRadius
+                holePath.addLine(to: CGPoint(x: x, y: y))
+            }
+            holePath.close()
             path.append(holePath)
         }
         return path
