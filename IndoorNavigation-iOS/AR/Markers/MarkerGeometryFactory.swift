@@ -354,7 +354,6 @@ enum MarkerGeometryFactory {
         // outer shell (흰)
         let outerShape = destinationPinPath(size: size, holeRadius: 0)  // outer: hole 없음
         let outerGeo = SCNShape(path: outerShape, extrusionDepth: depth)
-        outerGeo.flatness = 0.05
         outerGeo.chamferRadius = 0
         let outerMat = SCNMaterial()
         outerMat.lightingModel = .physicallyBased
@@ -375,7 +374,6 @@ enum MarkerGeometryFactory {
         let innerShape = destinationPinPath(size: innerSize, holeRadius: innerHoleR)
         innerShape.usesEvenOddFillRule = true
         let innerGeo = SCNShape(path: innerShape, extrusionDepth: innerDepth)
-        innerGeo.flatness = 0.05
         innerGeo.chamferRadius = 0
         let innerMat = SCNMaterial()
         innerMat.lightingModel = .physicallyBased
