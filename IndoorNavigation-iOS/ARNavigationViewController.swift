@@ -1600,8 +1600,12 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     private var turnCardView: TurnCardView!
 
     // Phase 6: AR 공간 3D 회전 화살표 (Logic 의 updateTurnArrow delegate 로 갱신)
+    // — AR 마커 시스템(ARMarkerController) 도입으로 dead path. updateTurnArrow 는 no-op.
     private var turnArrowNode: SCNNode?
     private var turnArrowStepIndex: Int?
+
+    // AR 마커 라이프사이클 manager — DistanceMarker / NextArrow 단일 마커 표시.
+    private let markerController = ARMarkerController()
 
     // Phase 7: SuperPoint 디버그 시각화 (DEBUG 빌드 전용)
     #if DEBUG
@@ -1652,6 +1656,9 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         // Phase 6: 닫기 / 재측정 버튼이 scanningOverlay·floorTransitionOverlay 등에 가려지지 않도록 항상 최상단으로.
         self.view.bringSubviewToFront(closeButton)
         self.view.bringSubviewToFront(locateButton)
+
+        // AR 마커 시스템 부모 노드 등록 — Logic 이 updateMarkers 발신 시 controller 가 직접 노드 추가.
+        markerController.attach(to: sceneView.scene.rootNode)
     }
 
     /// 화면 더블탭 시 측위 재시작 — 무한 테스트용. logic.startLocalizationFlow() 가 idempotent.
@@ -2526,6 +2533,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         logic.stopCapture()
         logic.stopArrivalCheck()
         logic.stopPathProgressTracking()
+        markerController.hideAll()
         sceneView.session.pause()
     }
 
@@ -2714,26 +2722,33 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
     }
 
     func updateTurnArrow(_ vm: TurnArrowViewModel?) {
+        // AR 마커 시스템(NextArrow) 도입으로 무력화. updateMarkers 가 통합 처리.
+        // 잔여 turnArrowNode 가 있으면 1회만 정리.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            guard let vm = vm else {
-                self.turnArrowNode?.removeFromParentNode()
-                self.turnArrowNode = nil
-                self.turnArrowStepIndex = nil
-                return
-            }
-            if self.turnArrowStepIndex != vm.stepIndex || self.turnArrowNode == nil {
-                self.turnArrowNode?.removeFromParentNode()
-                let node = self.makeTurnArrowSCNNode(direction: vm.direction, kind: vm.kind)
-                self.sceneView.scene.rootNode.addChildNode(node)
-                self.turnArrowNode = node
-                self.turnArrowStepIndex = vm.stepIndex
-            }
-            self.turnArrowNode?.position = SCNVector3(vm.arPosition.x, vm.arPosition.y, vm.arPosition.z)
-            self.turnArrowNode?.eulerAngles = SCNVector3(0, self.turnArrowYaw(direction: vm.direction, kind: vm.kind), 0)
+            self.turnArrowNode?.removeFromParentNode()
+            self.turnArrowNode = nil
+            self.turnArrowStepIndex = nil
+            _ = vm
         }
     }
 
+    func updateMarkers(_ markers: [ARMarkerNode]) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            guard let pov = self.sceneView.pointOfView else {
+                self.markerController.hideAll()
+                return
+            }
+            let camPos = pov.simdWorldPosition
+            // SceneKit 카메라 전방 = simdWorldFront ( -z 축 회전 결과 ). passed 방향성 판정용.
+            let camFwd = pov.simdWorldFront
+            self.markerController.update(activeMarkers: markers, cameraPos: camPos, cameraForward: camFwd)
+        }
+    }
+
+    /// [DEAD PATH] AR 마커 시스템(NextArrow) 도입으로 폐기. 호출처 없음.
+    /// 향후 복구 대비로 함수 본체 보존 (private 미사용 — Swift warning 가능).
     /// 우회전 화살표 베이스 path. 좌/우 모두 동일 path 사용 — yaw 회전으로만 방향 차이.
     /// SCNShape extrusionDepth 0.05m. brand-blue + emission 으로 어두운 환경 시인성 확보.
     private func makeTurnArrowSCNNode(direction: TurnDirection, kind: TurnArrowKind) -> SCNNode {
@@ -2759,6 +2774,7 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
         return SCNNode(geometry: shape)
     }
 
+    /// [DEAD PATH] makeTurnArrowSCNNode 와 함께 폐기. 호출처 없음.
     /// TurnDirection × TurnArrowKind → SceneKit Y-yaw (rad).
     /// SceneKit 좌수/+Y up 기준 가정 — 시뮬레이터 검증으로 부호 확정 권고. 필요시 반전.
     private func turnArrowYaw(direction: TurnDirection, kind: TurnArrowKind) -> Float {
@@ -2834,6 +2850,8 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
             self.turnArrowNode?.removeFromParentNode()
             self.turnArrowNode = nil
             self.turnArrowStepIndex = nil
+            // AR 마커도 동반 정리.
+            self.markerController.hideAll()
         }
     }
 

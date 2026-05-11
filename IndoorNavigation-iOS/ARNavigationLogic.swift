@@ -49,6 +49,7 @@ protocol ARNavigationLogicDelegate: AnyObject {
     func updateHUD(destinationName: String, remainingDistance: Float, instruction: String?)
     func updateNavigationStep(_ vm: NavigationStepViewModel)
     func updateTurnArrow(_ vm: TurnArrowViewModel?)
+    func updateMarkers(_ markers: [ARMarkerNode])
     func setHUDVisible(_ visible: Bool)
     func setLocateButtonVisible(_ visible: Bool)
     func showFloorNavigationMap(_ map: FloorMapResponse, routeSteps: [PathStep], currentPosition: Position?, currentHeadingDegrees: Float?)
@@ -229,8 +230,8 @@ class ARNavigationLogic {
     private static let walkSpeedMps: Double = 1.2
     /// 보행 평균 보폭 (m) — approxSteps 계산. docs Phase 6.
     private static let walkStrideM: Double = 0.7
-    /// turn step 3D 화살표 진입 임계 (XZ, m). 카메라 ↔ turn step 거리 ≤ 5m 일 때만 표시.
-    private static let turnArrowLookaheadM: Double = 5.0
+    /// turn step 3D 화살표 진입 임계 (XZ, m). 카메라 ↔ turn step 거리 ≤ 10m 일 때 NextArrow 진입 (사양 §3).
+    private static let turnArrowLookaheadM: Double = 10.0
 
     /// LightGlue 매칭 엔진 — 토글 ON 시에만 init. mlpackage 미배치/load 실패 시 nil → fallback.
     // 비활성: useLightGlueMatcher=false. 인스턴스화 회피로 mlpackage 로드 비용 절감.
@@ -326,6 +327,8 @@ class ARNavigationLogic {
                 }
                 let turnVM = makeTurnArrowViewModel(cameraPos: cam)
                 delegate?.updateTurnArrow(turnVM)
+                let markers = makeActiveMarkerList(cameraPos: cam)
+                delegate?.updateMarkers(markers)
             }
         }
 
@@ -386,6 +389,7 @@ class ARNavigationLogic {
         destinationPinNode = nil
         allChevronNodes.removeAll()
         delegate?.updateTurnArrow(nil)
+        delegate?.updateMarkers([])
 
         // timer 정지
         pathProgressTimer?.invalidate()
@@ -996,6 +1000,7 @@ class ARNavigationLogic {
         // Phase 6: step index 만 리셋. vm 발신은 다음 drawPathFromSteps 가 담당.
         currentStepIndex = 0
         delegate?.updateTurnArrow(nil)
+        delegate?.updateMarkers([])
     }
 
     // MARK: - Phase 8 추적 측위 cadence (A 트랙)
@@ -1215,6 +1220,17 @@ class ARNavigationLogic {
         trackingKeyframeCandidates = sorted
         lastBestKeyframeIndex = nil
         updateCheckpointNode()
+        // AR 마커 초기 표시 지연 방지 — 후보 정렬 직후 1회 발신.
+        // 다음 1Hz processARFrame tick 까지 기다리지 않고 첫 마커가 즉시 등장하도록.
+        if let frame = arSession?.currentFrame {
+            let cam = simd_float3(
+                frame.camera.transform.columns.3.x,
+                frame.camera.transform.columns.3.y,
+                frame.camera.transform.columns.3.z
+            )
+            let markers = makeActiveMarkerList(cameraPos: cam)
+            delegate?.updateMarkers(markers)
+        }
     }
 
     /// keyframe pose4x4 마지막 열 → simd_float3, goal 과 거리 계산.
@@ -1228,8 +1244,9 @@ class ARNavigationLogic {
         return simd_distance(kfPos, goal)
     }
 
-    /// 단일 흰색 원형 바닥 마커 갱신. 후보 마지막(목적지쪽 = 다음 keyframe) 위치에 표시.
-    /// 노드 없으면 createCheckpointNode 로 생성 + scene rootNode 추가, 있으면 position 만 갱신.
+    /// 단일 흰색 원형 바닥 마커 갱신 → 시각 노드는 ARMarkerController 로 이관(다이아몬드 마커가 대체).
+    /// 좌표 계산 로직만 보존 (도착 판정이 checkpointNode.position 을 참조하므로 placeholder 노드에 위치만 기록).
+    /// 시각 렌더링(흰색 원형 geometry, scene.rootNode.addChildNode) 은 무력화.
     private func updateCheckpointNode() {
         guard let lastKf = trackingKeyframeCandidates.last,
               let arPose = matchedARPose,
@@ -1264,23 +1281,15 @@ class ARNavigationLogic {
         let floorY = cameraY - 1.7
         let placement = simd_float3(arPos.x, floorY, arPos.z)
 
-        let camPos = arPose.columns.3
-        let dx = placement.x - camPos.x, dz = placement.z - camPos.z
-        let distXZ = sqrt(dx * dx + dz * dz)
-        // 카메라 forward in ARKit world = -col2 (ARKit 컨벤션 -Z forward)
-        let camFwd = simd_normalize(simd_float3(-arPose.columns.2.x, -arPose.columns.2.y, -arPose.columns.2.z))
-        let toCp = simd_normalize(simd_float3(dx, placement.y - camPos.y, dz))
-        let dot = simd_dot(camFwd, toCp)
-        let angleDeg = acos(max(-1, min(1, dot))) * 180 / .pi
-        print(String(format: "[Checkpoint] kf=(%.2f,%.2f,%.2f) → ar=(%.2f,%.2f,%.2f) cam→cp=%.2fm fwd∠cp=%.1f°",
-                     kfPos.x, kfPos.y, kfPos.z, placement.x, placement.y, placement.z, distXZ, angleDeg))
-
+        // placeholder 노드 — scene 에 추가하지 않음. arrival 판정에서 position 만 참조.
         if let node = checkpointNode {
             node.position = SCNVector3(placement.x, placement.y, placement.z)
         } else {
-            let node = createCheckpointNode(at: placement)
-            scene?.rootNode.addChildNode(node)
+            let node = SCNNode()
+            node.name = "checkpointPositionPlaceholder"
+            node.position = SCNVector3(placement.x, placement.y, placement.z)
             checkpointNode = node
+            // 의도적으로 scene?.rootNode.addChildNode(node) 미수행 — 시각 표현은 ARMarkerController 가 담당.
         }
     }
 
@@ -1347,6 +1356,8 @@ class ARNavigationLogic {
         }
         // Phase 6: 새 경로 → turn arrow 정리. 다음 1Hz tick 에서 cameraPos 기반으로 재평가.
         delegate?.updateTurnArrow(nil)
+        // Marker 도 동반 정리 — 다음 1Hz tick 에 makeActiveMarkerList 가 새로 발신.
+        delegate?.updateMarkers([])
     }
 
     /// V3 측위 + pathfinding 후 디버깅 데이터 일괄 dump.
@@ -1601,6 +1612,75 @@ class ARNavigationLogic {
         return nil
     }
 
+    // MARK: - AR 마커 후보 발신 (사양 §3)
+    /// 1Hz tick 마다 호출. DistanceMarker / NextArrow 후보 1~2개를 단일 ARMarkerNode 리스트로 발신.
+    /// 후보 선택 규칙:
+    ///   - turn step (좌/우/살짝좌/살짝우) 이 `currentStepIndex` 이후에 존재하면 그 step 좌표를 .nextTurn 으로 발신.
+    ///   - 그 외 (turn 없음 / 마지막 도착 step) → trackingKeyframeCandidates.last 좌표를 .distance 로 발신.
+    /// kind 의 meters 값은 controller 가 raw 거리로 재계산하므로 round(d) 로 채워 보낸다.
+    /// 카메라 ↔ marker XZ 거리 50m 초과시 hidden 후보로 만들지 않고 빈 배열 반환 (controller 가 정리).
+    private func makeActiveMarkerList(cameraPos: simd_float3) -> [ARMarkerNode] {
+        guard let arPose = matchedARPose, let pose = localizedPose else { return [] }
+        guard !lastPathSteps.isEmpty else { return [] }
+
+        let serverPos = simd_float3(Float(pose.x ?? 0), Float(pose.y ?? 0), Float(pose.z ?? 0))
+        let quat = simd_quatf(
+            ix: Float(pose.qx ?? 0), iy: Float(pose.qy ?? 0),
+            iz: Float(pose.qz ?? 0), r: Float(pose.qw ?? 1)
+        )
+        let input = CoordinateTransformer.Input(
+            serverPosition: serverPos, serverQuaternion: quat, arCameraPose: arPose
+        )
+        let floorY = arPose.columns.3.y - 1.7
+        // 사용자 시선 가까이로 띄움 (turn arrow 와 동일 패턴)
+        let markerY = floorY + 1.0
+
+        // 1) NextArrow 후보 — currentStepIndex 이후 첫 turn step
+        let lastIdx = lastPathSteps.count - 1
+        let startIdx = max(0, min(currentStepIndex, lastIdx))
+        for i in startIdx...lastIdx {
+            let kind = Self.navigationActionKind(steps: lastPathSteps, at: i)
+            let dir: TurnDirection?
+            switch kind {
+            case .turnLeft, .turnSlightLeft:   dir = .left
+            case .turnRight, .turnSlightRight: dir = .right
+            case .uturn:                        dir = .uTurn  // controller 가 hidden 처리
+            default:                            dir = nil
+            }
+            guard let direction = dir else { continue }
+            guard let p = lastPathSteps[i].position,
+                  let sx = p.x, let sy = p.y, let sz = p.z else { return [] }
+            let serverPoint = simd_float3(Float(sx), Float(sy), Float(sz))
+            let arPoint = CoordinateTransformer.transform(serverPoint: serverPoint, input: input)
+            let worldPos = simd_float3(arPoint.x, markerY, arPoint.z)
+            let dx = cameraPos.x - worldPos.x
+            let dz = cameraPos.z - worldPos.z
+            let d = sqrt(dx * dx + dz * dz)
+            if d > 50.0 { return [] }
+            // turn step 발견 — NextArrow 후보 단일 발신 (controller 가 거리 임계로 distance/nextTurn 결정).
+            let id = "step_\(i)"
+            // 거리 50m 이하: 항상 발신. controller 가 d>10 이면 distance 로, d≤10 이면 nextTurn 으로 결정.
+            // controller 가 raw kind 의 direction 을 신뢰하므로 nextTurn 으로 발신.
+            return [ARMarkerNode(id: id, worldPosition: worldPos, kind: .nextTurn(direction: direction))]
+        }
+
+        // 2) turn step 없음 → DistanceMarker 후보 (trackingKeyframeCandidates.last → 목적지 쪽 keyframe)
+        if let lastKf = trackingKeyframeCandidates.last {
+            let kfTr = lastKf.pose4x4
+            let kfPos = simd_float3(Float(kfTr[0][3]), Float(kfTr[1][3]), Float(kfTr[2][3]))
+            let arPoint = CoordinateTransformer.transform(serverPoint: kfPos, input: input)
+            let worldPos = simd_float3(arPoint.x, markerY, arPoint.z)
+            let dx = cameraPos.x - worldPos.x
+            let dz = cameraPos.z - worldPos.z
+            let d = sqrt(dx * dx + dz * dz)
+            if d > 50.0 { return [] }
+            let id = "kf_\(lastKf.index)"
+            return [ARMarkerNode(id: id, worldPosition: worldPos, kind: .distance(meters: Int(d.rounded())))]
+        }
+
+        return []
+    }
+
     /// 시맨틱: `currentStepIndex` 는 "다음에 도달해야 할 step".
     /// 카드 idx 는 기본적으로 currentStepIndex 이지만, 그 액션이 turn 이 아니라면 5m 이내 lookahead 로
     /// 곧 다가올 turn(좌/우/살짝좌/살짝우/유턴) 을 미리 표시해 사용자가 준비할 시간을 확보.
@@ -1742,7 +1822,10 @@ class ARNavigationLogic {
             serverPosition: serverPos, serverQuaternion: quat, arCameraPose: arPose
         )
 
-        let advanceThreshold: Float = 2.0
+        // ARMarkerController.resolveKind 의 3m passed 임계와 정합 — controller 가 마커를 fadeOut
+        // 시킨 시점에 logic 도 즉시 step 진행시켜 다음 turn step 의 ARMarkerNode 후보가
+        // 끊김 없이 발신되도록. (이전 2.0m 일 때 3m~2m 구간 데드존 발생)
+        let advanceThreshold: Float = 3.0
         let lastIdx = lastPathSteps.count - 1
         while currentStepIndex < lastIdx {
             let target = lastPathSteps[currentStepIndex]

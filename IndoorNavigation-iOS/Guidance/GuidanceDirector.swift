@@ -4,7 +4,7 @@ import QuartzCore
 
 // MARK: - 공용 타입
 
-enum TurnDirection {
+enum TurnDirection: Equatable {
     case left
     case right
     case uTurn
