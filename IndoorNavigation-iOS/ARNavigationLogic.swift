@@ -322,6 +322,10 @@ class ARNavigationLogic {
                                       frame.camera.transform.columns.3.y,
                                       frame.camera.transform.columns.3.z)
                 recomputeCurrentStepIndex(cameraPos: cam)
+                // Floor-transition 자동 트리거: currentStepIndex 가 floor 변경 직전 step 도달 시 모달 표시
+                if !hasActiveFloorTransition, let info = detectFloorTransition(currentStepIdx: currentStepIndex) {
+                    triggerFloorTransition(type: info.type, targetFloor: info.targetFloor, currentStepIdx: currentStepIndex)
+                }
                 if let vm = makeNavigationStepViewModel(cameraPos: cam) {
                     delegate?.updateNavigationStep(vm)
                 }
@@ -888,9 +892,9 @@ class ARNavigationLogic {
     /// 현재 step → 다음 step 사이에 층 이동(계단/엘리베이터)이 발생하는지 감지.
     /// floorLevel 변화 또는 instruction 키워드 매칭. 둘 중 하나만 만족해도 트리거.
     private func detectFloorTransition(currentStepIdx: Int) -> (type: String, targetFloor: Int?)? {
-        guard currentStepIdx + 1 < allSteps.count else { return nil }
-        let cur = allSteps[currentStepIdx]
-        let nxt = allSteps[currentStepIdx + 1]
+        guard currentStepIdx + 1 < lastPathSteps.count else { return nil }
+        let cur = lastPathSteps[currentStepIdx]
+        let nxt = lastPathSteps[currentStepIdx + 1]
 
         // 조건 1: floorLevel 변화
         let floorChanged: Bool = {
@@ -929,8 +933,8 @@ class ARNavigationLogic {
 
         // 잔여 steps 추출
         let remaining: [PathStep]
-        if currentStepIdx + 1 < allSteps.count {
-            remaining = Array(allSteps[(currentStepIdx + 1)...])
+        if currentStepIdx + 1 < lastPathSteps.count {
+            remaining = Array(lastPathSteps[(currentStepIdx + 1)...])
         } else {
             remaining = []
         }
@@ -957,7 +961,7 @@ class ARNavigationLogic {
         guidanceDirector.pause()
 
         delegate?.setHUDVisible(false)
-        delegate?.showFloorTransition(transitionType: type, targetFloor: targetFloor, currentFloor: allSteps[currentStepIdx].floorLevel)
+        delegate?.showFloorTransition(transitionType: type, targetFloor: targetFloor, currentFloor: lastPathSteps[currentStepIdx].floorLevel)
     }
 
     func restartFromFloorTransition() {
