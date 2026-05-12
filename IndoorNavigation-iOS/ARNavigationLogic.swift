@@ -120,15 +120,14 @@ class ARNavigationLogic {
     private let arrivalThreshold: Float = 2.0  // 2m 이내 도착 판정
 
     // 경로 진행 추적 상태
-    private var pathRootNode: SCNNode?
     private var allSteps: [PathStep] = []
     private var allARPoints: [simd_float3] = []
-    private var smoothedPoints: [simd_float3] = []
-    private var allChevronNodes: [(node: SCNNode, pointIndex: Int)] = []
     private var destinationPinNode: SCNNode?
-    private var currentTargetWaypointIndex: Int = 0
-    private var pathProgressTimer: Timer?
-    private let waypointSwitchThreshold: Float = 0.8
+
+    // PathChevron 시스템 (sphere + line path 시각화 대체)
+    private let pathChevronController = PathChevronController()
+    /// 최근 1Hz tick 시점의 카메라 XZ 위치 캐시 — drawPathFromSteps 가 chevron 분포 카메라 기준 spawn cursor 결정에 사용.
+    private var lastCameraPos: simd_float3?
 
     // 층 이동 인터렉션
     private var hasActiveFloorTransition: Bool = false
@@ -142,12 +141,6 @@ class ARNavigationLogic {
 
     // 방향 안내 (Phase 5)
     private let guidanceDirector = GuidanceDirector()
-    private let pathSubdivisions: Int = 20  // catmullRomSpline subdivisions와 동기화
-    /// RDP(Ramer-Douglas-Peucker) 사전 경로 단순화 임계값 (XZ 평면, m).
-    /// 0.25m 격자·0.5m 미만 단차 흡수. 시각 경로(리본·쉐브론)와 GuidanceDirector turn 판정 모두에 적용.
-    private let pathSimplificationEpsilonM: Float = 0.7
-    /// drawPathNodes에서 RDP 단순화 결과 점 개수. tickPathProgress의 step index 비례 환산에 사용.
-    private var simplifiedPointCount: Int = 0
 
     // MARK: - SuperPoint (Phase 7)
 
@@ -243,6 +236,16 @@ class ARNavigationLogic {
         guidanceDirector.delegate = delegate
     }
 
+    /// PathChevron 시스템 부모 노드 등록. ViewController 가 sceneView 준비 후 1회 호출.
+    func attachChevronParent(_ parent: SCNNode) {
+        pathChevronController.attach(to: parent)
+    }
+
+    /// PathChevron 가시성 토글. setHUDVisible(false) 와 짝으로 호출 — chevron 도 동반 숨김.
+    func setChevronHidden(_ hidden: Bool) {
+        pathChevronController.setHidden(hidden)
+    }
+
     /// SuperPoint extractor 인스턴스화 + warmUp. ViewController에서 viewDidLoad 끝에 호출.
     /// 기본 경로: SuperPointExtractorML (Core ML 추론). DEBUG 빌드에서 UserDefaults
     /// `useSuperPointStub` 가 true 면 stub 으로 강제 폴백. ML init 실패 시에도 stub 폴백.
@@ -333,6 +336,10 @@ class ARNavigationLogic {
                 delegate?.updateTurnArrow(turnVM)
                 let markers = makeActiveMarkerList(cameraPos: cam)
                 delegate?.updateMarkers(markers)
+                // PathChevron: 가장 앞 chevron 통과 시 제거 + 신규 spawn.
+                pathChevronController.tickCamera(cameraPos: cam)
+                // 다음 drawPathFromSteps (PnP 재호출 등) 가 chevron 분포 cursor 결정에 사용할 카메라 캐시.
+                lastCameraPos = cam
             }
         }
 
@@ -386,18 +393,14 @@ class ARNavigationLogic {
     /// 화면 더블탭으로 측위 재시작 시에도 재사용.
     private func resetForNewTrial() {
         // SCNNode 제거
-        pathRootNode?.removeFromParentNode()
-        pathRootNode = nil
         checkpointNode?.removeFromParentNode()
         checkpointNode = nil
         destinationPinNode = nil
-        allChevronNodes.removeAll()
+        pathChevronController.clear()
         delegate?.updateTurnArrow(nil)
         delegate?.updateMarkers([])
 
         // timer 정지
-        pathProgressTimer?.invalidate()
-        pathProgressTimer = nil
         arrivalCheckTimer?.invalidate()
         arrivalCheckTimer = nil
         trackingTimer?.invalidate()
@@ -408,9 +411,6 @@ class ARNavigationLogic {
         // 상태 클리어
         allSteps = []
         allARPoints = []
-        smoothedPoints = []
-        simplifiedPointCount = 0
-        currentTargetWaypointIndex = 0
         matchedARPose = nil
         localizedPose = nil
         localizedScanId = nil
@@ -856,35 +856,21 @@ class ARNavigationLogic {
         }
     }
 
-    // MARK: - AR 경로 렌더링 (Phase 8 keyframe 단계 추적 모델로 대체)
+    // MARK: - AR 경로 렌더링 (PathChevron 시스템 — drawPathFromSteps 가 직접 PathChevronController 호출)
     //
-    // drawPathNodes / buildRibbonNode / createChevronNode / placeChevronArrows /
-    // createDestinationPin 함수들은 Phase 8 재설계로 모두 제거되었다.
-    //  - 새 모델: trackingKeyframeCandidates 후보열 + checkpointNode (단일 흰색 원형 마커) +
-    //            tick 마다 best 까지 prefix drop ("지워나감").
-    //  - simplifyXZ / rdpRecurse / perpendicularDistanceXZ / catmullRomSpline 등 보조 헬퍼는
-    //    아래 MARK 섹션에 보존 — 향후 keyframe 사이 보간 안내 등 재활용 여지.
-    //  - Phase 5 GuidanceDirector / chevron / ribbon / 목적지 핀 / 슬라이딩 윈도우 dead path —
-    //    호출만 끊었고 멤버 변수·인스턴스는 보존. 별도 트랙에서 정리.
+    // 이전 sphere + cylinder line 시각화는 PathChevron 시스템(바닥 ^ chevron, 2.5m 간격, sequential pulse)으로 대체.
+    // 보조 헬퍼(simplifyXZ / rdpRecurse / perpendicularDistanceXZ / catmullRomSpline / lineSegmentNode /
+    // createCheckpointNode / computeRemainingDistance) 는 본 PR 에서 제거.
+    // tracking 추적 모델(trackingKeyframeCandidates + checkpointNode placeholder)은 LightGlue 비활성 상태라 dead path 지만 보존.
 
-    // MARK: - 경로 진행 추적 (Phase 8 keyframe 단계 추적 모델로 대체 — body 무력화)
-
-    /// Phase 8 keyframe 단계 추적 모델로 대체 — body 무력화.
-    /// allSteps/smoothedPoints 미구축이라 호출돼도 dead path. ViewController 호출 안전.
-    /// TODO(Phase 8+): keyframe 진행 추적은 runTrackingTick 으로 통합됨 — 본 함수 폐기 예정.
-    private func startPathProgressTracking() {
-        // intentionally empty — pathProgressTimer 사용 안 함.
-    }
-
-    /// Phase 8 keyframe 단계 추적 모델로 대체 — body 무력화. dead path.
-    private func tickPathProgress(cameraPos: simd_float3) {
-        _ = cameraPos
-    }
+    // MARK: - 경로 진행 추적 (Phase 8 keyframe 단계 추적 모델로 대체 — dead path)
+    //
+    // tickPathProgress / startPathProgressTracking / pathProgressTimer 는 PathChevron 시스템 도입 시 제거.
+    // ViewController.viewWillDisappear 에서 호출하는 stopPathProgressTracking() 만 no-op 으로 보존.
 
     /// ViewController.viewWillDisappear 에서 호출 — 안전한 no-op.
     func stopPathProgressTracking() {
-        pathProgressTimer?.invalidate()
-        pathProgressTimer = nil
+        // 본 함수는 호환성 위해 유지. body 는 빈 상태.
     }
 
     // MARK: - 층 이동 인터렉션
@@ -949,13 +935,11 @@ class ARNavigationLogic {
         pendingRemainingSteps = remaining
         pendingTargetFloor = targetFloor
 
-        pathProgressTimer?.invalidate()
-        pathProgressTimer = nil
         arrivalCheckTimer?.invalidate()
         arrivalCheckTimer = nil
 
-        // AR 노드 숨김 (세션은 유지)
-        pathRootNode?.isHidden = true
+        // AR 경로 chevron 숨김 (세션은 유지)
+        pathChevronController.setHidden(true)
 
         // Phase 5: 층 전환 중에는 방향 안내 UI 일시 정지
         guidanceDirector.pause()
@@ -969,11 +953,8 @@ class ARNavigationLogic {
         delegate?.hideFloorTransition()
 
         // 기존 노드 정리
-        pathRootNode?.removeFromParentNode()
-        pathRootNode = nil
-        allChevronNodes.removeAll()
+        pathChevronController.clear()
         destinationPinNode = nil
-        currentTargetWaypointIndex = 0
         matchedARPose = nil
         localizedPose = nil
         destinationARPosition = nil
@@ -1297,8 +1278,8 @@ class ARNavigationLogic {
         }
     }
 
-    /// pathfinding steps[].position 들을 server world → AR world 변환 후 sphere + cylinder line 으로 시각화.
-    /// V3 측위 + lookup 직후 1회 호출. 매 tick 갱신 X.
+    /// pathfinding steps[].position 들을 server world → AR world 변환 후 PathChevronController 로 시각화.
+    /// V3 측위 + lookup 직후 1회 호출. 매 tick 갱신 X (단, PnP 보정 시 재호출됨 — cameraPos 기준 spawn cursor 결정).
     private func drawPathFromSteps(_ steps: [PathStep]) {
         lastPathSteps = steps
         print("[NAV] path with \(lastPathSteps.count) steps:")
@@ -1307,6 +1288,7 @@ class ARNavigationLogic {
             let pStr = s.position.map { p in "(\(p.x ?? -999),\(p.y ?? -999))" } ?? "nil"
             print("[NAV]  [\(i)] floor=\(s.floorLevel ?? -1) pos=\(pStr) kind=\(kind) instruction=\"\(s.instruction ?? "")\"")
         }
+        // 구 path 노드(sphere/line) 잔재 제거 — Phase 8 호환성 위해 pathNodes 참조 보존.
         pathNodes.forEach { $0.removeFromParentNode() }
         pathNodes.removeAll()
 
@@ -1322,7 +1304,13 @@ class ARNavigationLogic {
         )
         let floorY = arPose.columns.3.y - 1.7
 
-        let arPoints: [simd_float3] = steps.compactMap { step in
+        // 현재 측위된 floor 의 step 만 필터해서 chevron 분포. 층 전환 step 은 별도 모달이 담당.
+        let curFloor = localizedFloorLevel
+        let filteredARPoints: [simd_float3] = steps.compactMap { step in
+            // 다른 floor step 은 제외 (현재 floor 미상이면 모두 포함)
+            if let stepFloor = step.floorLevel, let cf = curFloor, stepFloor != cf {
+                return nil
+            }
             guard let pos = step.position,
                   let x = pos.x, let y = pos.y, let z = pos.z else { return nil }
             let p = CoordinateTransformer.transform(
@@ -1331,26 +1319,17 @@ class ARNavigationLogic {
             )
             return simd_float3(p.x, floorY, p.z)
         }
-        guard arPoints.count >= 2 else { return }
+        guard filteredARPoints.count >= 2 else {
+            pathChevronController.clear()
+            return
+        }
 
-        for p in arPoints {
-            let sphere = SCNSphere(radius: 0.12)
-            let mat = SCNMaterial()
-            mat.diffuse.contents = UIColor.systemBlue
-            mat.lightingModel = .constant
-            mat.writesToDepthBuffer = false
-            sphere.materials = [mat]
-            let node = SCNNode(geometry: sphere)
-            node.position = SCNVector3(p.x, p.y, p.z)
-            scene?.rootNode.addChildNode(node)
-            pathNodes.append(node)
-        }
-        for i in 0..<(arPoints.count - 1) {
-            let seg = lineSegmentNode(from: arPoints[i], to: arPoints[i + 1])
-            scene?.rootNode.addChildNode(seg)
-            pathNodes.append(seg)
-        }
-        print("[Path] drew \(steps.count) steps as \(arPoints.count) points + \(arPoints.count - 1) segments")
+        pathChevronController.setRoute(
+            arPoints: filteredARPoints,
+            floorY: floorY,
+            cameraPos: lastCameraPos
+        )
+        print("[Path] drew \(steps.count) steps as \(filteredARPoints.count) chevron-distribution points (filtered to current floor)")
 
         // Phase 6: 경로가 새로 그려지면 step index 리셋 + 첫 vm 즉시 발신
         // 첫 vm 은 cameraPos 가 없어 fallback 거리 사용 (다음 1Hz tick 에서 정확한 거리로 갱신).
@@ -1405,63 +1384,6 @@ class ARNavigationLogic {
             transformedSteps: transformed
         )
         LocalizeDebugLogger.dump(snapshot)
-    }
-
-    /// 두 점 사이 cylinder. SCNCylinder 의 default 축은 Y. cross product 로 v 방향 회전.
-    private func lineSegmentNode(from a: simd_float3, to b: simd_float3) -> SCNNode {
-        let v = b - a
-        let length = simd_length(v)
-        let cyl = SCNCylinder(radius: 0.05, height: CGFloat(length))
-        let mat = SCNMaterial()
-        mat.diffuse.contents = UIColor.systemBlue.withAlphaComponent(0.7)
-        mat.lightingModel = .constant
-        mat.writesToDepthBuffer = false
-        cyl.materials = [mat]
-        let node = SCNNode(geometry: cyl)
-        let mid = (a + b) * 0.5
-        node.position = SCNVector3(mid.x, mid.y, mid.z)
-
-        let yAxis = simd_float3(0, 1, 0)
-        let dir = simd_normalize(v)
-        let cross = simd_cross(yAxis, dir)
-        let dot = simd_dot(yAxis, dir)
-        if simd_length(cross) > 0.001 {
-            let axis = simd_normalize(cross)
-            node.rotation = SCNVector4(axis.x, axis.y, axis.z, acos(max(-1, min(1, dot))))
-        }
-        return node
-    }
-
-    /// 흰색 원형 바닥 마커 — torus(테두리) + cylinder(채움 alpha 0.6).
-    /// lightingModel = .constant, writesToDepthBuffer = false, isDoubleSided = true.
-    private func createCheckpointNode(at position: simd_float3) -> SCNNode {
-        let node = SCNNode()
-        node.name = "checkpointNode"
-
-        // 테두리 (torus)
-        let torus = SCNTorus(ringRadius: 0.45, pipeRadius: 0.04)
-        let torusMat = SCNMaterial()
-        torusMat.diffuse.contents = UIColor.white
-        torusMat.lightingModel = .constant
-        torusMat.writesToDepthBuffer = false
-        torusMat.isDoubleSided = true
-        torus.materials = [torusMat]
-        let torusNode = SCNNode(geometry: torus)
-        node.addChildNode(torusNode)
-
-        // 내부 채움 (얇은 원판)
-        let disc = SCNCylinder(radius: 0.45, height: 0.005)
-        let discMat = SCNMaterial()
-        discMat.diffuse.contents = UIColor.white.withAlphaComponent(0.6)
-        discMat.lightingModel = .constant
-        discMat.writesToDepthBuffer = false
-        discMat.isDoubleSided = true
-        disc.materials = [discMat]
-        let discNode = SCNNode(geometry: disc)
-        node.addChildNode(discNode)
-
-        node.position = SCNVector3(position.x, position.y, position.z)
-        return node
     }
 
     /// 후보 1개 이하 도달 시 — 다음 query 좌표(또는 목적지) 로 새 lookup. 결과로 후보 갱신.
@@ -1698,12 +1620,12 @@ class ARNavigationLogic {
         case .elevator:
             kind = .elevator
         case .turnLeft, .turnSlightLeft:
-            // ≤10m 면 화살표, 그 외엔 거리 마커.
-            kind = (d <= 10.0) ? .nextTurn(direction: .left)
-                               : .distance(meters: max(5, Int(d.rounded())))
+            // ≤10m 일 때만 화살표 마커 발신. PathChevron 시스템이 원거리 안내 담당이라 distance 강등 폐기.
+            if d > 10.0 { return [] }
+            kind = .nextTurn(direction: .left)
         case .turnRight, .turnSlightRight:
-            kind = (d <= 10.0) ? .nextTurn(direction: .right)
-                               : .distance(meters: max(5, Int(d.rounded())))
+            if d > 10.0 { return [] }
+            kind = .nextTurn(direction: .right)
         case .uturn:
             return []  // hidden
         case .straight, .unknown:
@@ -1891,109 +1813,6 @@ class ARNavigationLogic {
                 break
             }
         }
-    }
-
-    // MARK: - 헬퍼
-
-    private func computeRemainingDistance(cameraPos: simd_float3) -> Float {
-        guard !smoothedPoints.isEmpty else { return 0 }
-        guard currentTargetWaypointIndex < smoothedPoints.count else { return 0 }
-
-        let target = smoothedPoints[currentTargetWaypointIndex]
-        let dx = cameraPos.x - target.x
-        let dz = cameraPos.z - target.z
-        var total = sqrt(dx * dx + dz * dz)
-
-        var i = currentTargetWaypointIndex
-        while i < smoothedPoints.count - 1 {
-            let p1 = smoothedPoints[i]
-            let p2 = smoothedPoints[i + 1]
-            let ddx = p2.x - p1.x
-            let ddz = p2.z - p1.z
-            total += sqrt(ddx * ddx + ddz * ddz)
-            i += 1
-        }
-        return total
-    }
-
-    // MARK: - 경로 단순화 (RDP)
-
-    /// XZ 2D RDP(Ramer-Douglas-Peucker) 단순화. spline 입력 사전 정제용.
-    /// 시각 경로/턴 판정 모두 단순화 결과 기반 — 양자화 격자(0.25m)·미세 단차로 인한
-    /// 코너 오탐과 경로 노이즈를 흡수. 시작/끝 점은 항상 보존.
-    private func simplifyXZ(points: [simd_float3], epsilon: Float) -> [simd_float3] {
-        if points.count < 3 { return points }
-        var keep = Array(repeating: false, count: points.count)
-        keep[0] = true
-        keep[points.count - 1] = true
-        rdpRecurse(points, 0, points.count - 1, epsilon, &keep)
-        return zip(points, keep).compactMap { $1 ? $0 : nil }
-    }
-
-    private func rdpRecurse(_ pts: [simd_float3], _ start: Int, _ end: Int, _ eps: Float, _ keep: inout [Bool]) {
-        guard end > start + 1 else { return }
-        var maxDist: Float = 0
-        var maxIdx: Int = start
-        for i in (start + 1)..<end {
-            let d = perpendicularDistanceXZ(point: pts[i], lineStart: pts[start], lineEnd: pts[end])
-            if d > maxDist { maxDist = d; maxIdx = i }
-        }
-        if maxDist > eps {
-            keep[maxIdx] = true
-            rdpRecurse(pts, start, maxIdx, eps, &keep)
-            rdpRecurse(pts, maxIdx, end, eps, &keep)
-        }
-    }
-
-    private func perpendicularDistanceXZ(point p: simd_float3, lineStart a: simd_float3, lineEnd b: simd_float3) -> Float {
-        let abx = b.x - a.x, abz = b.z - a.z
-        let apx = p.x - a.x, apz = p.z - a.z
-        let lineLen = sqrt(abx * abx + abz * abz)
-        if lineLen < 1e-5 {
-            return sqrt(apx * apx + apz * apz)
-        }
-        let cross = abs(abx * apz - abz * apx)
-        return cross / lineLen
-    }
-
-    // MARK: - Catmull-Rom 스플라인 보간
-
-    /// 포인트 배열을 Catmull-Rom 스플라인으로 부드럽게 보간
-    private func catmullRomSpline(points: [simd_float3], subdivisions: Int) -> [simd_float3] {
-        guard points.count >= 2 else { return points }
-        if points.count == 2 { return points }
-
-        var result: [simd_float3] = []
-
-        for i in 0..<(points.count - 1) {
-            let p0 = points[max(i - 1, 0)]
-            let p1 = points[i]
-            let p2 = points[i + 1]
-            let p3 = points[min(i + 2, points.count - 1)]
-
-            for j in 0..<subdivisions {
-                let t = Float(j) / Float(subdivisions)
-                let t2 = t * t
-                let t3 = t2 * t
-
-                let x = 0.5 * ((2 * p1.x) +
-                    (-p0.x + p2.x) * t +
-                    (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
-                    (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3)
-
-                let y = p1.y  // Y(높이)는 바닥 레벨 유지
-
-                let z = 0.5 * ((2 * p1.z) +
-                    (-p0.z + p2.z) * t +
-                    (2 * p0.z - 5 * p1.z + 4 * p2.z - p3.z) * t2 +
-                    (-p0.z + 3 * p1.z - 3 * p2.z + p3.z) * t3)
-
-                result.append(simd_float3(x, y, z))
-            }
-        }
-
-        result.append(points.last!)
-        return result
     }
 
     // MARK: - 목적지 3D 핀 마커 (Phase 8 단일 checkpointNode 로 대체 — createDestinationPin 폐기)

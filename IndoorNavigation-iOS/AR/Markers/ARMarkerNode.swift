@@ -2,15 +2,15 @@ import Foundation
 import simd
 
 // MARK: - Marker 종류
-// 사양 §2 / §3 (AR_MARKER_3D.md). distance 의 meters 는 5..50 범위(50+ 는 호출 측에서 50 으로 clamp).
+// 사양 §2 / §3 (AR_MARKER_3D.md).
 // hidden 은 controller 가 desiredState 계산 결과로 사용 — 외부 발신용으로도 허용.
 // passed 는 0.8m 이내 통과 시 일시적으로 사용 — fade-out 트리거 후 controller 가 자체 정리.
-// elevator: 경로상 엘리베이터 노드 — DistanceMarker 동일 베이스 + "엘리베이터" 한글 라벨 (사양 §2-4).
-// stairs: 경로상 계단 노드 — DistanceMarker 동일 베이스 + "계단" 한글 라벨 (사양 §2-4).
+// elevator: 경로상 엘리베이터 노드 — 다이아몬드 본체 + "엘리베이터" 한글 라벨 (사양 §2-4).
+// stairs: 경로상 계단 노드 — 다이아몬드 본체 + "계단" 한글 라벨 (사양 §2-4).
 // destination: 경로 최종 목적지 — 3m 이내일 때만 빨강 핀 형상 (사양 §2-3 / §3).
+// distance 마커는 PathChevron 시스템 도입으로 폐기 (2026-05-11).
 
 enum MarkerKind: Equatable {
-    case distance(meters: Int)
     case nextTurn(direction: TurnDirection)
     case elevator
     case stairs

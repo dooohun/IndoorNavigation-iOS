@@ -2,7 +2,8 @@ import UIKit
 import SceneKit
 
 // MARK: - 마커 SCNNode 빌더
-// 사양 §2 / §4 (AR_MARKER_3D.md). DistanceMarker / NextArrow / Elevator / Stairs / DestinationPin 다섯 빌더 + 공통 부유 모션.
+// 사양 §2 / §4 (AR_MARKER_3D.md). NextArrow / Elevator / Stairs / DestinationPin 네 빌더 + 공통 부유 모션.
+// (DistanceMarker 는 PathChevron 시스템 도입으로 폐기 — 2026-05-11)
 // caller (ARMarkerController) 가 노드 트리에 추가하고 scale/position/transparency 만 조절한다.
 //
 // 노드 계층 (사용자 요청: 글씨 항상 사용자 향함 — Y축 빌보드 제약 적용):
@@ -17,62 +18,6 @@ enum ARMarkerNodeBuilder {
 
     /// 10m 거리 기준 본체 변 길이(m). 사양 §1 의 0.6m 대비 사용자 요청으로 2배.
     static let baseSize: CGFloat = 1.2
-
-    // MARK: - DistanceMarker
-
-    /// 다이아몬드 본체 + 거리 텍스트 plane + 하단 작은 삼각형 표식.
-    /// node.name = "distanceMarker", 자식 textPlane.name = "distanceText" (caller 가 텍스처 swap 시 탐색용).
-    static func buildDistanceMarker(meters: Int) -> SCNNode {
-        let root = SCNNode()
-        root.name = "distanceMarker"
-
-        let motionNode = SCNNode()
-        motionNode.name = "motionNode"
-        root.addChildNode(motionNode)
-
-        let billboardNode = makeBillboardNode()
-        motionNode.addChildNode(billboardNode)
-
-        let body = MarkerGeometryFactory.makeDiamondBody(size: baseSize)
-        billboardNode.addChildNode(body)
-
-        // 중앙 텍스트 plane (텍스처 1회 생성 → diffuse/transparent 양쪽에 재사용)
-        let texSize: CGFloat = baseSize * 0.95
-        let textPlane = SCNPlane(width: texSize, height: texSize)
-        let textMat = SCNMaterial()
-        textMat.lightingModel = .constant
-        let tex = MarkerGeometryFactory.makeDistanceTextTexture(meters: meters)
-        textMat.diffuse.contents = tex
-        textMat.transparent.contents = tex
-        textMat.isDoubleSided = false
-        textMat.writesToDepthBuffer = false
-        textPlane.materials = [textMat]
-        let textNode = SCNNode(geometry: textPlane)
-        textNode.name = "distanceText"
-        // body 의 inner depth ≈ size*0.05*1.08, 그 앞에 살짝 띄움
-        textNode.position = SCNVector3(0, 0, Float(baseSize * 0.05 / 2 + 0.02))
-        billboardNode.addChildNode(textNode)
-
-        // 하단 작은 삼각형 표식 (흰색)
-        let tw: CGFloat = baseSize * 0.13
-        let triPath = UIBezierPath()
-        triPath.move(to: CGPoint(x: -tw / 2, y: 0))
-        triPath.addLine(to: CGPoint(x: tw / 2, y: 0))
-        triPath.addLine(to: CGPoint(x: 0, y: -tw * 0.95))
-        triPath.close()
-        let triGeo = SCNShape(path: triPath, extrusionDepth: 0.015)
-        let triMat = SCNMaterial()
-        triMat.lightingModel = .constant
-        triMat.diffuse.contents = UIColor.white
-        triMat.isDoubleSided = true
-        triGeo.materials = [triMat]
-        let triNode = SCNNode(geometry: triGeo)
-        triNode.position = SCNVector3(0, Float(-baseSize * 0.34), Float(baseSize * 0.05 / 2 + 0.022))
-        billboardNode.addChildNode(triNode)
-
-        attachFloatingMotion(to: motionNode)
-        return root
-    }
 
     // MARK: - NextArrow
 

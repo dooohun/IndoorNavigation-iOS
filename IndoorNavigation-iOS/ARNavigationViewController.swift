@@ -1617,7 +1617,12 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        logic = ARNavigationLogic(buildingId: buildingId, floorId: floorId, destinationName: destinationName, goal: goal)
+        logic = ARNavigationLogic(
+            buildingId: buildingId,
+            floorId: floorId,
+            destinationName: destinationName,
+            goal: goal
+        )
 
         setupARView()
         setupCloseButton()
@@ -1659,6 +1664,8 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
 
         // AR 마커 시스템 부모 노드 등록 — Logic 이 updateMarkers 발신 시 controller 가 직접 노드 추가.
         markerController.attach(to: sceneView.scene.rootNode)
+        // PathChevron 시스템 부모 노드 등록 — Logic 이 drawPathFromSteps 시 chevron 노드를 직접 추가.
+        logic.attachChevronParent(sceneView.scene.rootNode)
     }
 
     /// 화면 더블탭 시 측위 재시작 — 무한 테스트용. logic.startLocalizationFlow() 가 idempotent.
@@ -2840,6 +2847,8 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
             UIView.animate(withDuration: 0.3) {
                 self.hudContainerView.alpha = 1
             }
+            // HUD 표시 복귀 시 PathChevron 도 동반 노출.
+            logic.setChevronHidden(false)
         } else {
             UIView.animate(withDuration: 0.3) {
                 self.hudContainerView.alpha = 0
@@ -2852,6 +2861,8 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
             self.turnArrowStepIndex = nil
             // AR 마커도 동반 정리.
             self.markerController.hideAll()
+            // PathChevron 도 동반 숨김.
+            logic.setChevronHidden(true)
         }
     }
 

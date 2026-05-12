@@ -6,7 +6,7 @@ import simd
 // 단일 마커 라이프사이클 manager. Logic 이 보낸 단일 후보를 받아 표시.
 //
 // 거리 임계 (controller 보유분):
-//   nextTurn 입력 d > 10m → distance 강등 (Logic 1Hz throttle 과 tick 사이 불일치 안전망)
+//   nextTurn 입력 d > 10m → hidden (PathChevron 시스템 도입으로 distance 강등 제거)
 //   d ≤ 3m AND markerBehind → passed (fadeOut 후 정리, 통과 UX 목적)
 //   그 외 → Logic 이 보낸 kind 그대로 표시 (destination/elevator/stairs 는 거리 무관)
 //
@@ -43,7 +43,7 @@ final class ARMarkerController {
     func update(activeMarkers: [ARMarkerNode], cameraPos: simd_float3, cameraForward: simd_float3) {
         guard let parent = parentNode else { return }
 
-        // 우선 마커 선택: nextTurn 후보가 있으면 그 후보(가까운 turn), 없으면 distance 후보.
+        // 우선 마커 선택: nextTurn / destination / elevator / stairs 순.
         // hidden 후보는 무시 (Logic 측에서 만들지 않음 권장이지만 안전망).
         let desired = pickDesired(from: activeMarkers, cameraPos: cameraPos)
 
@@ -74,7 +74,7 @@ final class ARMarkerController {
             // 0.5s fadeOut 후 정리. 새 마커 enter 는 다음 tick 의 다른 후보가 담당.
             removeCurrentIfAny()
             return
-        case .distance, .nextTurn, .elevator, .stairs, .destination:
+        case .nextTurn, .elevator, .stairs, .destination:
             applyOrSwap(
                 desiredId: desired.id,
                 desiredKind: resolvedKind,
@@ -123,12 +123,8 @@ final class ARMarkerController {
             return
         }
 
-        // 같은 id + 같은 kind 류 (distance ↔ distance, nextTurn ↔ nextTurn 동일 direction) → swap 없이 scale/pos 갱신 + texture 만 교체
+        // 같은 id + 같은 kind 류 (nextTurn ↔ nextTurn 동일 direction) → swap 없이 scale/pos 갱신
         if entry.id == desiredId, sameKindFamily(entry.kind, desiredKind) {
-            if case .distance(let oldM) = entry.kind, case .distance(let newM) = desiredKind, oldM != newM {
-                swapDistanceTexture(node: entry.node, meters: newM)
-                entry.kind = desiredKind
-            }
             entry.worldPosition = desiredWorldPos
             entry.node.position = SCNVector3(desiredWorldPos.x, desiredWorldPos.y, desiredWorldPos.z)
             entry.node.scale = SCNVector3(s, s, s)
@@ -181,7 +177,6 @@ final class ARMarkerController {
     ///   2) nextTurn — 회전 직전 강한 신호
     ///   3) elevator — 층 이동 노드
     ///   4) stairs — 층 이동 노드
-    ///   5) distance — 일반 거리 마커 (Logic 단순화 후 dead path, 안전망 유지)
     /// cameraPos 시그니처는 호출 흐름 안전망으로 유지.
     private func pickDesired(from candidates: [ARMarkerNode], cameraPos: simd_float3) -> ARMarkerNode? {
         if candidates.isEmpty { return nil }
@@ -204,20 +199,14 @@ final class ARMarkerController {
             return ev
         }
         // 4) stairs
-        if let st = candidates.first(where: { c in
-            if case .stairs = c.kind { return true } else { return false }
-        }) {
-            return st
-        }
-        // 5) distance
         return candidates.first(where: { c in
-            if case .distance = c.kind { return true } else { return false }
+            if case .stairs = c.kind { return true } else { return false }
         })
     }
 
     /// raw kind + 거리 + 방향성 → 실제 표시 kind.
-    ///   nextTurn  : >10m → distance 강등, ≤3m + behind → passed, 그 외 그대로
-    ///   distance  : ≤3m + behind → passed, 그 외 meters 갱신
+    ///   nextTurn  : >10m → hidden (PathChevron 시스템 도입으로 distance 강등 폐기),
+    ///               ≤3m + behind → passed, 그 외 그대로
     ///   destination/elevator/stairs : 거리 무관 그대로 (통과 처리 X)
     ///   nextTurn(uTurn) : hidden
     ///
@@ -237,17 +226,11 @@ final class ARMarkerController {
             if dir == .uTurn { return .hidden }
             // 3m 이내 + 마커 등진 상태 → passed (통과 fadeOut UX).
             if distance <= 3.0 && markerBehind { return .passed }
-            // >10m 면 거리 마커로 강등. Logic 의 1Hz throttle 과 controller tick 사이의 거리 불일치 안전망.
+            // >10m 면 hidden. PathChevron 시스템이 원거리 안내 담당.
             if distance > 10.0 {
-                return .distance(meters: Int(distance.rounded()))
+                return .hidden
             }
             return rawKind
-
-        case .distance:
-            // 3m 이내 + 마커 등진 상태 → passed.
-            if distance <= 3.0 && markerBehind { return .passed }
-            // 거리 갱신은 raw distance 로 덮어씀 (round).
-            return .distance(meters: Int(distance.rounded()))
 
         case .hidden, .passed:
             return rawKind
@@ -256,7 +239,6 @@ final class ARMarkerController {
 
     private func sameKindFamily(_ a: MarkerKind, _ b: MarkerKind) -> Bool {
         switch (a, b) {
-        case (.distance, .distance): return true
         case (.nextTurn(let da), .nextTurn(let db)): return da == db
         case (.elevator, .elevator): return true
         case (.stairs, .stairs): return true
@@ -267,8 +249,6 @@ final class ARMarkerController {
 
     private func buildNode(for kind: MarkerKind) -> SCNNode {
         switch kind {
-        case .distance(let m):
-            return ARMarkerNodeBuilder.buildDistanceMarker(meters: max(5, min(50, m)))
         case .nextTurn(let dir):
             // .left / .right 만 빌드 (uTurn 은 resolveKind 에서 hidden 처리됨 — 방어적 fallback).
             let direction: TurnDirection = (dir == .left) ? .left : .right
@@ -281,24 +261,6 @@ final class ARMarkerController {
             return ARMarkerNodeBuilder.buildDestinationPin()
         case .hidden, .passed:
             return SCNNode()
-        }
-    }
-
-    /// distance 마커 텍스처 swap. node 트리 내 "distanceText" plane 의 first material diffuse 만 교체.
-    /// 텍스처 생성은 캐시 기반 — hit 시 메인 스레드에서 즉시 swap, miss 시 백그라운드 생성 후 메인 적용
-    /// (이전엔 매 swap 마다 1024² UIGraphicsImageRenderer 2회 호출로 메인 블로킹 → AR 렌더 프레임 드롭).
-    private func swapDistanceTexture(node: SCNNode, meters: Int) {
-        let clamped = max(5, min(50, meters))
-        guard let textPlane = node.childNode(withName: "distanceText", recursively: true),
-              let mat = textPlane.geometry?.firstMaterial else { return }
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            let tex = MarkerGeometryFactory.makeDistanceTextTexture(meters: clamped)
-            DispatchQueue.main.async { [weak mat] in
-                guard let mat = mat else { return }
-                mat.diffuse.contents = tex
-                mat.transparent.contents = tex
-            }
         }
     }
 
