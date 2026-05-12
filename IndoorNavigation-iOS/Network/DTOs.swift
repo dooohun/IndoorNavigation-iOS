@@ -105,6 +105,12 @@ struct FloorMapNode: Codable {
     let y: Double
     let z: Double
     let label: String?
+    let connector: FloorMapConnector?
+}
+
+struct FloorMapConnector: Codable {
+    let type: String
+    let key: String?
 }
 
 struct FloorMapEdge: Codable {
@@ -118,6 +124,10 @@ struct FloorMapEdge: Codable {
 /// polygon GeoJSON 자유 schema — raw JSON bytes 로 보존만 한다 (현재 클라 미사용).
 struct PolygonRaw: Codable {
     let raw: Data
+
+    init(raw: Data) {
+        self.raw = raw
+    }
 
     init(from decoder: Decoder) throws {
         let single = try decoder.singleValueContainer()
@@ -199,6 +209,34 @@ struct PathStepResponse: Codable {
     let position: V1Position
     let instruction: String
     let nodeId: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case stepNumber
+        case floorLevel
+        case position
+        case instruction
+        case nodeId
+        case node_id
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        stepNumber = try container.decode(Int.self, forKey: .stepNumber)
+        floorLevel = try container.decodeIfPresent(Int.self, forKey: .floorLevel)
+        position = try container.decode(V1Position.self, forKey: .position)
+        instruction = try container.decode(String.self, forKey: .instruction)
+        nodeId = try container.decodeIfPresent(String.self, forKey: .nodeId)
+            ?? container.decodeIfPresent(String.self, forKey: .node_id)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(stepNumber, forKey: .stepNumber)
+        try container.encodeIfPresent(floorLevel, forKey: .floorLevel)
+        try container.encode(position, forKey: .position)
+        try container.encode(instruction, forKey: .instruction)
+        try container.encodeIfPresent(nodeId, forKey: .nodeId)
+    }
 }
 
 struct V1Position: Codable {
@@ -401,6 +439,7 @@ struct PathStep: Codable {
     let floorLevel: Int?
     let position: Position?
     let instruction: String?
+    let nodeId: String?
 }
 
 struct Position: Codable {
@@ -420,7 +459,8 @@ extension PathfindingResponse {
                 stepNumber: s.stepNumber,
                 floorLevel: s.floorLevel,
                 position: Position(x: s.position.x, y: s.position.y, z: s.position.z),
-                instruction: s.instruction
+                instruction: s.instruction,
+                nodeId: s.nodeId
             )
         }
     }

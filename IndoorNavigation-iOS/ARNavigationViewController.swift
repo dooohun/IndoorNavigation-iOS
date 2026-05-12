@@ -12,6 +12,1524 @@ private final class HUDPassthroughView: UIView {
     }
 }
 
+private final class FloorNavigationMapView: UIView {
+
+    // MARK: - Data state
+
+    private var floorMap: FloorMapResponse?
+    private var routeSteps: [PathStep] = []
+    private var currentPosition: Position?
+    private var polygonRings: [[CGPoint]] = []
+    private var navigationPolygons: [MapPolygon] = []
+    private var activeNavigationPolygonIndex: Int?
+    private var activeNavigationPolygonBearingDegrees: Float?
+    private var targetWorldPoint: CGPoint?
+    private var displayedWorldPoint: CGPoint?
+    private var userZoomScale = CGFloat(MapDesignTokens.Metric.mapZoomDefault)
+    private var currentAutoScaleLockSignature: String?
+    private var lockedAutoScaleCorridorWidthMeters: CGFloat?
+
+    // MARK: - Heading smoothing (ADR §D)
+
+    /// 외부에서 받은 최신 heading 입력 (EMA 필터 적용 전)
+    private var targetHeadingDegrees: Float?
+    /// CADisplayLink가 보간해 나가는 현재 heading
+    private var currentHeadingDegrees: Float?
+    /// corridor polygon 진입으로 결정된 목표 지도 방향.
+    private var targetMapBearingDegrees: Float?
+    /// CADisplayLink가 보간해 나가는 현재 지도 방향.
+    private var currentMapBearingDegrees: Float?
+    private var displayLink: CADisplayLink?
+    private var lastFrameTime: CFTimeInterval = 0
+
+    // MARK: - Layer cache (ADR §E)
+
+    /// 정적 컨텐츠 (폴리곤·엣지·경로·마커) — corridor polygon axis-up 기준으로 그린 CGImage를 보관
+    private let staticContentLayer = CALayer()
+    /// 동적 컨텐츠 (현재 위치 마커만)
+    private let dynamicOverlayLayer = CALayer()
+    /// dynamicOverlayLayer 전용 delegate — UIView를 sublayer delegate로 두면 backing layer
+    /// delegate 흐름과 충돌해 stack overflow(EXC_BAD_ACCESS code=2)를 일으킨다.
+    private let overlayDrawer = OverlayLayerDrawer()
+    /// true이면 다음 displayLink tick에서 staticContentLayer를 재생성
+    private var staticCacheDirty = true
+
+    // MARK: - Marker kind
+
+    private enum MapMarkerKind {
+        case poi
+        case elevator
+        case stairs
+        case escalator
+
+        var priority: Int {
+            switch self {
+            case .elevator: return 0
+            case .stairs: return 1
+            case .escalator: return 2
+            case .poi: return 3
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .poi: return ""
+            case .elevator: return "E"
+            case .stairs: return "St"
+            case .escalator: return "Es"
+            }
+        }
+
+        var fillColor: UIColor {
+            switch self {
+            case .poi: return MapDesignTokens.Accent.poi
+            case .elevator: return MapDesignTokens.Accent.elevator
+            case .stairs: return MapDesignTokens.Accent.stairs
+            case .escalator: return MapDesignTokens.Accent.escalator
+            }
+        }
+    }
+
+    private struct MapMarker {
+        let kind: MapMarkerKind
+        let worldPoint: CGPoint
+        let label: String?
+    }
+
+    private struct MarkerPinLayout {
+        let bubbleRect: CGRect
+        let tipPoint: CGPoint
+        let pointsDown: Bool
+
+        var collisionRect: CGRect {
+            bubbleRect.union(CGRect(x: tipPoint.x - 6, y: tipPoint.y - 6, width: 12, height: 12))
+        }
+    }
+
+    private struct RouteMapPoint {
+        let point: CGPoint
+        let floorLevel: Int?
+        let nodeId: String?
+    }
+
+    private struct MapPolygon {
+        let kind: String?
+        let rings: [[CGPoint]]
+        let bearingDegrees: Float?
+
+        var isFloorUnion: Bool {
+            kind == "floor_union"
+        }
+
+        func contains(_ point: CGPoint) -> Bool {
+            rings.contains { FloorNavigationMapMath.contains(point, in: $0) }
+        }
+
+        func orientedBearing(referenceDegrees: Float?) -> Float? {
+            guard let bearingDegrees else { return nil }
+            return FloorNavigationMapMath.orientedAxisDegrees(
+                axisDegrees: bearingDegrees,
+                referenceDegrees: referenceDegrees
+            )
+        }
+    }
+
+    // MARK: - Init
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = MapDesignTokens.Surface.backdropDim
+        isOpaque = true
+
+        staticContentLayer.anchorPoint = CGPoint(x: 0.5, y: 0.72)
+        staticContentLayer.contentsScale = UIScreen.main.scale
+        layer.addSublayer(staticContentLayer)
+
+        overlayDrawer.owner = self
+        dynamicOverlayLayer.delegate = overlayDrawer
+        dynamicOverlayLayer.contentsScale = UIScreen.main.scale
+        layer.addSublayer(dynamicOverlayLayer)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    // MARK: - External interface
+
+    private static func autoScaleLockSignature(map: FloorMapResponse, routeSteps: [PathStep]) -> String {
+        let routeSignature = routeSteps.map { step -> String in
+            let x = step.position?.x.map { String(format: "%.3f", $0) } ?? "nil"
+            let y = step.position?.y.map { String(format: "%.3f", $0) } ?? "nil"
+            return [
+                String(step.stepNumber),
+                step.floorLevel.map(String.init) ?? "nil",
+                step.nodeId ?? "nil",
+                x,
+                y
+            ].joined(separator: ",")
+        }.joined(separator: ";")
+        return [
+            map.buildingId,
+            map.floorId,
+            map.scanId,
+            map.etag,
+            String(map.floorLevel),
+            routeSignature
+        ].joined(separator: "|")
+    }
+
+    func configure(map: FloorMapResponse,
+                   routeSteps: [PathStep],
+                   currentPosition: Position?,
+                   currentHeadingDegrees: Float?) {
+        self.floorMap = map
+        self.routeSteps = routeSteps
+        self.currentPosition = currentPosition
+        let nextAutoScaleLockSignature = Self.autoScaleLockSignature(map: map, routeSteps: routeSteps)
+        if currentAutoScaleLockSignature != nextAutoScaleLockSignature {
+            currentAutoScaleLockSignature = nextAutoScaleLockSignature
+            lockedAutoScaleCorridorWidthMeters = nil
+        }
+        let parsedPolygons = Self.extractMapPolygons(from: map.polygon.raw)
+        self.polygonRings = Self.displayPolygonRings(from: parsedPolygons)
+        let localNavigationPolygons = parsedPolygons.filter { !$0.isFloorUnion && !$0.rings.isEmpty }
+        self.navigationPolygons = localNavigationPolygons.isEmpty
+            ? parsedPolygons.filter { !$0.rings.isEmpty }
+            : localNavigationPolygons
+        self.activeNavigationPolygonIndex = nil
+        self.activeNavigationPolygonBearingDegrees = nil
+        updateWorldPointTarget(resetCurrent: true)
+
+        if let heading = currentHeadingDegrees {
+            if let existing = targetHeadingDegrees {
+                // EMA(α=0.2) 로 target 업데이트
+                targetHeadingDegrees = existing + 0.2 * shortestArcDelta(from: existing, to: heading)
+            } else {
+                targetHeadingDegrees = heading
+                self.currentHeadingDegrees = heading
+            }
+        } else {
+            targetHeadingDegrees = nil
+            self.currentHeadingDegrees = nil
+        }
+        updateMapBearingTarget(resetCurrent: true)
+
+        staticCacheDirty = true
+        resumeDisplayLink()
+    }
+
+    func updateCurrentPosition(_ position: Position?, headingDegrees: Float?) {
+        currentPosition = position
+        updateWorldPointTarget(resetCurrent: false)
+
+        if let heading = headingDegrees {
+            if let existing = targetHeadingDegrees {
+                targetHeadingDegrees = existing + 0.2 * shortestArcDelta(from: existing, to: heading)
+            } else {
+                targetHeadingDegrees = heading
+                currentHeadingDegrees = heading
+            }
+        } else {
+            targetHeadingDegrees = nil
+            currentHeadingDegrees = nil
+        }
+        updateMapBearingTarget(resetCurrent: false)
+
+        staticCacheDirty = true
+        resumeDisplayLink()
+    }
+
+    func setZoomScale(_ zoomScale: CGFloat) {
+        let clamped = min(max(zoomScale, CGFloat(MapDesignTokens.Metric.mapZoomMinimum)),
+                          CGFloat(MapDesignTokens.Metric.mapZoomMaximum))
+        guard abs(clamped - userZoomScale) > 0.001 else { return }
+        userZoomScale = clamped
+        staticCacheDirty = true
+        resumeDisplayLink()
+    }
+
+    // MARK: - Layout
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // staticContentLayer: anchorPoint (0.5, 0.72) 기준이므로 position을 anchor 좌표로 설정
+        staticContentLayer.bounds = bounds
+        staticContentLayer.position = CGPoint(x: bounds.midX, y: bounds.minY + bounds.height * 0.72)
+        dynamicOverlayLayer.frame = bounds
+        CATransaction.commit()
+        staticCacheDirty = true
+        if window != nil {
+            resumeDisplayLink()
+        }
+    }
+
+    // UIView.draw(_:)는 더 이상 cache 갱신에 쓰지 않는다 — 빈 구현으로 유지 (ADR §E)
+    override func draw(_ rect: CGRect) {}
+
+    // MARK: - DisplayLink lifecycle
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            resumeDisplayLink()
+        } else {
+            pauseDisplayLink()
+        }
+    }
+
+    override func removeFromSuperview() {
+        pauseDisplayLink()
+        super.removeFromSuperview()
+    }
+
+    private func resumeDisplayLink() {
+        if displayLink == nil {
+            let link = CADisplayLink(target: self, selector: #selector(displayLinkTick(_:)))
+            link.add(to: .main, forMode: .common)
+            displayLink = link
+        }
+        displayLink?.isPaused = false
+    }
+
+    private func pauseDisplayLink() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    // MARK: - DisplayLink tick (ADR §D + §E)
+
+    @objc private func displayLinkTick(_ sender: CADisplayLink) {
+        let now = sender.timestamp
+        let dt = lastFrameTime == 0 ? 0 : now - lastFrameTime
+        lastFrameTime = now
+
+        // heading 보간: shortest-arc, tau=0.18s
+        if let target = targetHeadingDegrees, let current = currentHeadingDegrees {
+            let delta = shortestArcDelta(from: current, to: target)
+            let alpha = dt == 0 ? 0 : Float(min(1.0, dt / MapDesignTokens.Metric.headingSmoothingTau))
+            currentHeadingDegrees = current + delta * alpha
+        } else if let target = targetHeadingDegrees {
+            currentHeadingDegrees = target
+        }
+
+        var mapBearingDelta: Float = 0
+        if let target = targetMapBearingDegrees, let current = currentMapBearingDegrees {
+            let delta = shortestArcDelta(from: current, to: target)
+            let alpha = dt == 0 ? 0 : Float(min(1.0, dt / MapDesignTokens.Metric.mapBearingSmoothingTau))
+            mapBearingDelta = delta * alpha
+            currentMapBearingDegrees = current + mapBearingDelta
+            if abs(mapBearingDelta) >= 0.01 {
+                staticCacheDirty = true
+            }
+        } else if let target = targetMapBearingDegrees {
+            currentMapBearingDegrees = target
+            mapBearingDelta = 1
+            staticCacheDirty = true
+        }
+
+        var positionDelta = CGFloat.zero
+        if let target = targetWorldPoint, let current = displayedWorldPoint {
+            let alpha = dt == 0 ? CGFloat.zero : CGFloat(min(1.0, dt / MapDesignTokens.Metric.mapPositionSmoothingTau))
+            let interpolated = CGPoint(
+                x: current.x + (target.x - current.x) * alpha,
+                y: current.y + (target.y - current.y) * alpha
+            )
+            let next = snappedRoutePoint(interpolated) ?? interpolated
+            positionDelta = hypot(next.x - current.x, next.y - current.y)
+            displayedWorldPoint = next
+            if positionDelta >= 0.001 {
+                staticCacheDirty = true
+            }
+        } else if let target = targetWorldPoint {
+            displayedWorldPoint = target
+            positionDelta = 1
+            staticCacheDirty = true
+        }
+
+        // static cache 재생성
+        if staticCacheDirty {
+            rebuildStaticContent()
+            staticCacheDirty = false
+        }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        staticContentLayer.setAffineTransform(.identity)
+        CATransaction.commit()
+
+        // 현재 위치 마커 갱신
+        dynamicOverlayLayer.setNeedsDisplay()
+
+        let headingRemainingDelta = remainingDelta(current: currentHeadingDegrees, target: targetHeadingDegrees)
+        let mapBearingRemainingDelta = remainingDelta(current: currentMapBearingDegrees, target: targetMapBearingDegrees)
+        let positionRemainingDistance = remainingDistance(current: displayedWorldPoint, target: targetWorldPoint)
+
+        // idle 조건: heading/map bearing 거의 수렴 + cache 깨끗하면 displayLink 일시정지
+        if headingRemainingDelta < 0.05
+            && mapBearingRemainingDelta < 0.05
+            && positionRemainingDistance < 0.002
+            && !staticCacheDirty {
+            displayLink?.isPaused = true
+            lastFrameTime = 0
+        }
+    }
+
+    // MARK: - Static content rebuild (ADR §E)
+
+    private func rebuildStaticContent() {
+        guard let floorMap, !bounds.isEmpty else { return }
+        let drawRect = bounds.insetBy(dx: 12, dy: 10)
+        let renderer = UIGraphicsImageRenderer(bounds: bounds)
+        let image = renderer.image { context in
+            let cgContext = context.cgContext
+            let transform = makeStaticTransform(bounds: floorMap.bounds, rect: drawRect)
+            cgContext.saveGState()
+            cgContext.clip(to: drawRect)
+            if !polygonRings.isEmpty {
+                drawPolygon(context: cgContext, rings: polygonRings, transform: transform)
+            }
+            drawRoute(context: cgContext, floorLevel: floorMap.floorLevel, transform: transform)
+            drawMarkers(context: cgContext, map: floorMap, transform: transform, clipRect: drawRect)
+            cgContext.restoreGState()
+        }
+        staticContentLayer.contents = image.cgImage
+    }
+
+    /// 현재 위치 기준 viewport transform 계산 (정적 캐시용).
+    /// 지도 방향은 현재 진입한 corridor polygon axis가 화면 수직이 되도록 맞춘다.
+    private func makeStaticTransform(bounds: FloorMapBounds, rect: CGRect) -> (CGPoint) -> CGPoint {
+        guard let worldPoint = currentWorldPoint else {
+            return makeFloorFitTransform(bounds: bounds, rect: rect)
+        }
+        return makeRouteAlignedTransform(bounds: bounds,
+                                         rect: rect,
+                                         currentWorldPoint: worldPoint,
+                                         bearingDegrees: displayedMapBearingDegrees() ?? 0)
+    }
+
+    // MARK: - Draw helpers
+
+    private func drawPolygon(context: CGContext,
+                             rings: [[CGPoint]],
+                             transform: (CGPoint) -> CGPoint) {
+        let path = UIBezierPath()
+        for ring in rings where ring.count >= 3 {
+            let first = transform(ring[0])
+            path.move(to: first)
+            for point in ring.dropFirst() {
+                path.addLine(to: transform(point))
+            }
+            path.close()
+        }
+
+        MapDesignTokens.Surface.floorFill.setFill()
+        path.usesEvenOddFillRule = true
+        path.fill(with: .normal, alpha: 1.0)
+        MapDesignTokens.Stroke.floorOutline.setStroke()
+        path.lineWidth = 1.0
+        path.stroke()
+    }
+
+    private func drawGraph(context: CGContext,
+                           map: FloorMapResponse,
+                           transform: (CGPoint) -> CGPoint) {
+        let nodesById = map.nodes.reduce(into: [String: FloorMapNode]()) { result, node in
+            result[node.id] = node
+        }
+        context.setLineCap(.round)
+        for edge in map.edges {
+            guard let from = nodesById[edge.fromId], let to = nodesById[edge.toId] else { continue }
+            let start = transform(CGPoint(x: from.x, y: from.y))
+            let end = transform(CGPoint(x: to.x, y: to.y))
+            let edgeColor = edge.type == "corridor"
+                ? MapDesignTokens.Stroke.edgeCorridor
+                : MapDesignTokens.Stroke.edgeOther
+            context.setStrokeColor(edgeColor.cgColor)
+            context.setLineWidth(edge.type == "corridor" ? 2.0 : 1.0)
+            context.beginPath()
+            context.move(to: start)
+            context.addLine(to: end)
+            context.strokePath()
+        }
+    }
+
+    private func drawRoute(context: CGContext,
+                           floorLevel: Int,
+                           transform: (CGPoint) -> CGPoint) {
+        var points = routeWorldPoints(filterFloorLevel: floorLevel)
+        if points.count < 2 {
+            points = routeWorldPoints(filterFloorLevel: nil)
+        }
+        guard points.count >= 2 else { return }
+
+        let path = UIBezierPath()
+        path.move(to: transform(points[0]))
+        for point in points.dropFirst() {
+            path.addLine(to: transform(point))
+        }
+
+        context.saveGState()
+        if let currentWorldPoint {
+            let currentScreenPoint = transform(currentWorldPoint)
+            context.clip(to: CGRect(
+                x: bounds.minX,
+                y: bounds.minY,
+                width: bounds.width,
+                height: max(0, currentScreenPoint.y - bounds.minY + MapDesignTokens.Metric.routeClipOverlap)
+            ))
+        }
+
+        context.saveGState()
+        context.setShadow(offset: CGSize(width: 0, height: 1), blur: 4, color: MapDesignTokens.Shadow.route.cgColor)
+        MapDesignTokens.Accent.route.setStroke()
+        path.lineWidth = 5
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        path.stroke()
+        context.restoreGState()
+
+        MapDesignTokens.Stroke.routeHalo.setStroke()
+        path.lineWidth = 1.4
+        path.stroke()
+        context.restoreGState()
+    }
+
+    private func drawMarkers(context: CGContext,
+                             map: FloorMapResponse,
+                             transform: (CGPoint) -> CGPoint,
+                             clipRect: CGRect) {
+        let markers = mapMarkers(from: map)
+        guard !markers.isEmpty else { return }
+
+        let visibleRect = clipRect.insetBy(dx: -24, dy: -24)
+        let currentScreenPoint = currentWorldPoint.map(transform)
+        let floorRouteWorldPoints = routeWorldPoints(filterFloorLevel: map.floorLevel)
+        let routeScreenPoints = (floorRouteWorldPoints.count >= 2 ? floorRouteWorldPoints : routeWorldPoints(filterFloorLevel: nil)).map(transform)
+        var occupiedRects: [CGRect] = []
+        if let currentScreenPoint {
+            let positionDiameter = MapDesignTokens.Metric.positionPuckDiameter + 8
+            occupiedRects.append(CGRect(x: currentScreenPoint.x - positionDiameter / 2,
+                                        y: currentScreenPoint.y - positionDiameter / 2,
+                                        width: positionDiameter,
+                                        height: positionDiameter))
+        }
+
+        let visibleMarkers = markers.compactMap { marker -> (MapMarker, CGPoint)? in
+            let screenPoint = transform(marker.worldPoint)
+            guard visibleRect.contains(screenPoint) else { return nil }
+            return (marker, screenPoint)
+        }.sorted { left, right in
+            if left.0.kind.priority != right.0.kind.priority {
+                return left.0.kind.priority < right.0.kind.priority
+            }
+            if let currentScreenPoint {
+                return screenDistance(left.1, currentScreenPoint) < screenDistance(right.1, currentScreenPoint)
+            }
+            return (left.0.label ?? "") < (right.0.label ?? "")
+        }
+
+        for (marker, screenPoint) in visibleMarkers {
+            guard let label = markerText(for: marker),
+                  currentScreenPoint.map({ screenDistance(screenPoint, $0) >= 42 }) ?? true,
+                  let layout = markerPinLayout(label: label,
+                                               point: screenPoint,
+                                               clipRect: clipRect,
+                                               occupiedRects: occupiedRects,
+                                               routeScreenPoints: routeScreenPoints) else { continue }
+            drawMarkerPin(context: context, kind: marker.kind, label: label, layout: layout)
+            occupiedRects.append(layout.collisionRect.insetBy(dx: -4, dy: -4))
+        }
+    }
+
+    private func mapMarkers(from map: FloorMapResponse) -> [MapMarker] {
+        map.nodes.compactMap { node in
+            guard let kind = markerKind(for: node) else { return nil }
+            return MapMarker(kind: kind,
+                             worldPoint: CGPoint(x: node.x, y: node.y),
+                             label: node.label)
+        }
+    }
+
+    private func markerKind(for node: FloorMapNode) -> MapMarkerKind? {
+        let type = node.type.lowercased()
+        let connectorType = node.connector?.type.lowercased()
+
+        if type == "poi_attach" || type == "corridor" || type == "junction" || type == "endpoint" {
+            return nil
+        }
+        if type == "poi" {
+            return .poi
+        }
+        if type.contains("elevator") || connectorType == "elevator" {
+            return .elevator
+        }
+        if type.contains("escalator") || connectorType == "escalator" {
+            return .escalator
+        }
+        if type.contains("stair") || connectorType == "stair" || connectorType == "stairs" {
+            return .stairs
+        }
+        return nil
+    }
+
+    private func drawMarkerPin(context: CGContext, kind: MapMarkerKind, label: String, layout: MarkerPinLayout) {
+        context.saveGState()
+        context.setShadow(offset: CGSize(width: 0, height: 2), blur: 5, color: MapDesignTokens.Shadow.marker.cgColor)
+
+        let path = UIBezierPath(roundedRect: layout.bubbleRect, cornerRadius: layout.bubbleRect.height / 2)
+        if layout.pointsDown {
+            path.move(to: CGPoint(x: layout.tipPoint.x - 5, y: layout.bubbleRect.maxY - 2))
+            path.addLine(to: layout.tipPoint)
+            path.addLine(to: CGPoint(x: layout.tipPoint.x + 5, y: layout.bubbleRect.maxY - 2))
+        } else {
+            path.move(to: CGPoint(x: layout.tipPoint.x - 5, y: layout.bubbleRect.minY + 2))
+            path.addLine(to: layout.tipPoint)
+            path.addLine(to: CGPoint(x: layout.tipPoint.x + 5, y: layout.bubbleRect.minY + 2))
+        }
+        path.close()
+        kind.fillColor.setFill()
+        path.fill()
+        context.restoreGState()
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 11.5, weight: .bold),
+            .foregroundColor: MapDesignTokens.Text.onAccent
+        ]
+        let textRect = layout.bubbleRect.insetBy(dx: 9, dy: 5)
+        (label as NSString).draw(in: textRect, withAttributes: attributes)
+    }
+
+    private func markerPinLayout(label: String,
+                                 point: CGPoint,
+                                 clipRect: CGRect,
+                                 occupiedRects: [CGRect],
+                                 routeScreenPoints: [CGPoint]) -> MarkerPinLayout? {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 11.5, weight: .bold)
+        ]
+        let textSize = (label as NSString).size(withAttributes: attributes)
+        let bubbleHeight = MapDesignTokens.Metric.markerBubbleHeight
+        let bubbleWidth = min(max(textSize.width + 20, 42), 94)
+        let pointerHeight: CGFloat = 7
+        let gap: CGFloat = 2
+        let aboveBubble = CGRect(
+            x: point.x - bubbleWidth / 2,
+            y: point.y - bubbleHeight - pointerHeight - gap,
+            width: bubbleWidth,
+            height: bubbleHeight
+        )
+        let belowBubble = CGRect(
+            x: point.x - bubbleWidth / 2,
+            y: point.y + pointerHeight + gap,
+            width: bubbleWidth,
+            height: bubbleHeight
+        )
+        let candidates = [
+            MarkerPinLayout(bubbleRect: aboveBubble,
+                            tipPoint: CGPoint(x: point.x, y: point.y - gap),
+                            pointsDown: true),
+            MarkerPinLayout(bubbleRect: belowBubble,
+                            tipPoint: CGPoint(x: point.x, y: point.y + gap),
+                            pointsDown: false)
+        ]
+        return candidates.first { candidate in
+            let expanded = candidate.collisionRect.insetBy(dx: -3, dy: -3)
+            guard clipRect.contains(candidate.collisionRect) else { return false }
+            guard !occupiedRects.contains(where: { $0.intersects(expanded) }) else { return false }
+            guard routeScreenPoints.allSatisfy({ screenDistance($0, point) >= 18 || !expanded.contains($0) }) else { return false }
+            return true
+        }
+    }
+
+    private func displayLabel(_ label: String?) -> String? {
+        guard let trimmed = label?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        if trimmed.count <= 12 {
+            return trimmed
+        }
+        return String(trimmed.prefix(12)) + "..."
+    }
+
+    private func markerText(for marker: MapMarker) -> String? {
+        switch marker.kind {
+        case .poi:
+            return displayLabel(marker.label) ?? "POI"
+        case .elevator, .stairs, .escalator:
+            return displayLabel(marker.label) ?? marker.kind.symbol
+        }
+    }
+
+    private func screenDistance(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
+        hypot(lhs.x - rhs.x, lhs.y - rhs.y)
+    }
+
+    // MARK: - Dynamic overlay: current position marker
+
+    fileprivate func drawCurrentPositionMarker(in context: CGContext) {
+        guard let currentWorldPoint,
+              let floorMap else { return }
+        let drawRect = bounds.insetBy(dx: 12, dy: 10)
+        let transform = makeStaticTransform(bounds: floorMap.bounds, rect: drawRect)
+        let point = transform(currentWorldPoint)
+
+        if let heading = currentHeadingDegrees {
+            drawHeadingMarker(context: context,
+                              point: point,
+                              headingDegrees: heading,
+                              mapBearingDegrees: displayedMapBearingDegrees() ?? heading)
+        } else {
+            drawPositionDot(context: context, point: point)
+        }
+        if let remainingDistance = remainingDistanceMetersForCurrentPoint(currentWorldPoint) {
+            drawRemainingDistanceBadge(context: context, point: point, remainingDistance: remainingDistance)
+        }
+    }
+
+    private func drawPositionDot(context: CGContext, point: CGPoint) {
+        let diameter = MapDesignTokens.Metric.positionPuckDiameter
+        let outer = CGRect(x: point.x - diameter / 2,
+                           y: point.y - diameter / 2,
+                           width: diameter,
+                           height: diameter)
+        let inner = CGRect(x: point.x - 4.5, y: point.y - 4.5, width: 9, height: 9)
+
+        context.saveGState()
+        context.setShadow(offset: CGSize(width: 0, height: 3), blur: 9, color: MapDesignTokens.Shadow.positionHalo.cgColor)
+        MapDesignTokens.Stroke.markerHalo.setFill()
+        context.fillEllipse(in: outer)
+        context.restoreGState()
+
+        MapDesignTokens.Accent.currentPosition.setFill()
+        context.fillEllipse(in: inner)
+    }
+
+    private func drawHeadingMarker(context: CGContext,
+                                   point: CGPoint,
+                                   headingDegrees: Float,
+                                   mapBearingDegrees: Float) {
+        let angle = screenAngleRadians(headingDegrees: headingDegrees, mapBearingDegrees: mapBearingDegrees)
+
+        context.saveGState()
+        context.translateBy(x: point.x, y: point.y)
+
+        let diameter = MapDesignTokens.Metric.positionPuckDiameter
+        let puckRect = CGRect(x: -diameter / 2, y: -diameter / 2, width: diameter, height: diameter)
+        context.saveGState()
+        context.setShadow(offset: CGSize(width: 0, height: 3), blur: 10, color: MapDesignTokens.Shadow.positionArrow.cgColor)
+        MapDesignTokens.Stroke.markerHalo.setFill()
+        context.fillEllipse(in: puckRect)
+        context.restoreGState()
+
+        context.rotate(by: angle)
+
+        let path = UIBezierPath()
+        path.move(to: CGPoint(x: 0, y: -13))
+        path.addLine(to: CGPoint(x: -9, y: 11))
+        path.addLine(to: CGPoint(x: 0, y: 6))
+        path.addLine(to: CGPoint(x: 9, y: 11))
+        path.close()
+
+        MapDesignTokens.Accent.currentPosition.setFill()
+        path.fill()
+
+        context.restoreGState()
+    }
+
+    private func drawRemainingDistanceBadge(context: CGContext,
+                                            point: CGPoint,
+                                            remainingDistance: CGFloat) {
+        let meters = max(0, Int(remainingDistance.rounded()))
+        let label = "\(meters)m"
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 11.5, weight: .bold),
+            .foregroundColor: MapDesignTokens.Text.primary
+        ]
+        let textSize = (label as NSString).size(withAttributes: attributes)
+        let badgeSize = CGSize(width: max(44, textSize.width + 18), height: 24)
+        let markerDiameter = MapDesignTokens.Metric.positionPuckDiameter
+        var originY = point.y + markerDiameter / 2 + 5
+        if originY + badgeSize.height > bounds.maxY - 8 {
+            originY = point.y - markerDiameter / 2 - badgeSize.height - 5
+        }
+        let rect = CGRect(x: point.x - badgeSize.width / 2,
+                          y: originY,
+                          width: badgeSize.width,
+                          height: badgeSize.height)
+
+        context.saveGState()
+        context.setShadow(offset: CGSize(width: 0, height: 2), blur: 5, color: MapDesignTokens.Shadow.marker.cgColor)
+        MapDesignTokens.Surface.controlFill.setFill()
+        let path = UIBezierPath(roundedRect: rect, cornerRadius: rect.height / 2)
+        path.fill()
+        MapDesignTokens.Stroke.labelBorder.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        context.restoreGState()
+
+        let textRect = CGRect(x: rect.midX - textSize.width / 2,
+                              y: rect.midY - textSize.height / 2,
+                              width: textSize.width,
+                              height: textSize.height)
+        (label as NSString).draw(in: textRect, withAttributes: attributes)
+    }
+
+    // MARK: - Transform helpers
+
+    private func routeMapPoints(filterFloorLevel: Int?) -> [RouteMapPoint] {
+        routeSteps.compactMap { step in
+            if let filterFloorLevel,
+               let stepFloor = step.floorLevel,
+               stepFloor != filterFloorLevel {
+                return nil
+            }
+            guard let pos = step.position,
+                  let x = pos.x,
+                  let y = pos.y else { return nil }
+            return RouteMapPoint(
+                point: CGPoint(x: x, y: y),
+                floorLevel: step.floorLevel,
+                nodeId: step.nodeId
+            )
+        }
+    }
+
+    private func routeWorldPoints(filterFloorLevel: Int?) -> [CGPoint] {
+        adjustedRouteWorldPoints(from: routeMapPoints(filterFloorLevel: filterFloorLevel))
+    }
+
+    private func adjustedRouteWorldPoints(from routePoints: [RouteMapPoint]) -> [CGPoint] {
+        var points = routePoints.map(\.point)
+        guard points.count >= 2 else { return points }
+
+        let firstKnownNodeAfterStart = routePoints.dropFirst().first { $0.nodeId != nil }?.nodeId
+        let firstPointIsKnownVirtual = routePoints[0].nodeId == nil && firstKnownNodeAfterStart != nil
+        let firstPointLooksVirtual = routePoints[0].nodeId == nil
+            && firstKnownNodeAfterStart == nil
+            && nearestNodeId(to: routePoints[0].point, maxDistance: 0.35) == nil
+            && nearestNodeId(to: routePoints[1].point, maxDistance: 0.35) != nil
+
+        guard firstPointIsKnownVirtual || firstPointLooksVirtual else { return points }
+
+        let preferredNodeId = firstKnownNodeAfterStart
+            ?? nearestNodeId(to: routePoints[1].point, maxDistance: 0.5)
+        if let projectedStart = FloorNavigationMapMath.projectedPointOnGraphEdge(
+            point: routePoints[0].point,
+            segments: floorGraphSegments(),
+            preferredConnectedNodeId: preferredNodeId
+        ) {
+            points[0] = projectedStart
+        }
+        return points
+    }
+
+    private func floorGraphSegments() -> [FloorNavigationMapMath.GraphSegment] {
+        guard let floorMap else { return [] }
+        let nodesById = floorMap.nodes.reduce(into: [String: FloorMapNode]()) { result, node in
+            result[node.id] = node
+        }
+        return floorMap.edges.compactMap { edge in
+            guard let from = nodesById[edge.fromId], let to = nodesById[edge.toId] else { return nil }
+            return FloorNavigationMapMath.GraphSegment(
+                fromId: edge.fromId,
+                toId: edge.toId,
+                type: edge.type,
+                start: CGPoint(x: from.x, y: from.y),
+                end: CGPoint(x: to.x, y: to.y)
+            )
+        }
+    }
+
+    private func nearestNodeId(to point: CGPoint, maxDistance: CGFloat) -> String? {
+        guard let floorMap else { return nil }
+        var best: (id: String, distance: CGFloat)?
+        for node in floorMap.nodes {
+            let distance = hypot(CGFloat(node.x) - point.x, CGFloat(node.y) - point.y)
+            if distance <= maxDistance,
+               best == nil || distance < best!.distance {
+                best = (node.id, distance)
+            }
+        }
+        return best?.id
+    }
+
+    private var usesHeadingUpTransform: Bool {
+        currentWorldPoint != nil
+    }
+
+    private var currentWorldPoint: CGPoint? {
+        displayedWorldPoint ?? targetWorldPoint ?? snappedTargetWorldPoint()
+    }
+
+    private func updateWorldPointTarget(resetCurrent: Bool) {
+        guard let point = snappedTargetWorldPoint() else {
+            targetWorldPoint = nil
+            displayedWorldPoint = nil
+            return
+        }
+
+        targetWorldPoint = point
+        if resetCurrent || displayedWorldPoint == nil {
+            displayedWorldPoint = point
+        }
+    }
+
+    private func snappedTargetWorldPoint() -> CGPoint? {
+        guard let constrained = rawConstrainedWorldPoint else { return nil }
+        return snappedRoutePoint(constrained) ?? constrained
+    }
+
+    private func snappedRoutePoint(_ point: CGPoint) -> CGPoint? {
+        let routePoints = currentRouteWorldPoints()
+        return FloorNavigationMapMath.projectedPointOnRoute(
+            routePoints: routePoints,
+            currentPoint: point
+        )
+    }
+
+    private var rawConstrainedWorldPoint: CGPoint? {
+        guard let currentPosition,
+              let x = currentPosition.x,
+              let y = currentPosition.y else { return nil }
+        let rawPoint = CGPoint(x: x, y: y)
+        return FloorNavigationMapMath.constrainedPoint(
+            rawPoint,
+            polygonRings: polygonRings,
+            bounds: floorMap?.bounds
+        )
+    }
+
+    private func displayedMapBearingDegrees() -> Float? {
+        currentMapBearingDegrees ?? targetMapBearingDegrees ?? resolvedMapBearingDegrees()
+    }
+
+    private func updateMapBearingTarget(resetCurrent: Bool) {
+        guard let bearing = resolvedMapBearingDegrees() else {
+            targetMapBearingDegrees = nil
+            currentMapBearingDegrees = nil
+            return
+        }
+
+        targetMapBearingDegrees = bearing
+        if resetCurrent || currentMapBearingDegrees == nil {
+            currentMapBearingDegrees = bearing
+        }
+    }
+
+    private func resolvedMapBearingDegrees() -> Float? {
+        guard let targetWorldPoint else { return nil }
+        let routeBearing = currentRouteBearingDegrees(at: targetWorldPoint)
+        if let polygonBearing = currentNavigationPolygonBearing(at: targetWorldPoint,
+                                                                referenceDegrees: routeBearing ?? currentHeadingDegrees) {
+            return polygonBearing
+        }
+        return routeBearing ?? currentHeadingDegrees
+    }
+
+    private func currentRouteBearingDegrees(at currentWorldPoint: CGPoint) -> Float? {
+        FloorNavigationMapMath.routeBearingDegrees(routePoints: currentRouteWorldPoints(), currentPoint: currentWorldPoint)
+    }
+
+    private func remainingDistanceMetersForCurrentPoint(_ currentWorldPoint: CGPoint) -> CGFloat? {
+        FloorNavigationMapMath.remainingDistanceOnRoute(
+            routePoints: currentRouteWorldPoints(),
+            currentPoint: currentWorldPoint
+        )
+    }
+
+    private func currentRouteWorldPoints() -> [CGPoint] {
+        let floorRoutePoints: [CGPoint]
+        if let floorLevel = floorMap?.floorLevel {
+            floorRoutePoints = routeWorldPoints(filterFloorLevel: floorLevel)
+        } else {
+            floorRoutePoints = []
+        }
+        return floorRoutePoints.count >= 2 ? floorRoutePoints : routeWorldPoints(filterFloorLevel: nil)
+    }
+
+    private func currentNavigationPolygonBearing(at currentWorldPoint: CGPoint,
+                                                 referenceDegrees: Float?) -> Float? {
+        if let index = activeNavigationPolygonIndex,
+           navigationPolygons.indices.contains(index),
+           navigationPolygons[index].contains(currentWorldPoint) {
+            if let activeNavigationPolygonBearingDegrees {
+                return activeNavigationPolygonBearingDegrees
+            }
+            activeNavigationPolygonBearingDegrees = navigationPolygons[index].orientedBearing(referenceDegrees: referenceDegrees)
+            return activeNavigationPolygonBearingDegrees
+        }
+
+        guard let index = navigationPolygons.firstIndex(where: { $0.contains(currentWorldPoint) }) else {
+            activeNavigationPolygonIndex = nil
+            activeNavigationPolygonBearingDegrees = nil
+            return nil
+        }
+        activeNavigationPolygonIndex = index
+        activeNavigationPolygonBearingDegrees = navigationPolygons[index].orientedBearing(referenceDegrees: referenceDegrees)
+        return activeNavigationPolygonBearingDegrees
+    }
+
+    private func makeFloorFitTransform(bounds: FloorMapBounds,
+                                       rect: CGRect) -> (CGPoint) -> CGPoint {
+        let width = max(bounds.widthM, 0.001)
+        let height = max(bounds.heightM, 0.001)
+        let scale = min(rect.width / CGFloat(width), rect.height / CGFloat(height))
+        let drawnWidth = CGFloat(width) * scale
+        let drawnHeight = CGFloat(height) * scale
+        let origin = CGPoint(
+            x: rect.minX + (rect.width - drawnWidth) / 2,
+            y: rect.minY + (rect.height - drawnHeight) / 2
+        )
+
+        return { world in
+            CGPoint(
+                x: origin.x + CGFloat(world.x - bounds.minX) * scale,
+                y: origin.y + CGFloat(bounds.maxY - world.y) * scale
+            )
+        }
+    }
+
+    private func makeRouteAlignedTransform(bounds: FloorMapBounds,
+                                           rect: CGRect,
+                                           currentWorldPoint: CGPoint,
+                                           bearingDegrees: Float) -> (CGPoint) -> CGPoint {
+        let scale = routeAlignedScale(rect: rect, bearingDegrees: bearingDegrees)
+        let anchor = CGPoint(x: rect.midX, y: rect.minY + rect.height * 0.72)
+        let bearingRadians = CGFloat(bearingDegrees) * .pi / 180
+        let forward = CGPoint(x: cos(bearingRadians), y: sin(bearingRadians))
+        let right = CGPoint(x: sin(bearingRadians), y: -cos(bearingRadians))
+
+        return { world in
+            let dx = world.x - currentWorldPoint.x
+            let dy = world.y - currentWorldPoint.y
+            let screenX = dx * right.x + dy * right.y
+            let screenY = -(dx * forward.x + dy * forward.y)
+            return CGPoint(
+                x: anchor.x + screenX * scale,
+                y: anchor.y + screenY * scale
+            )
+        }
+    }
+
+    private func routeAlignedScale(rect: CGRect, bearingDegrees: Float) -> CGFloat {
+        let baseScale: CGFloat
+        if let corridorWidth = lockedCorridorReferenceWidthMeters(initialBearingDegrees: bearingDegrees) {
+            baseScale = rect.width * MapDesignTokens.Metric.corridorWidthScreenRatio / corridorWidth
+        } else {
+            baseScale = min(rect.width, rect.height) / (2.0 * MapDesignTokens.Metric.fallbackVisibleRadiusMeters)
+        }
+        return baseScale * userZoomScale
+    }
+
+    private func lockedCorridorReferenceWidthMeters(initialBearingDegrees: Float) -> CGFloat? {
+        if let lockedAutoScaleCorridorWidthMeters {
+            return lockedAutoScaleCorridorWidthMeters
+        }
+        guard let width = corridorReferenceWidthMeters(bearingDegrees: initialBearingDegrees) else {
+            return nil
+        }
+        lockedAutoScaleCorridorWidthMeters = width
+        return width
+    }
+
+    private func corridorReferenceWidthMeters(bearingDegrees: Float) -> CGFloat? {
+        let candidateRings = navigationPolygons.isEmpty
+            ? [polygonRings]
+            : navigationPolygons.map(\.rings)
+        return candidateRings
+            .compactMap { FloorNavigationMapMath.lateralWidthMeters(rings: $0, bearingDegrees: bearingDegrees) }
+            .max()
+    }
+
+    private func screenAngleRadians(headingDegrees: Float, mapBearingDegrees: Float) -> CGFloat {
+        let headingRadians = CGFloat(headingDegrees) * .pi / 180
+        let bearingRadians = CGFloat(mapBearingDegrees) * .pi / 180
+        let userForward = CGPoint(x: cos(headingRadians), y: sin(headingRadians))
+        let mapForward = CGPoint(x: cos(bearingRadians), y: sin(bearingRadians))
+        let mapRight = CGPoint(x: sin(bearingRadians), y: -cos(bearingRadians))
+        let screenForward = CGPoint(
+            x: userForward.x * mapRight.x + userForward.y * mapRight.y,
+            y: -(userForward.x * mapForward.x + userForward.y * mapForward.y)
+        )
+        return atan2(screenForward.x, -screenForward.y)
+    }
+
+    // MARK: - Heading math
+
+    /// 최단 호 delta: (target - current)를 [-180, 180] 범위로 정규화
+    private func shortestArcDelta(from current: Float, to target: Float) -> Float {
+        var delta = target - current
+        while delta > 180 { delta -= 360 }
+        while delta < -180 { delta += 360 }
+        return delta
+    }
+
+    private func remainingDelta(current: Float?, target: Float?) -> Float {
+        guard let current, let target else { return 0 }
+        return abs(shortestArcDelta(from: current, to: target))
+    }
+
+    private func remainingDistance(current: CGPoint?, target: CGPoint?) -> CGFloat {
+        guard let current, let target else { return 0 }
+        return hypot(target.x - current.x, target.y - current.y)
+    }
+
+    // MARK: - Polygon parsing
+
+    private static func extractMapPolygons(from raw: Data) -> [MapPolygon] {
+        guard let root = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
+              let features = root["features"] as? [[String: Any]] else { return [] }
+
+        return features.compactMap { feature -> MapPolygon? in
+            let properties = feature["properties"] as? [String: Any]
+            let kind = properties?["kind"] as? String
+            guard let geometry = feature["geometry"] as? [String: Any] else { return nil }
+            let polygonRings = rings(from: geometry)
+            guard !polygonRings.isEmpty else { return nil }
+            return MapPolygon(
+                kind: kind,
+                rings: polygonRings,
+                bearingDegrees: FloorNavigationMapMath.dominantAxisDegrees(rings: polygonRings)
+            )
+        }
+    }
+
+    private static func displayPolygonRings(from polygons: [MapPolygon]) -> [[CGPoint]] {
+        let floorUnion = polygons.filter(\.isFloorUnion).flatMap(\.rings)
+        if !floorUnion.isEmpty {
+            return floorUnion
+        }
+        return polygons.flatMap(\.rings)
+    }
+
+    private static func rings(from geometry: [String: Any]) -> [[CGPoint]] {
+        guard let type = geometry["type"] as? String,
+              let coordinates = geometry["coordinates"] as? [Any] else { return [] }
+        switch type {
+        case "Polygon":
+            return coordinates.compactMap { ring in
+                guard let ringArray = ring as? [Any] else { return nil }
+                return points(fromGeoJSONRing: ringArray)
+            }
+        case "MultiPolygon":
+            return coordinates.flatMap { polygon -> [[CGPoint]] in
+                guard let polygonArray = polygon as? [Any] else { return [] }
+                return polygonArray.compactMap { ring in
+                    guard let ringArray = ring as? [Any] else { return nil }
+                    return points(fromGeoJSONRing: ringArray)
+                }
+            }
+        default:
+            return []
+        }
+    }
+
+    private static func points(fromGeoJSONRing ring: [Any]) -> [CGPoint] {
+        ring.compactMap { item in
+            guard let pair = item as? [Any],
+                  pair.count >= 2,
+                  let x = doubleValue(pair[0]),
+                  let y = doubleValue(pair[1]) else { return nil }
+            return CGPoint(x: x, y: y)
+        }
+    }
+
+    private static func doubleValue(_ value: Any) -> Double? {
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let string = value as? String { return Double(string) }
+        return nil
+    }
+}
+
+// MARK: - CALayerDelegate (dynamicOverlayLayer)
+//
+// UIView 자신을 sublayer.delegate로 두면 UIView의 backing layer delegate 흐름과
+// 재귀가 발생해 stack overflow(EXC_BAD_ACCESS code=2)가 난다. 따라서 dynamicOverlayLayer
+// 만 처리하는 별도 NSObject delegate를 둔다.
+private final class OverlayLayerDrawer: NSObject, CALayerDelegate {
+    weak var owner: FloorNavigationMapView?
+
+    func draw(_ layer: CALayer, in context: CGContext) {
+        guard let owner else { return }
+        UIGraphicsPushContext(context)
+        owner.drawCurrentPositionMarker(in: context)
+        UIGraphicsPopContext()
+    }
+
+    // sublayer frame/position 변경 시 implicit animation을 끈다 — heading 회전과 충돌 방지.
+    func action(for layer: CALayer, forKey event: String) -> CAAction? {
+        return NSNull()
+    }
+}
+
+#if DEBUG
+final class FloorNavigationMapMockViewController: UIViewController {
+    private let buildingId: String
+    private let floorId: String
+    private let destinationName: String
+    private let goal: Coordinate
+
+    private let mapView = FloorNavigationMapView()
+    private let titleLabel = UILabel()
+    private let statusLabel = UILabel()
+    private let playButton = UIButton(type: .system)
+    private let relocalizeButton = UIButton(type: .system)
+    private let outsideButton = UIButton(type: .system)
+    private let zoomContainer = UIView()
+    private let zoomSlider = UISlider()
+
+    private var floorMap: FloorMapResponse?
+    private var routeSteps: [PathStep] = []
+    private var routePoints: [CGPoint] = []
+    private var routeSegmentLengths: [CGFloat] = []
+    private var routeLength: CGFloat = 0
+    private var progressM: CGFloat = 0
+    private var timer: Timer?
+    private var isPaused = false
+    private var forceOutsidePolygon = false
+
+    init(buildingId: String, floorId: String, destinationName: String, goal: Coordinate) {
+        self.buildingId = buildingId
+        self.floorId = floorId
+        self.destinationName = destinationName
+        self.goal = goal
+        super.init(nibName: nil, bundle: nil)
+        modalPresentationStyle = .fullScreen
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = MapDesignTokens.Surface.backdropDim
+        setupViews()
+        loadMap()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func setupViews() {
+        mapView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(mapView)
+
+        let controls = UIStackView()
+        controls.axis = .horizontal
+        controls.alignment = .center
+        controls.distribution = .fillEqually
+        controls.spacing = 8
+        controls.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(controls)
+
+        titleLabel.text = "2D Map Mock"
+        titleLabel.textColor = MapDesignTokens.Text.primary
+        titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(titleLabel)
+
+        statusLabel.text = "loading"
+        statusLabel.textColor = MapDesignTokens.Text.onChip
+        statusLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(statusLabel)
+
+        zoomContainer.backgroundColor = MapDesignTokens.Surface.controlFill
+        zoomContainer.layer.cornerRadius = 22
+        zoomContainer.layer.masksToBounds = false
+        zoomContainer.layer.borderWidth = 1
+        zoomContainer.layer.borderColor = MapDesignTokens.Stroke.labelBorder.cgColor
+        zoomContainer.layer.shadowColor = UIColor.black.cgColor
+        zoomContainer.layer.shadowOpacity = 0.10
+        zoomContainer.layer.shadowRadius = 8
+        zoomContainer.layer.shadowOffset = CGSize(width: 0, height: 3)
+        zoomContainer.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(zoomContainer)
+
+        zoomSlider.minimumValue = MapDesignTokens.Metric.mapZoomMinimum
+        zoomSlider.maximumValue = MapDesignTokens.Metric.mapZoomMaximum
+        zoomSlider.value = MapDesignTokens.Metric.mapZoomDefault
+        zoomSlider.minimumTrackTintColor = MapDesignTokens.Accent.route
+        zoomSlider.maximumTrackTintColor = MapDesignTokens.Stroke.labelBorder
+        zoomSlider.thumbTintColor = MapDesignTokens.Text.primary
+        zoomSlider.accessibilityLabel = "2D map zoom"
+        zoomSlider.translatesAutoresizingMaskIntoConstraints = false
+        zoomSlider.addTarget(self, action: #selector(onZoomChanged(_:)), for: .valueChanged)
+        zoomContainer.addSubview(zoomSlider)
+
+        configureButton(playButton, title: "Pause", action: #selector(onPlayTapped))
+        configureButton(relocalizeButton, title: "Reloc", action: #selector(onRelocalizeTapped))
+        configureButton(outsideButton, title: "Outside", action: #selector(onOutsideTapped))
+
+        let closeButton = UIButton(type: .system)
+        configureButton(closeButton, title: "Close", action: #selector(onCloseTapped))
+
+        [playButton, relocalizeButton, outsideButton, closeButton].forEach(controls.addArrangedSubview)
+
+        let safeArea = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 12),
+            titleLabel.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor, constant: 16),
+
+            statusLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            statusLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+
+            controls.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor, constant: 12),
+            controls.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor, constant: -12),
+            controls.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor, constant: -12),
+            controls.heightAnchor.constraint(equalToConstant: 44),
+
+            zoomContainer.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor, constant: -16),
+            zoomContainer.bottomAnchor.constraint(equalTo: controls.topAnchor, constant: -12),
+            zoomContainer.widthAnchor.constraint(equalToConstant: 148),
+            zoomContainer.heightAnchor.constraint(equalToConstant: 44),
+
+            zoomSlider.leadingAnchor.constraint(equalTo: zoomContainer.leadingAnchor, constant: 14),
+            zoomSlider.trailingAnchor.constraint(equalTo: zoomContainer.trailingAnchor, constant: -14),
+            zoomSlider.centerYAnchor.constraint(equalTo: zoomContainer.centerYAnchor),
+
+            mapView.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 64),
+            mapView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            mapView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            mapView.bottomAnchor.constraint(equalTo: controls.topAnchor, constant: -12),
+        ])
+    }
+
+    private func configureButton(_ button: UIButton, title: String, action: Selector) {
+        button.setTitle(title, for: .normal)
+        button.setTitleColor(MapDesignTokens.Text.primary, for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
+        button.backgroundColor = MapDesignTokens.Surface.floorFill
+        button.layer.cornerRadius = 8
+        button.layer.masksToBounds = true
+        button.layer.borderColor = MapDesignTokens.Stroke.floorOutline.cgColor
+        button.layer.borderWidth = 1
+        button.addTarget(self, action: action, for: .touchUpInside)
+    }
+
+    @objc private func onZoomChanged(_ sender: UISlider) {
+        mapView.setZoomScale(CGFloat(sender.value))
+    }
+
+    private func loadMap() {
+        guard !floorId.isEmpty else {
+            applyMap(makeFallbackMap())
+            return
+        }
+
+        NetworkManager.shared.fetchFloorMap(floorId: floorId) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success(let map):
+                    self.applyMap(map)
+                case .failure(let error):
+                    print("[FloorMapMock] fetch failed: \(error)")
+                    self.applyMap(self.makeFallbackMap())
+                }
+            }
+        }
+    }
+
+    private func applyMap(_ map: FloorMapResponse) {
+        floorMap = map
+        routePoints = makeMockRoutePoints(map: map)
+        routeSteps = routePoints.enumerated().map { index, point in
+            PathStep(
+                stepNumber: index + 1,
+                floorLevel: map.floorLevel,
+                position: Position(x: Double(point.x), y: Double(point.y), z: 0),
+                instruction: index == routePoints.count - 1 ? "도착" : "진행",
+                nodeId: nil
+            )
+        }
+        rebuildRouteLengths()
+        progressM = 0
+        render(reconfigure: true)
+        startTimer()
+    }
+
+    private func makeMockRoutePoints(map: FloorMapResponse) -> [CGPoint] {
+        let nodesById = map.nodes.reduce(into: [String: FloorMapNode]()) { result, node in
+            result[node.id] = node
+        }
+
+        if let firstEdge = map.edges.max(by: { $0.lengthM < $1.lengthM }),
+           let start = nodesById[firstEdge.fromId],
+           let end = nodesById[firstEdge.toId] {
+            var ids = [start.id, end.id]
+            var previous = start.id
+            var current = end.id
+
+            for _ in 0..<5 {
+                guard let nextEdge = map.edges
+                    .filter({ $0.fromId == current || $0.toId == current })
+                    .filter({ edge in
+                        let other = edge.fromId == current ? edge.toId : edge.fromId
+                        return other != previous
+                    })
+                    .max(by: { $0.lengthM < $1.lengthM }) else { break }
+                let next = nextEdge.fromId == current ? nextEdge.toId : nextEdge.fromId
+                ids.append(next)
+                previous = current
+                current = next
+            }
+
+            let points = ids.compactMap { id -> CGPoint? in
+                guard let node = nodesById[id] else { return nil }
+                return CGPoint(x: node.x, y: node.y)
+            }
+            if points.count >= 2 {
+                return points
+            }
+        }
+
+        let minX = CGFloat(map.bounds.minX)
+        let minY = CGFloat(map.bounds.minY)
+        let maxX = CGFloat(map.bounds.maxX)
+        let maxY = CGFloat(map.bounds.maxY)
+        return [
+            CGPoint(x: minX + (maxX - minX) * 0.18, y: minY + (maxY - minY) * 0.22),
+            CGPoint(x: minX + (maxX - minX) * 0.68, y: minY + (maxY - minY) * 0.22),
+            CGPoint(x: minX + (maxX - minX) * 0.68, y: minY + (maxY - minY) * 0.82)
+        ]
+    }
+
+    private func rebuildRouteLengths() {
+        routeSegmentLengths = []
+        routeLength = 0
+        guard routePoints.count >= 2 else { return }
+        for index in 0..<(routePoints.count - 1) {
+            let length = hypot(routePoints[index + 1].x - routePoints[index].x,
+                               routePoints[index + 1].y - routePoints[index].y)
+            routeSegmentLengths.append(length)
+            routeLength += length
+        }
+    }
+
+    private func startTimer() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+    }
+
+    private func tick() {
+        guard !isPaused, routeLength > 0 else { return }
+        progressM += 0.035
+        if progressM > routeLength {
+            progressM = 0
+        }
+        render(reconfigure: false)
+    }
+
+    private func render(reconfigure: Bool) {
+        guard let floorMap else { return }
+        let sample = sampleRoute(progressM: progressM)
+        var point = sample.point
+        if forceOutsidePolygon {
+            point = CGPoint(x: CGFloat(floorMap.bounds.maxX) + 4.0, y: sample.point.y)
+        }
+        let position = Position(x: Double(point.x), y: Double(point.y), z: 0)
+        if reconfigure {
+            mapView.configure(map: floorMap,
+                              routeSteps: routeSteps,
+                              currentPosition: position,
+                              currentHeadingDegrees: sample.bearingDegrees)
+        } else {
+            mapView.updateCurrentPosition(position, headingDegrees: sample.bearingDegrees)
+        }
+        statusLabel.text = String(format: "progress %.1fm / %.1fm  heading %.0f",
+                                  Double(progressM),
+                                  Double(routeLength),
+                                  Double(sample.bearingDegrees))
+    }
+
+    private func sampleRoute(progressM: CGFloat) -> (point: CGPoint, bearingDegrees: Float) {
+        guard routePoints.count >= 2 else { return (.zero, 0) }
+        var remaining = progressM
+        for index in 0..<routeSegmentLengths.count {
+            let length = max(routeSegmentLengths[index], 0.001)
+            if remaining <= length {
+                let start = routePoints[index]
+                let end = routePoints[index + 1]
+                let t = remaining / length
+                let point = CGPoint(
+                    x: start.x + (end.x - start.x) * t,
+                    y: start.y + (end.y - start.y) * t
+                )
+                let bearing = Float(atan2(end.y - start.y, end.x - start.x) * 180 / .pi)
+                return (point, bearing)
+            }
+            remaining -= length
+        }
+        let start = routePoints[routePoints.count - 2]
+        let end = routePoints[routePoints.count - 1]
+        return (end, Float(atan2(end.y - start.y, end.x - start.x) * 180 / .pi))
+    }
+
+    private func makeFallbackMap() -> FloorMapResponse {
+        let polygon = """
+        {"type":"FeatureCollection","features":[{"type":"Feature","properties":{"kind":"floor_union"},"geometry":{"type":"Polygon","coordinates":[[[0,0],[18,0],[18,5],[10,5],[10,18],[4,18],[4,5],[0,5],[0,0]]]}}]}
+        """
+        let nodes = [
+            FloorMapNode(id: "n0", type: "corridor", x: 2, y: 2.5, z: 0, label: nil, connector: nil),
+            FloorMapNode(id: "n1", type: "corridor", x: 14, y: 2.5, z: 0, label: nil, connector: nil),
+            FloorMapNode(id: "n2", type: "corridor", x: 7, y: 2.5, z: 0, label: nil, connector: nil),
+            FloorMapNode(id: "n3", type: "corridor", x: 7, y: 15, z: 0, label: nil, connector: nil),
+            FloorMapNode(id: "p1", type: "poi", x: 15.5, y: 2.5, z: 0, label: "POI 15", connector: nil),
+            FloorMapNode(id: "s1", type: "passage_stairs", x: 7, y: 16, z: 0, label: "St", connector: FloorMapConnector(type: "stairs", key: nil))
+        ]
+        return FloorMapResponse(
+            floorId: floorId.isEmpty ? "mock-floor" : floorId,
+            buildingId: buildingId.isEmpty ? "mock-building" : buildingId,
+            scanId: "mock-scan",
+            floorLevel: 1,
+            floorName: "1F",
+            buildJobId: "mock",
+            coordinateSystem: FloorMapCoordinateSystem(frame: "mock", description: nil),
+            bounds: FloorMapBounds(minX: 0, minY: 0, maxX: 18, maxY: 18, widthM: 18, heightM: 18),
+            polygon: PolygonRaw(raw: Data(polygon.utf8)),
+            nodes: nodes,
+            edges: [
+                FloorMapEdge(id: "e0", fromId: "n0", toId: "n1", lengthM: 12, type: "corridor"),
+                FloorMapEdge(id: "e1", fromId: "n2", toId: "n3", lengthM: 12.5, type: "corridor"),
+                FloorMapEdge(id: "e2", fromId: "n1", toId: "p1", lengthM: 1.5, type: "poi"),
+                FloorMapEdge(id: "e3", fromId: "n3", toId: "s1", lengthM: 1, type: "passage")
+            ],
+            etag: "mock"
+        )
+    }
+
+    @objc private func onPlayTapped() {
+        isPaused.toggle()
+        playButton.setTitle(isPaused ? "Play" : "Pause", for: .normal)
+    }
+
+    @objc private func onRelocalizeTapped() {
+        guard routeLength > 0 else { return }
+        progressM = min(routeLength, max(0, progressM + routeLength * 0.22))
+        render(reconfigure: true)
+    }
+
+    @objc private func onOutsideTapped() {
+        forceOutsidePolygon.toggle()
+        outsideButton.setTitle(forceOutsidePolygon ? "Inside" : "Outside", for: .normal)
+        render(reconfigure: true)
+    }
+
+    @objc private func onCloseTapped() {
+        dismiss(animated: true)
+    }
+}
+#endif
+
 class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
 
     var buildingId: String = ""
@@ -53,6 +1571,18 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     // Phase 6: 하단 거리/시간 캡슐
     var remainingCapsuleView: UIView!
     var remainingCapsuleLabel: UILabel!
+
+    // 하단 2D 내비게이션 맵
+    private var floorNavigationContainerView: UIView!
+    private var floorNavigationMapView: FloorNavigationMapView!
+    private var floorNavigationExpandButton: UIButton!
+    private var floorNavigationZoomContainerView: UIView!
+    private var floorNavigationZoomSlider: UISlider!
+    private var floorNavigationGrabberView: UIView!
+    private var floorNavigationCollapsedHeightConstraint: NSLayoutConstraint!
+    private var floorNavigationExpandedHeightConstraint: NSLayoutConstraint!
+    private var currentStepMapSpacingConstraint: NSLayoutConstraint!
+    private var isFloorNavigationExpanded = false
 
     // Phase 6: 재측정 버튼 라벨 상태 추적 — 첫 측위 성공 전엔 "주변 스캔", 이후 "재측정".
     private var hasLocalizedSuccessfully = false
@@ -97,6 +1627,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         setupDestinationPill()
         setupCurrentStepCard()
         setupRemainingCapsule()
+        setupFloorNavigationMap()
         setupRouteCalculatingView()
         setupFloorTransitionOverlay()
         // Phase 8: setupHeadingOverlay() / setupTurnCard() 호출 제거 — keyframe 단계 추적 모델
@@ -603,6 +2134,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         capsule.layer.cornerRadius = 22
         capsule.layer.masksToBounds = true
         capsule.translatesAutoresizingMaskIntoConstraints = false
+        capsule.isHidden = true
         hudContainerView.addSubview(capsule)
         remainingCapsuleView = capsule
 
@@ -638,6 +2170,182 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
             remainingCapsuleLabel.trailingAnchor.constraint(equalTo: capsule.trailingAnchor, constant: -18),
             remainingCapsuleLabel.centerYAnchor.constraint(equalTo: capsule.centerYAnchor),
         ])
+    }
+
+    private func setupFloorNavigationMap() {
+        let container = UIView()
+        container.backgroundColor = MapDesignTokens.Surface.backdropDim
+        container.layer.cornerRadius = MapDesignTokens.Metric.containerTopCornerRadius
+        container.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        container.layer.cornerCurve = .continuous
+        container.layer.masksToBounds = true
+        container.layer.borderWidth = 0
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.isUserInteractionEnabled = true
+        container.isHidden = true
+        hudContainerView.addSubview(container)
+        floorNavigationContainerView = container
+
+        floorNavigationMapView = FloorNavigationMapView()
+        floorNavigationMapView.translatesAutoresizingMaskIntoConstraints = false
+        floorNavigationMapView.isUserInteractionEnabled = false
+        container.addSubview(floorNavigationMapView)
+
+        let grabber = UIView()
+        grabber.backgroundColor = MapDesignTokens.Surface.grabber
+        grabber.layer.cornerRadius = 2
+        grabber.layer.masksToBounds = true
+        grabber.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(grabber)
+        floorNavigationGrabberView = grabber
+
+        floorNavigationExpandButton = UIButton(type: .system)
+        floorNavigationExpandButton.backgroundColor = MapDesignTokens.Surface.controlFill
+        floorNavigationExpandButton.tintColor = MapDesignTokens.Text.primary
+        floorNavigationExpandButton.layer.cornerRadius = 22
+        floorNavigationExpandButton.layer.masksToBounds = false
+        floorNavigationExpandButton.layer.borderWidth = 1
+        floorNavigationExpandButton.layer.borderColor = MapDesignTokens.Stroke.labelBorder.cgColor
+        floorNavigationExpandButton.layer.shadowColor = UIColor.black.cgColor
+        floorNavigationExpandButton.layer.shadowOpacity = 0.12
+        floorNavigationExpandButton.layer.shadowRadius = 8
+        floorNavigationExpandButton.layer.shadowOffset = CGSize(width: 0, height: 3)
+        floorNavigationExpandButton.setImage(floorNavigationExpandIcon(expanded: false), for: .normal)
+        floorNavigationExpandButton.translatesAutoresizingMaskIntoConstraints = false
+        floorNavigationExpandButton.addTarget(self, action: #selector(onFloorNavigationExpandTapped), for: .touchUpInside)
+        container.addSubview(floorNavigationExpandButton)
+
+        let zoomContainer = UIView()
+        zoomContainer.backgroundColor = MapDesignTokens.Surface.controlFill
+        zoomContainer.layer.cornerRadius = 22
+        zoomContainer.layer.masksToBounds = false
+        zoomContainer.layer.borderWidth = 1
+        zoomContainer.layer.borderColor = MapDesignTokens.Stroke.labelBorder.cgColor
+        zoomContainer.layer.shadowColor = UIColor.black.cgColor
+        zoomContainer.layer.shadowOpacity = 0.10
+        zoomContainer.layer.shadowRadius = 8
+        zoomContainer.layer.shadowOffset = CGSize(width: 0, height: 3)
+        zoomContainer.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(zoomContainer)
+        floorNavigationZoomContainerView = zoomContainer
+
+        floorNavigationZoomSlider = UISlider()
+        floorNavigationZoomSlider.minimumValue = MapDesignTokens.Metric.mapZoomMinimum
+        floorNavigationZoomSlider.maximumValue = MapDesignTokens.Metric.mapZoomMaximum
+        floorNavigationZoomSlider.value = MapDesignTokens.Metric.mapZoomDefault
+        floorNavigationZoomSlider.minimumTrackTintColor = MapDesignTokens.Accent.route
+        floorNavigationZoomSlider.maximumTrackTintColor = MapDesignTokens.Stroke.labelBorder
+        floorNavigationZoomSlider.thumbTintColor = MapDesignTokens.Text.primary
+        floorNavigationZoomSlider.translatesAutoresizingMaskIntoConstraints = false
+        floorNavigationZoomSlider.addTarget(self, action: #selector(onFloorNavigationZoomChanged(_:)), for: .valueChanged)
+        zoomContainer.addSubview(floorNavigationZoomSlider)
+
+        floorNavigationCollapsedHeightConstraint = container.heightAnchor.constraint(
+            equalTo: self.view.heightAnchor,
+            multiplier: MapDesignTokens.Metric.containerHeightRatio
+        )
+        floorNavigationExpandedHeightConstraint = container.heightAnchor.constraint(equalTo: self.view.heightAnchor)
+        floorNavigationExpandedHeightConstraint.isActive = false
+        currentStepMapSpacingConstraint = currentStepCardView.bottomAnchor.constraint(
+            lessThanOrEqualTo: container.topAnchor,
+            constant: -4
+        )
+
+        NSLayoutConstraint.activate([
+            container.leadingAnchor.constraint(equalTo: hudContainerView.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: hudContainerView.trailingAnchor),
+            container.bottomAnchor.constraint(equalTo: self.view.bottomAnchor),
+            floorNavigationCollapsedHeightConstraint,
+
+            floorNavigationMapView.topAnchor.constraint(equalTo: container.topAnchor),
+            floorNavigationMapView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            floorNavigationMapView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            floorNavigationMapView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
+            grabber.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+            grabber.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            grabber.widthAnchor.constraint(equalToConstant: 36),
+            grabber.heightAnchor.constraint(equalToConstant: 4),
+
+            floorNavigationExpandButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+            floorNavigationExpandButton.bottomAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.bottomAnchor, constant: -14),
+            floorNavigationExpandButton.widthAnchor.constraint(equalToConstant: 44),
+            floorNavigationExpandButton.heightAnchor.constraint(equalToConstant: 44),
+
+            zoomContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+            zoomContainer.bottomAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.bottomAnchor, constant: -14),
+            zoomContainer.widthAnchor.constraint(equalToConstant: 138),
+            zoomContainer.heightAnchor.constraint(equalToConstant: 44),
+
+            floorNavigationZoomSlider.leadingAnchor.constraint(equalTo: zoomContainer.leadingAnchor, constant: 14),
+            floorNavigationZoomSlider.trailingAnchor.constraint(equalTo: zoomContainer.trailingAnchor, constant: -14),
+            floorNavigationZoomSlider.centerYAnchor.constraint(equalTo: zoomContainer.centerYAnchor),
+
+            currentStepMapSpacingConstraint,
+        ])
+    }
+
+    private func floorNavigationExpandIcon(expanded: Bool) -> UIImage? {
+        let config = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        let symbolName = expanded
+            ? "arrow.down.right.and.arrow.up.left"
+            : "arrow.up.left.and.arrow.down.right"
+        return UIImage(systemName: symbolName, withConfiguration: config)
+    }
+
+    @objc private func onFloorNavigationExpandTapped() {
+        setFloorNavigationExpanded(!isFloorNavigationExpanded, animated: true)
+    }
+
+    @objc private func onFloorNavigationZoomChanged(_ sender: UISlider) {
+        floorNavigationMapView.setZoomScale(CGFloat(sender.value))
+    }
+
+    private func setFloorNavigationExpanded(_ expanded: Bool, animated: Bool) {
+        guard isFloorNavigationExpanded != expanded else { return }
+        isFloorNavigationExpanded = expanded
+
+        floorNavigationCollapsedHeightConstraint.isActive = !expanded
+        floorNavigationExpandedHeightConstraint.isActive = expanded
+        currentStepMapSpacingConstraint.isActive = !expanded
+        floorNavigationContainerView.layer.cornerRadius = expanded ? 0 : MapDesignTokens.Metric.containerTopCornerRadius
+        floorNavigationExpandButton.setImage(floorNavigationExpandIcon(expanded: expanded), for: .normal)
+
+        setARSceneRenderingPausedForFloorMap(expanded)
+        setNonMapHUDHiddenForExpandedMap(expanded)
+
+        let updates = { self.view.layoutIfNeeded() }
+        if animated {
+            UIView.animate(withDuration: 0.28,
+                           delay: 0,
+                           usingSpringWithDamping: 0.9,
+                           initialSpringVelocity: 0,
+                           options: [.curveEaseInOut],
+                           animations: updates)
+        } else {
+            updates()
+        }
+    }
+
+    private func setNonMapHUDHiddenForExpandedMap(_ hidden: Bool) {
+        let views: [UIView?] = [
+            destinationPillView,
+            currentStepCardView,
+            remainingCapsuleView,
+            locateButton,
+            closeButton,
+            routeCalculatingView
+        ]
+        UIView.animate(withDuration: hidden ? 0.18 : 0.2) {
+            views.compactMap { $0 }.forEach { view in
+                view.alpha = hidden ? 0 : 1
+                view.isUserInteractionEnabled = !hidden
+            }
+        }
+    }
+
+    private func setARSceneRenderingPausedForFloorMap(_ paused: Bool) {
+        sceneView.scene.rootNode.isHidden = paused
     }
 
     private func setupRouteCalculatingView() {
@@ -1126,6 +2834,48 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
             self.turnArrowNode?.removeFromParentNode()
             self.turnArrowNode = nil
             self.turnArrowStepIndex = nil
+        }
+    }
+
+    func showFloorNavigationMap(_ map: FloorMapResponse,
+                                routeSteps: [PathStep],
+                                currentPosition: Position?,
+                                currentHeadingDegrees: Float?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.floorNavigationMapView.configure(
+                map: map,
+                routeSteps: routeSteps,
+                currentPosition: currentPosition,
+                currentHeadingDegrees: currentHeadingDegrees
+            )
+            guard self.floorNavigationContainerView.isHidden else { return }
+            self.floorNavigationContainerView.alpha = 0
+            self.floorNavigationContainerView.isHidden = false
+            UIView.animate(withDuration: 0.25) {
+                self.floorNavigationContainerView.alpha = 1
+            }
+        }
+    }
+
+    func updateFloorNavigationPosition(_ position: Position?, headingDegrees: Float?) {
+        DispatchQueue.main.async { [weak self] in
+            self?.floorNavigationMapView.updateCurrentPosition(position, headingDegrees: headingDegrees)
+        }
+    }
+
+    func hideFloorNavigationMap() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self,
+                  !self.floorNavigationContainerView.isHidden else { return }
+            if self.isFloorNavigationExpanded {
+                self.setFloorNavigationExpanded(false, animated: false)
+            }
+            UIView.animate(withDuration: 0.2) {
+                self.floorNavigationContainerView.alpha = 0
+            } completion: { _ in
+                self.floorNavigationContainerView.isHidden = true
+            }
         }
     }
 
