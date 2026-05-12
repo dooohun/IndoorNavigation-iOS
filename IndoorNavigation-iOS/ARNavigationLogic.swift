@@ -51,6 +51,9 @@ protocol ARNavigationLogicDelegate: AnyObject {
     func updateTurnArrow(_ vm: TurnArrowViewModel?)
     func setHUDVisible(_ visible: Bool)
     func setLocateButtonVisible(_ visible: Bool)
+    func showFloorNavigationMap(_ map: FloorMapResponse, routeSteps: [PathStep], currentPosition: Position?, currentHeadingDegrees: Float?)
+    func updateFloorNavigationPosition(_ position: Position?, headingDegrees: Float?)
+    func hideFloorNavigationMap()
     func showRouteCalculating(_ visible: Bool)
     func showFloorTransition(transitionType: String, targetFloor: Int?, currentFloor: Int?)
     func hideFloorTransition()
@@ -211,6 +214,8 @@ class ARNavigationLogic {
     private var pathNodes: [SCNNode] = []
     /// drawPathFromSteps 가 받은 마지막 steps — PnP 보정 후 재렌더용.
     private var lastPathSteps: [PathStep] = []
+    private var floorMapCache: [String: FloorMapResponse] = [:]
+    private var floorMapRequestGeneration: Int = 0
     /// trial counter — 화면 더블탭으로 측위 재시작 시 +1, 로그 prefix 용.
     private var trialNumber: Int = 0
 
@@ -301,8 +306,14 @@ class ARNavigationLogic {
     /// ARSessionDelegate.session(_:didUpdate:) 에서 매 프레임 호출.
     /// cadence 통과 시에만 extract 수행하고, DEBUG 빌드에서 디버그 오버레이로 결과 전달.
     func processARFrame(_ frame: ARFrame) {
-        // Phase 6: 1Hz throttle 로 navigation step vm 갱신 (SuperPoint 토글과 독립)
+        // Phase 6: 2D 지도 위치는 매 AR frame 갱신하고, 텍스트 step vm만 1Hz throttle.
         if !lastPathSteps.isEmpty {
+            let floorNavigationPose = currentFloorNavigationPose(frame: frame)
+            delegate?.updateFloorNavigationPosition(
+                floorNavigationPose?.position,
+                headingDegrees: floorNavigationPose?.headingDegrees
+            )
+
             let now = CACurrentMediaTime()
             if now - lastNavStepTickAt >= 1.0 {
                 lastNavStepTickAt = now
@@ -406,6 +417,8 @@ class ARNavigationLogic {
         pathNodes.forEach { $0.removeFromParentNode() }
         pathNodes = []
         lastPathSteps = []
+        floorMapRequestGeneration += 1
+        delegate?.hideFloorNavigationMap()
         currentStepIndex = 0
         lastNavStepTickAt = 0
 
@@ -616,6 +629,107 @@ class ARNavigationLogic {
         }
     }
 
+    private func refreshFloorNavigationMap(routeSteps: [PathStep], currentFrame: ARFrame?) {
+        let resolvedFloorId = localizedFloorId ?? floorId
+        guard !resolvedFloorId.isEmpty else { return }
+
+        let currentPose = currentFloorNavigationPose(frame: currentFrame)
+        if let cached = floorMapCache[resolvedFloorId] {
+            delegate?.showFloorNavigationMap(
+                cached,
+                routeSteps: routeSteps,
+                currentPosition: currentPose?.position,
+                currentHeadingDegrees: currentPose?.headingDegrees
+            )
+            return
+        }
+
+        floorMapRequestGeneration += 1
+        let generation = floorMapRequestGeneration
+        NetworkManager.shared.fetchFloorMap(floorId: resolvedFloorId) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self,
+                      self.floorMapRequestGeneration == generation else { return }
+                switch result {
+                case .success(let map):
+                    self.floorMapCache[resolvedFloorId] = map
+                    let currentPose = self.currentFloorNavigationPose(frame: self.arSession?.currentFrame)
+                    self.delegate?.showFloorNavigationMap(
+                        map,
+                        routeSteps: routeSteps,
+                        currentPosition: currentPose?.position,
+                        currentHeadingDegrees: currentPose?.headingDegrees
+                    )
+                case .failure(let error):
+                    print("[FloorMap] fetch failed floorId=\(resolvedFloorId): \(error)")
+                }
+            }
+        }
+    }
+
+    private func currentFloorNavigationPose(frame: ARFrame?) -> (position: Position, headingDegrees: Float?)? {
+        guard let pose = localizedPose,
+              let x = pose.x,
+              let y = pose.y,
+              let z = pose.z,
+              let qx = pose.qx,
+              let qy = pose.qy,
+              let qz = pose.qz,
+              let qw = pose.qw else { return nil }
+
+        let serverPosition = simd_float3(Float(x), Float(y), Float(z))
+        let serverQuaternion = simd_quatf(ix: Float(qx), iy: Float(qy), iz: Float(qz), r: Float(qw))
+
+        guard let frame, let matchedARPose else {
+            return (
+                Position(x: x, y: y, z: z),
+                serverHeadingDegrees(from: serverQuaternion)
+            )
+        }
+
+        let input = CoordinateTransformer.Input(
+            serverPosition: serverPosition,
+            serverQuaternion: serverQuaternion,
+            arCameraPose: matchedARPose
+        )
+        let cameraTransform = frame.camera.transform
+        let arCameraPosition = simd_float3(
+            cameraTransform.columns.3.x,
+            cameraTransform.columns.3.y,
+            cameraTransform.columns.3.z
+        )
+        let forwardAR4 = cameraTransform * simd_float4(0, 0, -1, 1)
+        let arForwardPoint = simd_float3(forwardAR4.x, forwardAR4.y, forwardAR4.z)
+
+        let currentServer = arWorldPointToServer(arCameraPosition, input: input)
+        let forwardServer = arWorldPointToServer(arForwardPoint, input: input)
+        let heading = Float(atan2(forwardServer.y - currentServer.y,
+                                  forwardServer.x - currentServer.x) * 180 / .pi)
+
+        return (
+            Position(x: Double(currentServer.x), y: Double(currentServer.y), z: Double(currentServer.z)),
+            heading
+        )
+    }
+
+    private func arWorldPointToServer(_ arPoint: simd_float3, input: CoordinateTransformer.Input) -> simd_float3 {
+        var serverCameraTransform = simd_float4x4(input.serverQuaternion)
+        serverCameraTransform.columns.3 = simd_float4(input.serverPosition.x,
+                                                      input.serverPosition.y,
+                                                      input.serverPosition.z,
+                                                      1)
+        let arFromServer = input.arCameraPose
+            * CoordinateTransformer.rtabCameraToARKit
+            * serverCameraTransform.inverse
+        let result = arFromServer.inverse * simd_float4(arPoint.x, arPoint.y, arPoint.z, 1)
+        return simd_float3(result.x, result.y, result.z)
+    }
+
+    private func serverHeadingDegrees(from quaternion: simd_quatf) -> Float {
+        let forward = quaternion.act(simd_float3(1, 0, 0))
+        return Float(atan2(forward.y, forward.x) * 180 / .pi)
+    }
+
     // MARK: - 경로 탐색
 
     // NOTE(B4): floorTransitions[] 는 detectFloorTransition 이 step 변화로 자동 처리 — 별도 매핑 불요.
@@ -639,15 +753,21 @@ class ARNavigationLogic {
             preference: .shortest,
             verticalPreference: .elevator
         )
+        let pathfindingTrial = trialNumber
         NetworkManager.shared.pathfinding(buildingId: buildingId, request: req) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                guard self.trialNumber == pathfindingTrial else {
+                    print("[V3-PATH] stale pathfinding ignored — trial changed")
+                    return
+                }
                 switch result {
                 case .success(let resp):
                     let steps = resp.toPathSteps()
                     self.lastStartSnapDistance = nil
                     print("[V3-PATH] steps=\(steps.count), totalDistance=\(resp.totalDistance)m, floorTransitions=\(resp.floorTransitions?.count ?? 0)")
                     self.drawPathFromSteps(steps)
+                    self.refreshFloorNavigationMap(routeSteps: steps, currentFrame: self.arSession?.currentFrame)
                     self.dumpLocalizeDebug(rawSteps: resp.steps)
                     // steps[].position 좌표를 lookup multi-query 로 사용 → 경로 전체 영역 keyframe pack 받음.
                     self.fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
@@ -1036,6 +1156,7 @@ class ARNavigationLogic {
 
         // 보정된 pose 로 path / checkpoint 재렌더
         self.drawPathFromSteps(self.lastPathSteps)
+        self.refreshFloorNavigationMap(routeSteps: self.lastPathSteps, currentFrame: arSession?.currentFrame)
         self.updateCheckpointNode()
     }
 
