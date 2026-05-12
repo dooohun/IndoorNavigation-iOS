@@ -3,6 +3,7 @@ import UIKit
 class POISelectionViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate {
 
     private let building: BuildingResponse
+    private let userCurrentFloorId: String?
 
     private let headerView = UIView()
     private let buildingNameLabel = UILabel()
@@ -19,9 +20,14 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
     private var floorIdToLevel: [String: Int] = [:]
     private var floors: [FloorResponse] = []
 
-    init(building: BuildingResponse) {
+    init(building: BuildingResponse, userCurrentFloorId: String?) {
         self.building = building
+        self.userCurrentFloorId = userCurrentFloorId
         super.init(nibName: nil, bundle: nil)
+    }
+
+    convenience init(building: BuildingResponse) {
+        self.init(building: building, userCurrentFloorId: nil)
     }
 
     convenience init(buildingId: String, buildingName: String) {
@@ -30,7 +36,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
             latitude: nil, longitude: nil, status: "ACTIVE",
             createdAt: nil, updatedAt: nil
         )
-        self.init(building: building)
+        self.init(building: building, userCurrentFloorId: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -300,6 +306,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
             arVC.floorId = poi.floorId ?? ""
             let dp = poi.displayPoint
             arVC.goal = Coordinate(x: dp?.x ?? 0, y: dp?.y ?? 0, z: dp?.z ?? 0)
+            arVC.userCurrentFloorId = self.userCurrentFloorId
             arVC.modalPresentationStyle = .fullScreen
             self.present(arVC, animated: true)
         })

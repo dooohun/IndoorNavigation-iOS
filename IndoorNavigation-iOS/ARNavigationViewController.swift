@@ -1536,6 +1536,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var floorId: String = ""
     var destinationName: String = ""
     var goal: Coordinate = Coordinate(x: 0, y: 0, z: 0)
+    var userCurrentFloorId: String? = nil
 
     var sceneView: ARSCNView!
     var locateButton: UIButton!
@@ -1621,7 +1622,8 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
             buildingId: buildingId,
             floorId: floorId,
             destinationName: destinationName,
-            goal: goal
+            goal: goal,
+            userCurrentFloorId: userCurrentFloorId
         )
 
         setupARView()

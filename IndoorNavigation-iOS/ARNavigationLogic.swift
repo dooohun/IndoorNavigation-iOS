@@ -82,12 +82,18 @@ class ARNavigationLogic {
     let floorId: String
     let destinationName: String
     let goal: Coordinate
+    let userCurrentFloorId: String?
 
-    init(buildingId: String, floorId: String, destinationName: String, goal: Coordinate) {
+    init(buildingId: String,
+         floorId: String,
+         destinationName: String,
+         goal: Coordinate,
+         userCurrentFloorId: String? = nil) {
         self.buildingId = buildingId
         self.floorId = floorId
         self.destinationName = destinationName
         self.goal = goal
+        self.userCurrentFloorId = userCurrentFloorId
     }
 
     // 다중 프레임 캡처

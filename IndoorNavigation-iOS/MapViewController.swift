@@ -314,8 +314,8 @@ class MapViewController: UIViewController {
 
     @objc private func infoCardButtonTapped() {
         guard let building = selectedBuilding else { return }
-        let poiVC = POISelectionViewController(building: building)
-        navigationController?.pushViewController(poiVC, animated: true)
+        let floorVC = FloorSelectionViewController(building: building)
+        navigationController?.pushViewController(floorVC, animated: true)
     }
 
     // MARK: - Search
