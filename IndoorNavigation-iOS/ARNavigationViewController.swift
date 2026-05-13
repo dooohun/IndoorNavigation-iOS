@@ -1569,14 +1569,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     private var navBarDistanceLabel: UILabel!
     private var navBarDirectionLabel: UILabel!
 
-    // Phase 6: 현재 스텝 카드
-    var currentStepCardView: UIView!
-    var currentStepIconBox: UIView!
-    var currentStepIconView: UIImageView!
-    var currentStepActionLabel: UILabel!
-    var currentStepDistanceLabel: UILabel!
-    var currentStepWalkLabel: UILabel!
-
     // Phase 6: 하단 거리/시간 캡슐
     var remainingCapsuleView: UIView!
     var remainingCapsuleLabel: UILabel!
@@ -1644,7 +1636,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         // Phase 6 후속: setupCloseButton/setupDestinationPill 폐기 → setupNavBar 로 통합
         setupHudContainer()
         setupNavBar()
-        setupCurrentStepCard()
         setupRemainingCapsule()
         setupFloorNavigationMap()
         setupRouteCalculatingView()
@@ -2062,89 +2053,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     // destinationPillView / destinationIconCircle / destinationFloorLabel / destinationNameLabel 옵셔널은
     // updateNavigationStep 의 안전한 옵셔널 체이닝용으로 유지(현재 모두 nil).
 
-    /// docs Phase 6 §3 — 현재 스텝 카드 (systemBlue 배경, 56pt 아이콘 박스 + 3행 텍스트).
-    private func setupCurrentStepCard() {
-        let card = UIView()
-        card.backgroundColor = .systemBlue
-        card.layer.cornerRadius = 20
-        card.layer.shadowColor = UIColor.black.cgColor
-        card.layer.shadowOpacity = 0.25
-        card.layer.shadowRadius = 12
-        card.layer.shadowOffset = CGSize(width: 0, height: 4)
-        card.translatesAutoresizingMaskIntoConstraints = false
-        hudContainerView.addSubview(card)
-        currentStepCardView = card
-
-        // 좌측 56pt 아이콘 박스
-        currentStepIconBox = UIView()
-        currentStepIconBox.backgroundColor = UIColor.white.withAlphaComponent(0.18)
-        currentStepIconBox.layer.cornerRadius = 16
-        currentStepIconBox.layer.masksToBounds = true
-        currentStepIconBox.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(currentStepIconBox)
-
-        let upAsset = UIImage(named: "arrowUpThick")?.withRenderingMode(.alwaysTemplate)
-        let upFallback = UIImage(systemName: "arrow.up", withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .bold))
-        currentStepIconView = UIImageView(image: upAsset ?? upFallback)
-        currentStepIconView.tintColor = .white
-        currentStepIconView.contentMode = .scaleAspectFit
-        currentStepIconView.translatesAutoresizingMaskIntoConstraints = false
-        currentStepIconBox.addSubview(currentStepIconView)
-
-        // 1행: 동작 단어
-        currentStepActionLabel = UILabel()
-        currentStepActionLabel.text = "—"
-        currentStepActionLabel.textColor = UIColor.white.withAlphaComponent(0.85)
-        currentStepActionLabel.font = .systemFont(ofSize: 14, weight: .regular)
-        currentStepActionLabel.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(currentStepActionLabel)
-
-        // 2행: 큰 거리 숫자 + m (attributedText 로 갱신됨)
-        currentStepDistanceLabel = UILabel()
-        currentStepDistanceLabel.textColor = .white
-        currentStepDistanceLabel.font = .systemFont(ofSize: 28, weight: .heavy)
-        currentStepDistanceLabel.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(currentStepDistanceLabel)
-
-        // 3행: "약 N걸음"
-        currentStepWalkLabel = UILabel()
-        currentStepWalkLabel.text = "약 —걸음"
-        currentStepWalkLabel.textColor = UIColor.white.withAlphaComponent(0.85)
-        currentStepWalkLabel.font = .systemFont(ofSize: 13, weight: .regular)
-        currentStepWalkLabel.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(currentStepWalkLabel)
-
-        NSLayoutConstraint.activate([
-            // Phase 6 후속: destinationPillView 폐기 → navBarContainerView 기준.
-            card.topAnchor.constraint(equalTo: navBarContainerView.bottomAnchor, constant: 16),
-            card.leadingAnchor.constraint(equalTo: hudContainerView.leadingAnchor, constant: 16),
-            card.trailingAnchor.constraint(equalTo: hudContainerView.trailingAnchor, constant: -16),
-
-            currentStepIconBox.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
-            currentStepIconBox.centerYAnchor.constraint(equalTo: card.centerYAnchor),
-            currentStepIconBox.widthAnchor.constraint(equalToConstant: 56),
-            currentStepIconBox.heightAnchor.constraint(equalToConstant: 56),
-
-            currentStepIconView.centerXAnchor.constraint(equalTo: currentStepIconBox.centerXAnchor),
-            currentStepIconView.centerYAnchor.constraint(equalTo: currentStepIconBox.centerYAnchor),
-            currentStepIconView.widthAnchor.constraint(equalToConstant: 32),
-            currentStepIconView.heightAnchor.constraint(equalToConstant: 32),
-
-            currentStepActionLabel.leadingAnchor.constraint(equalTo: currentStepIconBox.trailingAnchor, constant: 14),
-            currentStepActionLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
-            currentStepActionLabel.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
-
-            currentStepDistanceLabel.leadingAnchor.constraint(equalTo: currentStepIconBox.trailingAnchor, constant: 14),
-            currentStepDistanceLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
-            currentStepDistanceLabel.topAnchor.constraint(equalTo: currentStepActionLabel.bottomAnchor, constant: 2),
-
-            currentStepWalkLabel.leadingAnchor.constraint(equalTo: currentStepIconBox.trailingAnchor, constant: 14),
-            currentStepWalkLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
-            currentStepWalkLabel.topAnchor.constraint(equalTo: currentStepDistanceLabel.bottomAnchor, constant: 2),
-            currentStepWalkLabel.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
-        ])
-    }
-
     /// docs Phase 6 §5 — 하단 거리/시간 캡슐 (44pt 높이, blur, attributed).
     private func setupRemainingCapsule() {
         let capsule = UIView()
@@ -2264,7 +2172,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         )
         floorNavigationExpandedHeightConstraint = container.heightAnchor.constraint(equalTo: self.view.heightAnchor)
         floorNavigationExpandedHeightConstraint.isActive = false
-        currentStepMapSpacingConstraint = currentStepCardView.bottomAnchor.constraint(
+        currentStepMapSpacingConstraint = navBarContainerView.bottomAnchor.constraint(
             lessThanOrEqualTo: container.topAnchor,
             constant: -4
         )
@@ -2350,7 +2258,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         // closeButton 은 navBarContainerView 자식이므로 별도 처리 불필요.
         let views: [UIView?] = [
             navBarContainerView,
-            currentStepCardView,
             remainingCapsuleView,
             locateButton,
             routeCalculatingView
@@ -2677,33 +2584,6 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
                 self.destinationFloorLabel?.text = "목적지"
             }
             self.destinationNameLabel?.text = vm.destinationName
-
-            // 2. 현재 step 카드 — 아이콘 (Montage SVG 우선, 폴백 SF Symbol)
-            self.currentStepIconView.image = self.actionImage(for: vm.action)
-
-            // 3. 동작 한국어 라벨
-            self.currentStepActionLabel.text = self.actionLabel(for: vm.action)
-
-            // 4. 거리 attributed (큰 숫자 28 heavy + m 16 regular)
-            let distInt = max(0, Int(vm.distanceMeters.rounded()))
-            let attr = NSMutableAttributedString(
-                string: "\(distInt)",
-                attributes: [
-                    .font: UIFont.systemFont(ofSize: 28, weight: .heavy),
-                    .foregroundColor: UIColor.white,
-                ]
-            )
-            attr.append(NSAttributedString(
-                string: "m",
-                attributes: [
-                    .font: UIFont.systemFont(ofSize: 16, weight: .regular),
-                    .foregroundColor: UIColor.white,
-                ]
-            ))
-            self.currentStepDistanceLabel.attributedText = attr
-
-            // 5. 걸음 수
-            self.currentStepWalkLabel.text = "약 \(vm.approxSteps)걸음"
 
             // 6. 하단 거리/시간 캡슐 — attributed
             let totalInt = max(0, Int(vm.remainingTotalMeters.rounded()))
