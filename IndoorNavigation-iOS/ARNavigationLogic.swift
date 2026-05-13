@@ -74,6 +74,13 @@ class ARNavigationLogic {
     /// 모델 자원(SuperPoint.mlpackage) 은 추후 재활성화 위해 보존.
     static let useSuperPointExtractor: Bool = false
 
+    #if DEBUG
+    /// Mock localize fixture 사용 (2026-05-13 사용자 JSON). true 면 스캔→캡처/네트워크 모두 우회.
+    /// 즉시 fixture 데이터로 handleLocalizeV3Success 동등 상태 세팅 + drawPathFromSteps 호출.
+    /// real 흐름 복귀: false 로 토글.
+    static let useMockLocalizeFixture: Bool = true
+    #endif
+
     weak var delegate: ARNavigationLogicDelegate?
     weak var arSession: ARSession?
     weak var scene: SCNScene?
@@ -456,6 +463,15 @@ class ARNavigationLogic {
             return
         }
 
+        #if DEBUG
+        if Self.useMockLocalizeFixture {
+            trialNumber += 1
+            resetForNewTrial()
+            injectMockLocalizeFixture()
+            return
+        }
+        #endif
+
         trialNumber += 1
         resetForNewTrial()
 
@@ -649,6 +665,53 @@ class ARNavigationLogic {
                                translation: translation)
         }
     }
+
+    #if DEBUG
+    /// Mock fixture 주입 — 캡처/네트워크 우회하고 handleLocalizeV3Success 동등 상태를 즉시 세팅한다.
+    /// MockLocalizeFixture.response/steps/matchedARPose 로 drawPathFromSteps 까지 직접 호출.
+    private func injectMockLocalizeFixture() {
+        // 1) UI 시퀀스
+        delegate?.setLocateButtonVisible(false)
+        delegate?.setLoading(true)
+        delegate?.setScanningOverlay(visible: true)
+        delegate?.updateStatus("[MOCK] fixture 주입 중…", color: .white)
+
+        // 2) 상태 세팅 — handleLocalizeV3Success 와 동일
+        let response = MockLocalizeFixture.response
+        let pose = response.pose
+        guard let translation = pose.translation,
+              let quat = pose.rotationQuaternion else { return }
+
+        matchedARPose = MockLocalizeFixture.matchedARPose
+        lastLocalizeResponse = response
+        lastMatchedImageIndex = response.matchedImageIndex
+        lastMatchedImage = nil
+
+        localizedPose = Pose(
+            x: Double(translation.x), y: Double(translation.y), z: Double(translation.z),
+            qx: Double(quat.imag.x), qy: Double(quat.imag.y), qz: Double(quat.imag.z), qw: Double(quat.real)
+        )
+        localizedFloorId = response.pose.floorId ?? self.floorId
+        localizedFloorLevel = response.pose.floorLevel
+        localizedScanId = response.mapId
+
+        // 3) 스캔 완료 UI
+        delegate?.setScanningOverlay(visible: false)
+        delegate?.showScanComplete()
+        delegate?.showRouteCalculating(false)
+        delegate?.setLoading(false)
+        delegate?.updateStatus("\(destinationName) 방향으로 이동하세요.", color: .white)
+        delegate?.setHUDVisible(true)
+
+        // 4) pathfinding 우회 — fixture steps 로 직접
+        let steps = MockLocalizeFixture.steps
+        lastStartSnapDistance = nil
+        print("[MOCK] inject fixture: steps=\(steps.count), localizedFloorLevel=\(localizedFloorLevel ?? -999)")
+        drawPathFromSteps(steps)
+        refreshFloorNavigationMap(routeSteps: steps, currentFrame: arSession?.currentFrame)
+        fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: response.pose.floorLevel)
+    }
+    #endif
 
     private func refreshFloorNavigationMap(routeSteps: [PathStep], currentFrame: ARFrame?) {
         let resolvedFloorId = localizedFloorId ?? floorId
