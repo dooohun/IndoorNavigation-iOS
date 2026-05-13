@@ -1557,9 +1557,17 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var instructionLabel: UILabel?
 
     // Phase 6: 신규 목적지 pill 내부 컴포넌트
-    var destinationIconCircle: UIView!
-    var destinationFloorLabel: UILabel!
-    var destinationNameLabel: UILabel!
+    // — Phase 6 후속: 상단 nav-bar 도입으로 destination pill 폐기. 옵셔널 유지(updateNavigationStep 의 옵셔널 체이닝용).
+    var destinationIconCircle: UIView?
+    var destinationFloorLabel: UILabel?
+    var destinationNameLabel: UILabel?
+
+    // Phase 6 후속: 상단 nav-bar (턴 카드 + 닫기 버튼 통합)
+    private var navBarContainerView: UIView!
+    private var navBarIconBox: UIView!
+    private var navBarIconView: UIImageView!
+    private var navBarDistanceLabel: UILabel!
+    private var navBarDirectionLabel: UILabel!
 
     // Phase 6: 현재 스텝 카드
     var currentStepCardView: UIView!
@@ -1627,15 +1635,15 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         )
 
         setupARView()
-        setupCloseButton()
         setupRelocalizeButton()
         setupScanningOverlay()
         setupScanCompleteBadge()
         setupScanFailedView()
         setupArrivalBadge()
         // Phase 6: setupHUD() 폐기 → 5개 신규 setup 으로 대체
+        // Phase 6 후속: setupCloseButton/setupDestinationPill 폐기 → setupNavBar 로 통합
         setupHudContainer()
-        setupDestinationPill()
+        setupNavBar()
         setupCurrentStepCard()
         setupRemainingCapsule()
         setupFloorNavigationMap()
@@ -1661,7 +1669,9 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         setupRetapGestureForTesting()
 
         // Phase 6: 닫기 / 재측정 버튼이 scanningOverlay·floorTransitionOverlay 등에 가려지지 않도록 항상 최상단으로.
-        self.view.bringSubviewToFront(closeButton)
+        // Phase 6 후속: closeButton 은 navBarContainerView 내부로 이동 — nav-bar 전체를 최상단으로.
+        self.view.bringSubviewToFront(hudContainerView)
+        hudContainerView.bringSubviewToFront(navBarContainerView)
         self.view.bringSubviewToFront(locateButton)
 
         // AR 마커 시스템 부모 노드 등록 — Logic 이 updateMarkers 발신 시 controller 가 직접 노드 추가.
@@ -1691,8 +1701,54 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         sceneView.autoenablesDefaultLighting = true
     }
 
-    private func setupCloseButton() {
-        // Phase 6: 좌상단 원형 X 버튼 (44pt, blur, xmark 18pt semibold)
+    // Phase 6 후속: setupCloseButton 폐기 — closeButton 초기화는 setupNavBar 가 담당.
+
+    /// Phase 6 후속: 상단 nav-bar 스타일 상수.
+    /// MapDesignTokens 에 추가하지 않음 — 파일 주석에 "다른 화면 적용 X" 명시되어 있어 AR HUD 로컬 상수로 둔다.
+    private enum NavBarStyle {
+        static let iconBackground = UIColor(red: 0x18/255, green: 0x5F/255, blue: 0xA5/255, alpha: 1)  // #185FA5
+        static let exitBackground = UIColor(red: 0xE2/255, green: 0x4B/255, blue: 0x4A/255, alpha: 1)  // #E24B4A
+        static let barBackground = UIColor.white.withAlphaComponent(0.97)
+        static let barCornerRadius: CGFloat = 20
+        static let barHeight: CGFloat = 80
+        static let iconBoxSize: CGFloat = 52
+        static let exitSize: CGFloat = 52
+        static let distanceFontSize: CGFloat = 26
+        static let directionFontSize: CGFloat = 13
+    }
+
+    /// Phase 6 후속: 상단 nav-bar (턴 카드 + 닫기 버튼을 한 행으로 통합).
+    /// hudContainerView 자식, safeArea top + 12pt. 좌측 아이콘 박스(파랑) — 텍스트(거리/방향) — 우측 닫기 박스(빨강).
+    private func setupNavBar() {
+        // 컨테이너
+        let bar = UIView()
+        bar.backgroundColor = NavBarStyle.barBackground
+        bar.layer.cornerRadius = NavBarStyle.barCornerRadius
+        bar.layer.shadowColor = UIColor.black.cgColor
+        bar.layer.shadowOpacity = 0.08
+        bar.layer.shadowRadius = 8
+        bar.layer.shadowOffset = CGSize(width: 0, height: 2)
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        hudContainerView.addSubview(bar)
+        navBarContainerView = bar
+
+        // 좌측 아이콘 박스 (파랑)
+        let iconBox = UIView()
+        iconBox.backgroundColor = NavBarStyle.iconBackground
+        iconBox.layer.cornerRadius = 12
+        iconBox.layer.masksToBounds = true
+        iconBox.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(iconBox)
+        navBarIconBox = iconBox
+
+        let iconView = UIImageView(image: actionImage(for: .straight))
+        iconView.tintColor = .white
+        iconView.contentMode = .scaleAspectFit
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconBox.addSubview(iconView)
+        navBarIconView = iconView
+
+        // 우측 닫기 버튼 (빨강) — closeButton 인스턴스 재사용
         closeButton = UIButton(type: .system)
         let assetIcon = UIImage(named: "closeThick")?.withRenderingMode(.alwaysTemplate)
         let fallbackConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
@@ -1700,35 +1756,62 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         let icon = assetIcon ?? fallback
         closeButton.setImage(icon, for: .normal)
         closeButton.imageView?.contentMode = .scaleAspectFit
-        closeButton.imageEdgeInsets = UIEdgeInsets(top: 11, left: 11, bottom: 11, right: 11)
+        closeButton.imageEdgeInsets = UIEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
         closeButton.tintColor = .white
-        closeButton.backgroundColor = UIColor(white: 0.0, alpha: 0.45)
-        closeButton.layer.cornerRadius = 22
+        closeButton.backgroundColor = NavBarStyle.exitBackground
+        closeButton.layer.cornerRadius = 12
         closeButton.layer.masksToBounds = true
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.addTarget(self, action: #selector(onCloseButtonTapped), for: .touchUpInside)
+        bar.addSubview(closeButton)
 
-        // blur 백드롭
-        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
-        blur.translatesAutoresizingMaskIntoConstraints = false
-        blur.isUserInteractionEnabled = false
-        blur.layer.cornerRadius = 22
-        blur.layer.masksToBounds = true
-        closeButton.insertSubview(blur, at: 0)
+        // 텍스트 stack (vertical, leading)
+        let distanceLabel = UILabel()
+        distanceLabel.text = "—m"
+        distanceLabel.textColor = .black
+        distanceLabel.font = .systemFont(ofSize: NavBarStyle.distanceFontSize, weight: .medium)
+        distanceLabel.translatesAutoresizingMaskIntoConstraints = false
+        navBarDistanceLabel = distanceLabel
 
-        self.view.addSubview(closeButton)
+        let directionLabel = UILabel()
+        directionLabel.text = "직진"
+        directionLabel.textColor = .systemGray
+        directionLabel.font = .systemFont(ofSize: NavBarStyle.directionFontSize, weight: .regular)
+        directionLabel.translatesAutoresizingMaskIntoConstraints = false
+        navBarDirectionLabel = directionLabel
+
+        let textStack = UIStackView(arrangedSubviews: [distanceLabel, directionLabel])
+        textStack.axis = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(textStack)
 
         let safeArea = self.view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            closeButton.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 12),
-            closeButton.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor, constant: 16),
-            closeButton.widthAnchor.constraint(equalToConstant: 44),
-            closeButton.heightAnchor.constraint(equalToConstant: 44),
+            bar.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 12),
+            bar.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor, constant: 16),
+            bar.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor, constant: -16),
+            bar.heightAnchor.constraint(equalToConstant: NavBarStyle.barHeight),
 
-            blur.topAnchor.constraint(equalTo: closeButton.topAnchor),
-            blur.leadingAnchor.constraint(equalTo: closeButton.leadingAnchor),
-            blur.trailingAnchor.constraint(equalTo: closeButton.trailingAnchor),
-            blur.bottomAnchor.constraint(equalTo: closeButton.bottomAnchor),
+            iconBox.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 12),
+            iconBox.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            iconBox.widthAnchor.constraint(equalToConstant: NavBarStyle.iconBoxSize),
+            iconBox.heightAnchor.constraint(equalToConstant: NavBarStyle.iconBoxSize),
+
+            iconView.centerXAnchor.constraint(equalTo: iconBox.centerXAnchor),
+            iconView.centerYAnchor.constraint(equalTo: iconBox.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 32),
+            iconView.heightAnchor.constraint(equalToConstant: 32),
+
+            closeButton.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -12),
+            closeButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: NavBarStyle.exitSize),
+            closeButton.heightAnchor.constraint(equalToConstant: NavBarStyle.exitSize),
+
+            textStack.leadingAnchor.constraint(equalTo: iconBox.trailingAnchor, constant: 12),
+            textStack.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -12),
+            textStack.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
         ])
     }
 
@@ -1975,89 +2058,9 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         self.view.addSubview(hudContainerView)
     }
 
-    /// docs Phase 6 §2 — 상단 목적지 pill (높이 56pt, 좌측 36pt 원 아이콘 + 2행 텍스트).
-    private func setupDestinationPill() {
-        let pill = UIView()
-        pill.backgroundColor = UIColor(white: 0.0, alpha: 0.55)
-        pill.layer.cornerRadius = 28
-        pill.layer.masksToBounds = true
-        pill.translatesAutoresizingMaskIntoConstraints = false
-        hudContainerView.addSubview(pill)
-        destinationPillView = pill
-
-        // blur 백드롭
-        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
-        blur.translatesAutoresizingMaskIntoConstraints = false
-        blur.isUserInteractionEnabled = false
-        blur.layer.cornerRadius = 28
-        blur.layer.masksToBounds = true
-        pill.insertSubview(blur, at: 0)
-
-        // 좌측 36pt 원 (systemBlue)
-        destinationIconCircle = UIView()
-        destinationIconCircle.backgroundColor = .systemBlue
-        destinationIconCircle.layer.cornerRadius = 18
-        destinationIconCircle.layer.masksToBounds = true
-        destinationIconCircle.translatesAutoresizingMaskIntoConstraints = false
-        pill.addSubview(destinationIconCircle)
-
-        let flagAsset = UIImage(named: "flagFill")?.withRenderingMode(.alwaysTemplate)
-        let flagFallback = UIImage(systemName: "flag.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold))
-        let flagIcon = UIImageView(image: flagAsset ?? flagFallback)
-        flagIcon.tintColor = .white
-        flagIcon.contentMode = .scaleAspectFit
-        flagIcon.translatesAutoresizingMaskIntoConstraints = false
-        destinationIconCircle.addSubview(flagIcon)
-
-        // 1행: "3F · 목적지"
-        destinationFloorLabel = UILabel()
-        destinationFloorLabel.text = "—F · 목적지"
-        destinationFloorLabel.textColor = UIColor.white.withAlphaComponent(0.7)
-        destinationFloorLabel.font = .systemFont(ofSize: 12, weight: .regular)
-        destinationFloorLabel.translatesAutoresizingMaskIntoConstraints = false
-        pill.addSubview(destinationFloorLabel)
-
-        // 2행: POI 이름
-        destinationNameLabel = UILabel()
-        destinationNameLabel.text = destinationName
-        destinationNameLabel.textColor = .white
-        destinationNameLabel.font = .systemFont(ofSize: 16, weight: .semibold)
-        destinationNameLabel.translatesAutoresizingMaskIntoConstraints = false
-        pill.addSubview(destinationNameLabel)
-
-        let safeArea = self.view.safeAreaLayoutGuide
-        NSLayoutConstraint.activate([
-            pill.heightAnchor.constraint(equalToConstant: 56),
-            pill.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 12),
-            // 가운데 정렬 — closeButton 과의 충돌만 leading greaterThanOrEqual 로 방지.
-            pill.centerXAnchor.constraint(equalTo: hudContainerView.centerXAnchor),
-            pill.leadingAnchor.constraint(greaterThanOrEqualTo: closeButton.trailingAnchor, constant: 12),
-            pill.trailingAnchor.constraint(lessThanOrEqualTo: safeArea.trailingAnchor, constant: -16),
-
-            blur.topAnchor.constraint(equalTo: pill.topAnchor),
-            blur.leadingAnchor.constraint(equalTo: pill.leadingAnchor),
-            blur.trailingAnchor.constraint(equalTo: pill.trailingAnchor),
-            blur.bottomAnchor.constraint(equalTo: pill.bottomAnchor),
-
-            destinationIconCircle.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 10),
-            destinationIconCircle.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
-            destinationIconCircle.widthAnchor.constraint(equalToConstant: 36),
-            destinationIconCircle.heightAnchor.constraint(equalToConstant: 36),
-
-            flagIcon.centerXAnchor.constraint(equalTo: destinationIconCircle.centerXAnchor),
-            flagIcon.centerYAnchor.constraint(equalTo: destinationIconCircle.centerYAnchor),
-            flagIcon.widthAnchor.constraint(equalToConstant: 18),
-            flagIcon.heightAnchor.constraint(equalToConstant: 18),
-
-            destinationFloorLabel.leadingAnchor.constraint(equalTo: destinationIconCircle.trailingAnchor, constant: 10),
-            destinationFloorLabel.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -16),
-            destinationFloorLabel.topAnchor.constraint(equalTo: pill.topAnchor, constant: 10),
-
-            destinationNameLabel.leadingAnchor.constraint(equalTo: destinationIconCircle.trailingAnchor, constant: 10),
-            destinationNameLabel.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -16),
-            destinationNameLabel.topAnchor.constraint(equalTo: destinationFloorLabel.bottomAnchor, constant: 2),
-        ])
-    }
+    // Phase 6 후속: setupDestinationPill 폐기 — 상단 nav-bar (setupNavBar) 가 거리/방향을 직접 표시.
+    // destinationPillView / destinationIconCircle / destinationFloorLabel / destinationNameLabel 옵셔널은
+    // updateNavigationStep 의 안전한 옵셔널 체이닝용으로 유지(현재 모두 nil).
 
     /// docs Phase 6 §3 — 현재 스텝 카드 (systemBlue 배경, 56pt 아이콘 박스 + 3행 텍스트).
     private func setupCurrentStepCard() {
@@ -2111,10 +2114,9 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         currentStepWalkLabel.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(currentStepWalkLabel)
 
-        guard let pill = destinationPillView else { return }
-
         NSLayoutConstraint.activate([
-            card.topAnchor.constraint(equalTo: pill.bottomAnchor, constant: 16),
+            // Phase 6 후속: destinationPillView 폐기 → navBarContainerView 기준.
+            card.topAnchor.constraint(equalTo: navBarContainerView.bottomAnchor, constant: 16),
             card.leadingAnchor.constraint(equalTo: hudContainerView.leadingAnchor, constant: 16),
             card.trailingAnchor.constraint(equalTo: hudContainerView.trailingAnchor, constant: -16),
 
@@ -2344,12 +2346,13 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     }
 
     private func setNonMapHUDHiddenForExpandedMap(_ hidden: Bool) {
+        // Phase 6 후속: destinationPillView/closeButton 개별 → navBarContainerView 로 통합.
+        // closeButton 은 navBarContainerView 자식이므로 별도 처리 불필요.
         let views: [UIView?] = [
-            destinationPillView,
+            navBarContainerView,
             currentStepCardView,
             remainingCapsuleView,
             locateButton,
-            closeButton,
             routeCalculatingView
         ]
         UIView.animate(withDuration: hidden ? 0.18 : 0.2) {
@@ -2661,13 +2664,19 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
-            // 1. 목적지 pill
+            // 1. 상단 nav-bar — 다음 액션 아이콘 + 거리 + 방향 라벨
+            self.navBarIconView.image = self.actionImage(for: vm.action)
+            let navDistInt = max(0, Int(vm.distanceMeters.rounded()))
+            self.navBarDistanceLabel.text = "\(navDistInt)m"
+            self.navBarDirectionLabel.text = self.actionLabel(for: vm.action)
+
+            // Phase 6 후속: destination pill 폐기 — 옵셔널 체이닝으로 안전 갱신(현재 nil, no-op).
             if let floor = vm.destinationFloorLevel {
-                self.destinationFloorLabel.text = "\(floor)F · 목적지"
+                self.destinationFloorLabel?.text = "\(floor)F · 목적지"
             } else {
-                self.destinationFloorLabel.text = "목적지"
+                self.destinationFloorLabel?.text = "목적지"
             }
-            self.destinationNameLabel.text = vm.destinationName
+            self.destinationNameLabel?.text = vm.destinationName
 
             // 2. 현재 step 카드 — 아이콘 (Montage SVG 우선, 폴백 SF Symbol)
             self.currentStepIconView.image = self.actionImage(for: vm.action)
