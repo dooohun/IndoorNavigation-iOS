@@ -209,6 +209,7 @@ class NetworkManager {
     /// 서버에서 SuperPoint 추출 + LightGlue 매칭 + PnP 까지 수행 — 5장 처리에 30초+ 걸려 timeout 90s.
     func localizeV3(buildingId: String,
                     images: [UIImage],
+                    floorLevel: Int? = nil,
                     completion: @escaping (Result<SLAMLocalizeResponse, Error>) -> Void) {
         guard let url = URL(string: "\(slamBaseURL)/localize") else { return }
         var request = URLRequest(url: url)
@@ -227,6 +228,9 @@ class NetworkManager {
         }
 
         appendField("building_id", buildingId)
+        if let floorLevel {
+            appendField("floor_id", String(floorLevel))
+        }
 
         // 다운샘플링: 원본 1920×1440 → longer side 960. 업로드 75% 감소 + 서버 SP 처리 빠름.
         for (index, image) in images.enumerated() {
@@ -241,7 +245,7 @@ class NetworkManager {
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body
 
-        log("REQ", "POST localize images=\(images.count) body=\(body.count / 1024)KB")
+        log("REQ", "POST localize images=\(images.count) floor=\(floorLevel.map(String.init) ?? "ANY") body=\(body.count / 1024)KB")
 
         Self.performJSON(request) { (result: Result<SLAMLocalizeResponse, Error>) in
             if case .success(let resp) = result {
@@ -269,7 +273,8 @@ class NetworkManager {
             let data = data ?? Data()
 
             guard (200..<300).contains(statusCode) else {
-                log("RES", "HTTP \(statusCode)")
+                let body = String(data: data, encoding: .utf8) ?? "(빈 응답)"
+                log("RES", "HTTP \(statusCode) url=\(request.url?.absoluteString ?? "?")\n\(body)")
                 completion(.failure(httpError(statusCode: statusCode, data: data)))
                 return
             }

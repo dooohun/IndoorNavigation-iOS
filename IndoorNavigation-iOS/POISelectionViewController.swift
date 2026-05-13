@@ -306,7 +306,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
             arVC.floorId = poi.floorId ?? ""
             let dp = poi.displayPoint
             arVC.goal = Coordinate(x: dp?.x ?? 0, y: dp?.y ?? 0, z: dp?.z ?? 0)
-            arVC.userCurrentFloorId = self.userCurrentFloorId
+            arVC.userCurrentFloorLevel = self.userCurrentFloorId.flatMap { self.floorIdToLevel[$0] }
             arVC.modalPresentationStyle = .fullScreen
             self.present(arVC, animated: true)
         })

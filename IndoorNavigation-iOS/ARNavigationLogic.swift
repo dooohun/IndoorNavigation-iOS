@@ -82,18 +82,18 @@ class ARNavigationLogic {
     let floorId: String
     let destinationName: String
     let goal: Coordinate
-    let userCurrentFloorId: String?
+    let userCurrentFloorLevel: Int?
 
     init(buildingId: String,
          floorId: String,
          destinationName: String,
          goal: Coordinate,
-         userCurrentFloorId: String? = nil) {
+         userCurrentFloorLevel: Int? = nil) {
         self.buildingId = buildingId
         self.floorId = floorId
         self.destinationName = destinationName
         self.goal = goal
-        self.userCurrentFloorId = userCurrentFloorId
+        self.userCurrentFloorLevel = userCurrentFloorLevel
     }
 
     // 다중 프레임 캡처
@@ -557,7 +557,14 @@ class ARNavigationLogic {
             return
         }
 
-        NetworkManager.shared.localizeV3(buildingId: buildingId, images: capturedImages) { [weak self] result in
+        let floorHint: Int? = {
+            if isFloorTransitionRestart {
+                return localizedFloorLevel ?? userCurrentFloorLevel
+            }
+            return userCurrentFloorLevel
+        }()
+
+        NetworkManager.shared.localizeV3(buildingId: buildingId, images: capturedImages, floorLevel: floorHint) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.delegate?.setScanningOverlay(visible: false)
@@ -831,35 +838,10 @@ class ARNavigationLogic {
         self.pathQueryPoints = queryPoints
         self.consumedQueryPointIndex = 0
 
-        // 서버 cap: queries 64, maxKeyframesPerQuery 16, dedup 후 128. radius 5m 권장 (패턴 A).
-        let provider = NetworkBundleProvider(
-            buildingId: self.buildingId,
-            queryPoints: queryPoints,
-            radiusM: 5.0,
-            maxKeyframesPerQuery: 5
-        )
-        self.networkBundleProvider = provider
-        print("[NetworkBundle] pathfinding 후 multi-query lookup — queries=\(queryPoints.count), radius 5m")
-        provider.fetch { [weak self] result in
-            guard let self = self else { return }
-            switch result {
-            case .success(let bundle):
-                self.localizationBundle = bundle
-                self.keyframeDescriptorCache = bundle.keyframes.map { kf in
-                    Data(base64Encoded: kf.descriptorsB64) ?? Data()
-                }
-                print("[NetworkBundle] loaded \(bundle.keyframes.count) keyframes (경로 전체 영역)")
-                self.delegate?.showRouteCalculating(false)
-                self.delegate?.setLoading(false)
-                self.delegate?.updateStatus("\(self.destinationName) 방향으로 이동하세요.", color: .white)
-                self.setupTrackingCandidates(bundle: bundle)
-                self.startTracking()
-            case .failure(let error):
-                print("[NetworkBundle] fetch failed: \(error) — 추적 미시작, ARKit pose 만")
-                self.delegate?.showRouteCalculating(false)
-                self.delegate?.setLoading(false)
-            }
-        }
+        // lookup 호출 비활성화 — 측위/path 렌더링 까지만 진행, keyframe 추적 미실행.
+        print("[NetworkBundle] lookup 호출 SKIP (queries=\(queryPoints.count))")
+        self.delegate?.showRouteCalculating(false)
+        self.delegate?.setLoading(false)
     }
 
     // MARK: - AR 경로 렌더링 (PathChevron 시스템 — drawPathFromSteps 가 직접 PathChevronController 호출)
