@@ -12,6 +12,21 @@ private final class HUDPassthroughView: UIView {
     }
 }
 
+/// Phase 6 후속: nav 카드 스타일 상수. ARNavigationViewController 와 FloorNavigationMapView 가 공유.
+/// MapDesignTokens 에 추가하지 않음 — 파일 주석에 "다른 화면 적용 X" 명시되어 있어 AR HUD 로컬 상수로 둔다.
+fileprivate enum NavCardStyle {
+    static let background = UIColor(red: 0x2C/255, green: 0x4A/255, blue: 0x3A/255, alpha: 1)  // #2C4A3A
+    static let cornerRadius: CGFloat = 14
+    static let iconSize: CGFloat = 36
+    static let iconGap: CGFloat = 8
+    static let paddingTop: CGFloat = 10
+    static let paddingRight: CGFloat = 16
+    static let paddingBottom: CGFloat = 10
+    static let paddingLeft: CGFloat = 12
+    static let distanceFontSize: CGFloat = 28
+    static let directionFontSize: CGFloat = 14
+}
+
 private final class FloorNavigationMapView: UIView {
 
     // MARK: - Data state
@@ -28,6 +43,10 @@ private final class FloorNavigationMapView: UIView {
     private var userZoomScale = CGFloat(MapDesignTokens.Metric.mapZoomDefault)
     private var currentAutoScaleLockSignature: String?
     private var lockedAutoScaleCorridorWidthMeters: CGFloat?
+
+    /// 위치 핀 거리 배지의 회전 아이콘/거리. updateNextAction 으로 외부에서 주입.
+    private var currentNavAction: NavigationActionKind = .straight
+    private var currentNavActionDistanceMeters: CGFloat?
 
     // MARK: - Heading smoothing (ADR §D)
 
@@ -240,6 +259,8 @@ private final class FloorNavigationMapView: UIView {
         resumeDisplayLink()
     }
 
+    var currentZoomScale: CGFloat { userZoomScale }
+
     func setZoomScale(_ zoomScale: CGFloat) {
         let clamped = min(max(zoomScale, CGFloat(MapDesignTokens.Metric.mapZoomMinimum)),
                           CGFloat(MapDesignTokens.Metric.mapZoomMaximum))
@@ -247,6 +268,14 @@ private final class FloorNavigationMapView: UIView {
         userZoomScale = clamped
         staticCacheDirty = true
         resumeDisplayLink()
+    }
+
+    /// 위치 핀 아래 거리 배지의 회전 아이콘/거리 표기 갱신. updateNavigationStep 에서 forward 됨.
+    func updateNextAction(_ action: NavigationActionKind, distanceMeters: CGFloat?) {
+        self.currentNavAction = action
+        self.currentNavActionDistanceMeters = distanceMeters
+        staticCacheDirty = false
+        dynamicOverlayLayer.setNeedsDisplay()
     }
 
     // MARK: - Layout
@@ -683,8 +712,9 @@ private final class FloorNavigationMapView: UIView {
         } else {
             drawPositionDot(context: context, point: point)
         }
-        if let remainingDistance = remainingDistanceMetersForCurrentPoint(currentWorldPoint) {
-            drawRemainingDistanceBadge(context: context, point: point, remainingDistance: remainingDistance)
+        let distForBadge: CGFloat? = currentNavActionDistanceMeters ?? remainingDistanceMetersForCurrentPoint(currentWorldPoint)
+        if let dist = distForBadge {
+            drawRemainingDistanceBadge(context: context, point: point, action: currentNavAction, distance: dist)
         }
     }
 
@@ -738,17 +768,23 @@ private final class FloorNavigationMapView: UIView {
         context.restoreGState()
     }
 
+    /// 위치 핀 바로 아래 nav-card 스타일 배지. 좌측 회전 아이콘 + 우측 큰 흰색 거리.
     private func drawRemainingDistanceBadge(context: CGContext,
                                             point: CGPoint,
-                                            remainingDistance: CGFloat) {
-        let meters = max(0, Int(remainingDistance.rounded()))
+                                            action: NavigationActionKind,
+                                            distance: CGFloat) {
+        let meters = max(0, Int(distance.rounded()))
         let label = "\(meters)m"
         let attributes: [NSAttributedString.Key: Any] = [
             .font: UIFont.systemFont(ofSize: 11.5, weight: .bold),
             .foregroundColor: MapDesignTokens.Text.primary
         ]
         let textSize = (label as NSString).size(withAttributes: attributes)
-        let badgeSize = CGSize(width: max(44, textSize.width + 18), height: 24)
+        let iconSize: CGFloat = 14
+        let iconGap: CGFloat = 4
+        let horizontalPadding: CGFloat = 10
+        let contentWidth = iconSize + iconGap + textSize.width
+        let badgeSize = CGSize(width: max(52, contentWidth + horizontalPadding * 2), height: 24)
         let markerDiameter = MapDesignTokens.Metric.positionPuckDiameter
         var originY = point.y + markerDiameter / 2 + 5
         if originY + badgeSize.height > bounds.maxY - 8 {
@@ -769,11 +805,29 @@ private final class FloorNavigationMapView: UIView {
         path.stroke()
         context.restoreGState()
 
-        let textRect = CGRect(x: rect.midX - textSize.width / 2,
+        let contentOriginX = rect.midX - contentWidth / 2
+        let iconRect = CGRect(x: contentOriginX,
+                              y: rect.midY - iconSize / 2,
+                              width: iconSize,
+                              height: iconSize)
+        if let iconImage = UIImage(named: navActionImageName(action)) {
+            iconImage.withTintColor(MapDesignTokens.Text.primary, renderingMode: .alwaysOriginal).draw(in: iconRect)
+        }
+
+        let textRect = CGRect(x: iconRect.maxX + iconGap,
                               y: rect.midY - textSize.height / 2,
                               width: textSize.width,
                               height: textSize.height)
         (label as NSString).draw(in: textRect, withAttributes: attributes)
+    }
+
+    /// NavigationActionKind → 회전 아이콘 asset 이름. nav 카드 actionImage 와 동일 매핑.
+    private func navActionImageName(_ action: NavigationActionKind) -> String {
+        switch action {
+        case .turnLeft: return "arrowTurnDownLeft"
+        case .turnRight: return "arrowTurnDownRight"
+        default: return "arrowUpThick"
+        }
     }
 
     // MARK: - Transform helpers
@@ -1557,17 +1611,21 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var instructionLabel: UILabel?
 
     // Phase 6: 신규 목적지 pill 내부 컴포넌트
-    // — Phase 6 후속: 상단 nav-bar 도입으로 destination pill 폐기. 옵셔널 유지(updateNavigationStep 의 옵셔널 체이닝용).
+    // — Phase 6 후속: nav 카드(setupNavCard) 도입으로 destination pill 폐기. 옵셔널 유지(updateNavigationStep 의 옵셔널 체이닝용).
     var destinationIconCircle: UIView?
     var destinationFloorLabel: UILabel?
     var destinationNameLabel: UILabel?
 
-    // Phase 6 후속: 상단 nav-bar (턴 카드 + 닫기 버튼 통합)
-    private var navBarContainerView: UIView!
-    private var navBarIconBox: UIView!
-    private var navBarIconView: UIImageView!
-    private var navBarDistanceLabel: UILabel!
-    private var navBarDirectionLabel: UILabel!
+    // Phase 6 후속: 상단 nav 카드 (좌측 정렬, 다음 액션 거리/방향 표시)
+    private var navCardView: UIView!
+    private var navCardIconView: UIImageView!
+    private var navCardDistanceLabel: UILabel!
+    private var navCardDirectionLabel: UILabel!
+
+    // nav 카드 하단 보조 카드 — 목적지 이름 + 총 거리
+    private var navCardSubView: UIView!
+    private var navCardSubNameLabel: UILabel!
+    private var navCardSubDistanceLabel: UILabel!
 
     // Phase 6: 하단 거리/시간 캡슐
     var remainingCapsuleView: UIView!
@@ -1576,14 +1634,12 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     // 하단 2D 내비게이션 맵
     private var floorNavigationContainerView: UIView!
     private var floorNavigationMapView: FloorNavigationMapView!
-    private var floorNavigationExpandButton: UIButton!
-    private var floorNavigationZoomContainerView: UIView!
-    private var floorNavigationZoomSlider: UISlider!
     private var floorNavigationGrabberView: UIView!
     private var floorNavigationCollapsedHeightConstraint: NSLayoutConstraint!
     private var floorNavigationExpandedHeightConstraint: NSLayoutConstraint!
-    private var currentStepMapSpacingConstraint: NSLayoutConstraint!
     private var isFloorNavigationExpanded = false
+    /// 핀치 줌 시작 시점의 베이스 줌 — `.began` 에서 캐시, `.changed` 에서 scale 누적.
+    private var floorNavigationZoomBase: CGFloat = CGFloat(MapDesignTokens.Metric.mapZoomDefault)
 
     // Phase 6: 재측정 버튼 라벨 상태 추적 — 첫 측위 성공 전엔 "주변 스캔", 이후 "재측정".
     private var hasLocalizedSuccessfully = false
@@ -1632,12 +1688,13 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         setupScanCompleteBadge()
         setupScanFailedView()
         setupArrivalBadge()
-        // Phase 6: setupHUD() 폐기 → 5개 신규 setup 으로 대체
-        // Phase 6 후속: setupCloseButton/setupDestinationPill 폐기 → setupNavBar 로 통합
+        // Phase 6: setupHUD() 폐기 → 신규 setup 으로 대체
+        // Phase 6 후속: nav-bar 분해 → 미니맵 위 nav 카드(setupNavCard) + 독립 closeButton(setupCloseButton)
         setupHudContainer()
-        setupNavBar()
         setupRemainingCapsule()
-        setupFloorNavigationMap()
+        setupFloorNavigationMap()   // navCard 의 부모(floorNavigationContainerView) 먼저 생성
+        setupNavCard()
+        setupCloseButton()
         setupRouteCalculatingView()
         setupFloorTransitionOverlay()
         // Phase 8: setupHeadingOverlay() / setupTurnCard() 호출 제거 — keyframe 단계 추적 모델
@@ -1660,9 +1717,12 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         setupRetapGestureForTesting()
 
         // Phase 6: 닫기 / 재측정 버튼이 scanningOverlay·floorTransitionOverlay 등에 가려지지 않도록 항상 최상단으로.
-        // Phase 6 후속: closeButton 은 navBarContainerView 내부로 이동 — nav-bar 전체를 최상단으로.
+        // Phase 6 후속: nav 카드·closeButton 모두 self.view 직속 좌·우 상단 배치.
         self.view.bringSubviewToFront(hudContainerView)
-        hudContainerView.bringSubviewToFront(navBarContainerView)
+        hudContainerView.bringSubviewToFront(floorNavigationContainerView)
+        self.view.bringSubviewToFront(navCardView)
+        self.view.bringSubviewToFront(navCardSubView)
+        self.view.bringSubviewToFront(closeButton)
         self.view.bringSubviewToFront(locateButton)
 
         // AR 마커 시스템 부모 노드 등록 — Logic 이 updateMarkers 발신 시 controller 가 직접 노드 추가.
@@ -1692,117 +1752,155 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         sceneView.autoenablesDefaultLighting = true
     }
 
-    // Phase 6 후속: setupCloseButton 폐기 — closeButton 초기화는 setupNavBar 가 담당.
-
-    /// Phase 6 후속: 상단 nav-bar 스타일 상수.
-    /// MapDesignTokens 에 추가하지 않음 — 파일 주석에 "다른 화면 적용 X" 명시되어 있어 AR HUD 로컬 상수로 둔다.
-    private enum NavBarStyle {
-        static let iconBackground = UIColor(red: 0x18/255, green: 0x5F/255, blue: 0xA5/255, alpha: 1)  // #185FA5
-        static let exitBackground = UIColor(red: 0xE2/255, green: 0x4B/255, blue: 0x4A/255, alpha: 1)  // #E24B4A
-        static let barBackground = UIColor.white.withAlphaComponent(0.97)
-        static let barCornerRadius: CGFloat = 20
-        static let barHeight: CGFloat = 80
-        static let iconBoxSize: CGFloat = 52
-        static let exitSize: CGFloat = 52
-        static let distanceFontSize: CGFloat = 26
-        static let directionFontSize: CGFloat = 13
-    }
-
-    /// Phase 6 후속: 상단 nav-bar (턴 카드 + 닫기 버튼을 한 행으로 통합).
-    /// hudContainerView 자식, safeArea top + 12pt. 좌측 아이콘 박스(파랑) — 텍스트(거리/방향) — 우측 닫기 박스(빨강).
-    private func setupNavBar() {
-        // 컨테이너
-        let bar = UIView()
-        bar.backgroundColor = NavBarStyle.barBackground
-        bar.layer.cornerRadius = NavBarStyle.barCornerRadius
-        bar.layer.shadowColor = UIColor.black.cgColor
-        bar.layer.shadowOpacity = 0.08
-        bar.layer.shadowRadius = 8
-        bar.layer.shadowOffset = CGSize(width: 0, height: 2)
-        bar.translatesAutoresizingMaskIntoConstraints = false
-        hudContainerView.addSubview(bar)
-        navBarContainerView = bar
-
-        // 좌측 아이콘 박스 (파랑)
-        let iconBox = UIView()
-        iconBox.backgroundColor = NavBarStyle.iconBackground
-        iconBox.layer.cornerRadius = 12
-        iconBox.layer.masksToBounds = true
-        iconBox.translatesAutoresizingMaskIntoConstraints = false
-        bar.addSubview(iconBox)
-        navBarIconBox = iconBox
+    /// Phase 6 후속: 미니맵 컨테이너 위에 띄우는 nav 카드 (좌측 정렬).
+    /// self.view 자식, safe area 좌상단(leading+16 / top+12). 좌측 아이콘 + 큰 거리 라벨 + 하단 방향 라벨.
+    private func setupNavCard() {
+        let card = UIView()
+        card.backgroundColor = NavCardStyle.background
+        card.layer.cornerRadius = NavCardStyle.cornerRadius
+        card.layer.shadowColor = UIColor.black.cgColor
+        card.layer.shadowOpacity = 0.25
+        card.layer.shadowRadius = 12
+        card.layer.shadowOffset = CGSize(width: 0, height: 4)
+        card.layer.masksToBounds = false
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.isHidden = true
+        self.view.addSubview(card)
+        navCardView = card
 
         let iconView = UIImageView(image: actionImage(for: .straight))
         iconView.tintColor = .white
         iconView.contentMode = .scaleAspectFit
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        iconBox.addSubview(iconView)
-        navBarIconView = iconView
+        card.addSubview(iconView)
+        navCardIconView = iconView
 
-        // 우측 닫기 버튼 (빨강) — closeButton 인스턴스 재사용
+        let distanceLabel = UILabel()
+        distanceLabel.text = "—m"
+        distanceLabel.textColor = .white
+        distanceLabel.font = .systemFont(ofSize: NavCardStyle.distanceFontSize, weight: .bold)
+        distanceLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(distanceLabel)
+        navCardDistanceLabel = distanceLabel
+
+        let directionLabel = UILabel()
+        directionLabel.text = "직진"
+        directionLabel.textColor = UIColor.white.withAlphaComponent(0.85)
+        directionLabel.font = .systemFont(ofSize: NavCardStyle.directionFontSize, weight: .regular)
+        directionLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(directionLabel)
+        navCardDirectionLabel = directionLabel
+
+        let safeArea = self.view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            card.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 12),
+            card.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor, constant: 16),
+            card.widthAnchor.constraint(greaterThanOrEqualToConstant: 140),
+
+            iconView.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: NavCardStyle.paddingLeft),
+            iconView.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: NavCardStyle.iconSize),
+            iconView.heightAnchor.constraint(equalToConstant: NavCardStyle.iconSize),
+
+            distanceLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: NavCardStyle.iconGap),
+            distanceLabel.topAnchor.constraint(equalTo: card.topAnchor, constant: NavCardStyle.paddingTop),
+            distanceLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -NavCardStyle.paddingRight),
+
+            directionLabel.leadingAnchor.constraint(equalTo: distanceLabel.leadingAnchor),
+            directionLabel.topAnchor.constraint(equalTo: distanceLabel.bottomAnchor, constant: 2),
+            directionLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -NavCardStyle.paddingRight),
+            directionLabel.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -NavCardStyle.paddingBottom),
+        ])
+
+        // 보조 카드: 목적지 이름 + 총 거리. nav 카드 하단에 부착, 좌측 정렬.
+        let sub = UIView()
+        sub.backgroundColor = NavCardStyle.background
+        sub.layer.cornerRadius = 10
+        sub.layer.shadowColor = UIColor.black.cgColor
+        sub.layer.shadowOpacity = 0.25
+        sub.layer.shadowRadius = 12
+        sub.layer.shadowOffset = CGSize(width: 0, height: 4)
+        sub.layer.masksToBounds = false
+        sub.translatesAutoresizingMaskIntoConstraints = false
+        sub.isHidden = true
+        self.view.addSubview(sub)
+        navCardSubView = sub
+
+        let nameLabel = UILabel()
+        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        nameLabel.textColor = .white
+        nameLabel.numberOfLines = 1
+        nameLabel.lineBreakMode = .byTruncatingTail
+        nameLabel.translatesAutoresizingMaskIntoConstraints = false
+        sub.addSubview(nameLabel)
+        navCardSubNameLabel = nameLabel
+
+        let dotLabel = UILabel()
+        dotLabel.text = "·"
+        dotLabel.font = .systemFont(ofSize: 13)
+        dotLabel.textColor = UIColor.white.withAlphaComponent(0.7)
+        dotLabel.translatesAutoresizingMaskIntoConstraints = false
+        sub.addSubview(dotLabel)
+
+        let distLabel = UILabel()
+        distLabel.font = .systemFont(ofSize: 13, weight: .regular)
+        distLabel.textColor = UIColor.white.withAlphaComponent(0.7)
+        distLabel.translatesAutoresizingMaskIntoConstraints = false
+        sub.addSubview(distLabel)
+        navCardSubDistanceLabel = distLabel
+
+        NSLayoutConstraint.activate([
+            sub.topAnchor.constraint(equalTo: card.bottomAnchor, constant: 4),
+            sub.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            nameLabel.leadingAnchor.constraint(equalTo: sub.leadingAnchor, constant: 12),
+            nameLabel.centerYAnchor.constraint(equalTo: sub.centerYAnchor),
+            nameLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 140),
+            dotLabel.leadingAnchor.constraint(equalTo: nameLabel.trailingAnchor, constant: 6),
+            dotLabel.centerYAnchor.constraint(equalTo: sub.centerYAnchor),
+            distLabel.leadingAnchor.constraint(equalTo: dotLabel.trailingAnchor, constant: 6),
+            distLabel.centerYAnchor.constraint(equalTo: sub.centerYAnchor),
+            distLabel.trailingAnchor.constraint(equalTo: sub.trailingAnchor, constant: -12),
+            nameLabel.topAnchor.constraint(equalTo: sub.topAnchor, constant: 6),
+            nameLabel.bottomAnchor.constraint(equalTo: sub.bottomAnchor, constant: -6),
+        ])
+    }
+
+    /// Phase 6 후속: 독립 closeButton — 안전영역 top-trailing 모서리, blur 백드롭, 44pt 원형.
+    private func setupCloseButton() {
         closeButton = UIButton(type: .system)
         let assetIcon = UIImage(named: "closeThick")?.withRenderingMode(.alwaysTemplate)
         let fallbackConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
         let fallback = UIImage(systemName: "xmark", withConfiguration: fallbackConfig)
-        let icon = assetIcon ?? fallback
-        closeButton.setImage(icon, for: .normal)
+        closeButton.setImage(assetIcon ?? fallback, for: .normal)
         closeButton.imageView?.contentMode = .scaleAspectFit
-        closeButton.imageEdgeInsets = UIEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+        closeButton.imageEdgeInsets = UIEdgeInsets(top: 11, left: 11, bottom: 11, right: 11)
         closeButton.tintColor = .white
-        closeButton.backgroundColor = NavBarStyle.exitBackground
-        closeButton.layer.cornerRadius = 12
+        closeButton.backgroundColor = UIColor(white: 0.0, alpha: 0.45)
+        closeButton.layer.cornerRadius = 22
         closeButton.layer.masksToBounds = true
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.addTarget(self, action: #selector(onCloseButtonTapped), for: .touchUpInside)
-        bar.addSubview(closeButton)
 
-        // 텍스트 stack (vertical, leading)
-        let distanceLabel = UILabel()
-        distanceLabel.text = "—m"
-        distanceLabel.textColor = .black
-        distanceLabel.font = .systemFont(ofSize: NavBarStyle.distanceFontSize, weight: .medium)
-        distanceLabel.translatesAutoresizingMaskIntoConstraints = false
-        navBarDistanceLabel = distanceLabel
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+        blur.translatesAutoresizingMaskIntoConstraints = false
+        blur.isUserInteractionEnabled = false
+        blur.layer.cornerRadius = 22
+        blur.layer.masksToBounds = true
+        closeButton.insertSubview(blur, at: 0)
 
-        let directionLabel = UILabel()
-        directionLabel.text = "직진"
-        directionLabel.textColor = .systemGray
-        directionLabel.font = .systemFont(ofSize: NavBarStyle.directionFontSize, weight: .regular)
-        directionLabel.translatesAutoresizingMaskIntoConstraints = false
-        navBarDirectionLabel = directionLabel
-
-        let textStack = UIStackView(arrangedSubviews: [distanceLabel, directionLabel])
-        textStack.axis = .vertical
-        textStack.alignment = .leading
-        textStack.spacing = 2
-        textStack.translatesAutoresizingMaskIntoConstraints = false
-        bar.addSubview(textStack)
+        self.view.addSubview(closeButton)
 
         let safeArea = self.view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            bar.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 12),
-            bar.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor, constant: 16),
-            bar.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor, constant: -16),
-            bar.heightAnchor.constraint(equalToConstant: NavBarStyle.barHeight),
+            closeButton.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor, constant: -16),
+            closeButton.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 12),
+            closeButton.widthAnchor.constraint(equalToConstant: 44),
+            closeButton.heightAnchor.constraint(equalToConstant: 44),
 
-            iconBox.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 12),
-            iconBox.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            iconBox.widthAnchor.constraint(equalToConstant: NavBarStyle.iconBoxSize),
-            iconBox.heightAnchor.constraint(equalToConstant: NavBarStyle.iconBoxSize),
-
-            iconView.centerXAnchor.constraint(equalTo: iconBox.centerXAnchor),
-            iconView.centerYAnchor.constraint(equalTo: iconBox.centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 32),
-            iconView.heightAnchor.constraint(equalToConstant: 32),
-
-            closeButton.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -12),
-            closeButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            closeButton.widthAnchor.constraint(equalToConstant: NavBarStyle.exitSize),
-            closeButton.heightAnchor.constraint(equalToConstant: NavBarStyle.exitSize),
-
-            textStack.leadingAnchor.constraint(equalTo: iconBox.trailingAnchor, constant: 12),
-            textStack.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -12),
-            textStack.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            blur.topAnchor.constraint(equalTo: closeButton.topAnchor),
+            blur.leadingAnchor.constraint(equalTo: closeButton.leadingAnchor),
+            blur.trailingAnchor.constraint(equalTo: closeButton.trailingAnchor),
+            blur.bottomAnchor.constraint(equalTo: closeButton.bottomAnchor),
         ])
     }
 
@@ -2049,7 +2147,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         self.view.addSubview(hudContainerView)
     }
 
-    // Phase 6 후속: setupDestinationPill 폐기 — 상단 nav-bar (setupNavBar) 가 거리/방향을 직접 표시.
+    // Phase 6 후속: setupDestinationPill 폐기 — 미니맵 위 nav 카드(setupNavCard) 가 거리/방향을 직접 표시.
     // destinationPillView / destinationIconCircle / destinationFloorLabel / destinationNameLabel 옵셔널은
     // updateNavigationStep 의 안전한 옵셔널 체이닝용으로 유지(현재 모두 nil).
 
@@ -2125,57 +2223,12 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         container.addSubview(grabber)
         floorNavigationGrabberView = grabber
 
-        floorNavigationExpandButton = UIButton(type: .system)
-        floorNavigationExpandButton.backgroundColor = MapDesignTokens.Surface.controlFill
-        floorNavigationExpandButton.tintColor = MapDesignTokens.Text.primary
-        floorNavigationExpandButton.layer.cornerRadius = 22
-        floorNavigationExpandButton.layer.masksToBounds = false
-        floorNavigationExpandButton.layer.borderWidth = 1
-        floorNavigationExpandButton.layer.borderColor = MapDesignTokens.Stroke.labelBorder.cgColor
-        floorNavigationExpandButton.layer.shadowColor = UIColor.black.cgColor
-        floorNavigationExpandButton.layer.shadowOpacity = 0.12
-        floorNavigationExpandButton.layer.shadowRadius = 8
-        floorNavigationExpandButton.layer.shadowOffset = CGSize(width: 0, height: 3)
-        floorNavigationExpandButton.setImage(floorNavigationExpandIcon(expanded: false), for: .normal)
-        floorNavigationExpandButton.translatesAutoresizingMaskIntoConstraints = false
-        floorNavigationExpandButton.addTarget(self, action: #selector(onFloorNavigationExpandTapped), for: .touchUpInside)
-        container.addSubview(floorNavigationExpandButton)
-
-        let zoomContainer = UIView()
-        zoomContainer.backgroundColor = MapDesignTokens.Surface.controlFill
-        zoomContainer.layer.cornerRadius = 22
-        zoomContainer.layer.masksToBounds = false
-        zoomContainer.layer.borderWidth = 1
-        zoomContainer.layer.borderColor = MapDesignTokens.Stroke.labelBorder.cgColor
-        zoomContainer.layer.shadowColor = UIColor.black.cgColor
-        zoomContainer.layer.shadowOpacity = 0.10
-        zoomContainer.layer.shadowRadius = 8
-        zoomContainer.layer.shadowOffset = CGSize(width: 0, height: 3)
-        zoomContainer.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(zoomContainer)
-        floorNavigationZoomContainerView = zoomContainer
-
-        floorNavigationZoomSlider = UISlider()
-        floorNavigationZoomSlider.minimumValue = MapDesignTokens.Metric.mapZoomMinimum
-        floorNavigationZoomSlider.maximumValue = MapDesignTokens.Metric.mapZoomMaximum
-        floorNavigationZoomSlider.value = MapDesignTokens.Metric.mapZoomDefault
-        floorNavigationZoomSlider.minimumTrackTintColor = MapDesignTokens.Accent.route
-        floorNavigationZoomSlider.maximumTrackTintColor = MapDesignTokens.Stroke.labelBorder
-        floorNavigationZoomSlider.thumbTintColor = MapDesignTokens.Text.primary
-        floorNavigationZoomSlider.translatesAutoresizingMaskIntoConstraints = false
-        floorNavigationZoomSlider.addTarget(self, action: #selector(onFloorNavigationZoomChanged(_:)), for: .valueChanged)
-        zoomContainer.addSubview(floorNavigationZoomSlider)
-
         floorNavigationCollapsedHeightConstraint = container.heightAnchor.constraint(
             equalTo: self.view.heightAnchor,
             multiplier: MapDesignTokens.Metric.containerHeightRatio
         )
         floorNavigationExpandedHeightConstraint = container.heightAnchor.constraint(equalTo: self.view.heightAnchor)
         floorNavigationExpandedHeightConstraint.isActive = false
-        currentStepMapSpacingConstraint = navBarContainerView.bottomAnchor.constraint(
-            lessThanOrEqualTo: container.topAnchor,
-            constant: -4
-        )
 
         NSLayoutConstraint.activate([
             container.leadingAnchor.constraint(equalTo: hudContainerView.leadingAnchor),
@@ -2192,39 +2245,109 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
             grabber.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             grabber.widthAnchor.constraint(equalToConstant: 36),
             grabber.heightAnchor.constraint(equalToConstant: 4),
+        ])
 
-            floorNavigationExpandButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            floorNavigationExpandButton.bottomAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.bottomAnchor, constant: -14),
-            floorNavigationExpandButton.widthAnchor.constraint(equalToConstant: 44),
-            floorNavigationExpandButton.heightAnchor.constraint(equalToConstant: 44),
+        // 위/아래 swipe 제스처 — collapsed ↔ expanded 토글. expand 버튼 폐기 후 도입.
+        let swipeUp = UISwipeGestureRecognizer(target: self, action: #selector(onFloorNavigationSwipeUp))
+        swipeUp.direction = .up
+        container.addGestureRecognizer(swipeUp)
 
-            zoomContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
-            zoomContainer.bottomAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.bottomAnchor, constant: -14),
-            zoomContainer.widthAnchor.constraint(equalToConstant: 138),
-            zoomContainer.heightAnchor.constraint(equalToConstant: 44),
+        let swipeDown = UISwipeGestureRecognizer(target: self, action: #selector(onFloorNavigationSwipeDown))
+        swipeDown.direction = .down
+        container.addGestureRecognizer(swipeDown)
 
-            floorNavigationZoomSlider.leadingAnchor.constraint(equalTo: zoomContainer.leadingAnchor, constant: 14),
-            floorNavigationZoomSlider.trailingAnchor.constraint(equalTo: zoomContainer.trailingAnchor, constant: -14),
-            floorNavigationZoomSlider.centerYAnchor.constraint(equalTo: zoomContainer.centerYAnchor),
+        // 핀치 줌 — zoom slider 폐기 후 도입. floorNavigationMapView 가 isUserInteractionEnabled=false 이므로
+        // container 에 부착.
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(onFloorNavigationPinch(_:)))
+        container.addGestureRecognizer(pinch)
 
-            currentStepMapSpacingConstraint,
+        // +/- 줌 컨트롤 — 우하단 흰 알약. 핀치와 동일한 setZoomScale 호출. 미니맵 자식이라 expanded 모드에서도 함께 이동.
+        let zoomControls = UIView()
+        zoomControls.backgroundColor = MapDesignTokens.Surface.controlFill
+        zoomControls.layer.cornerRadius = 14
+        zoomControls.layer.masksToBounds = false
+        zoomControls.layer.borderWidth = 1
+        zoomControls.layer.borderColor = MapDesignTokens.Stroke.labelBorder.cgColor
+        zoomControls.layer.shadowColor = UIColor.black.cgColor
+        zoomControls.layer.shadowOpacity = 0.12
+        zoomControls.layer.shadowRadius = 8
+        zoomControls.layer.shadowOffset = CGSize(width: 0, height: 3)
+        zoomControls.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(zoomControls)
+
+        let plusButton = UIButton(type: .system)
+        plusButton.setImage(UIImage(named: "plusThick")?.withRenderingMode(.alwaysTemplate), for: .normal)
+        plusButton.tintColor = MapDesignTokens.Text.primary
+        plusButton.imageView?.contentMode = .scaleAspectFit
+        plusButton.translatesAutoresizingMaskIntoConstraints = false
+        plusButton.addTarget(self, action: #selector(onFloorNavigationZoomIn), for: .touchUpInside)
+        zoomControls.addSubview(plusButton)
+
+        let zoomSeparator = UIView()
+        zoomSeparator.backgroundColor = MapDesignTokens.Stroke.labelBorder
+        zoomSeparator.translatesAutoresizingMaskIntoConstraints = false
+        zoomControls.addSubview(zoomSeparator)
+
+        let minusButton = UIButton(type: .system)
+        minusButton.setImage(UIImage(named: "minusThick")?.withRenderingMode(.alwaysTemplate), for: .normal)
+        minusButton.tintColor = MapDesignTokens.Text.primary
+        minusButton.imageView?.contentMode = .scaleAspectFit
+        minusButton.translatesAutoresizingMaskIntoConstraints = false
+        minusButton.addTarget(self, action: #selector(onFloorNavigationZoomOut), for: .touchUpInside)
+        zoomControls.addSubview(minusButton)
+
+        NSLayoutConstraint.activate([
+            zoomControls.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+            zoomControls.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
+            zoomControls.widthAnchor.constraint(equalToConstant: 44),
+
+            plusButton.topAnchor.constraint(equalTo: zoomControls.topAnchor),
+            plusButton.leadingAnchor.constraint(equalTo: zoomControls.leadingAnchor),
+            plusButton.trailingAnchor.constraint(equalTo: zoomControls.trailingAnchor),
+            plusButton.heightAnchor.constraint(equalToConstant: 44),
+
+            zoomSeparator.topAnchor.constraint(equalTo: plusButton.bottomAnchor),
+            zoomSeparator.leadingAnchor.constraint(equalTo: zoomControls.leadingAnchor, constant: 8),
+            zoomSeparator.trailingAnchor.constraint(equalTo: zoomControls.trailingAnchor, constant: -8),
+            zoomSeparator.heightAnchor.constraint(equalToConstant: 1),
+
+            minusButton.topAnchor.constraint(equalTo: zoomSeparator.bottomAnchor),
+            minusButton.leadingAnchor.constraint(equalTo: zoomControls.leadingAnchor),
+            minusButton.trailingAnchor.constraint(equalTo: zoomControls.trailingAnchor),
+            minusButton.heightAnchor.constraint(equalToConstant: 44),
+            minusButton.bottomAnchor.constraint(equalTo: zoomControls.bottomAnchor),
         ])
     }
 
-    private func floorNavigationExpandIcon(expanded: Bool) -> UIImage? {
-        let config = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
-        let symbolName = expanded
-            ? "arrow.down.right.and.arrow.up.left"
-            : "arrow.up.left.and.arrow.down.right"
-        return UIImage(systemName: symbolName, withConfiguration: config)
+    @objc private func onFloorNavigationSwipeUp() {
+        guard !isFloorNavigationExpanded else { return }
+        setFloorNavigationExpanded(true, animated: true)
     }
 
-    @objc private func onFloorNavigationExpandTapped() {
-        setFloorNavigationExpanded(!isFloorNavigationExpanded, animated: true)
+    @objc private func onFloorNavigationSwipeDown() {
+        guard isFloorNavigationExpanded else { return }
+        setFloorNavigationExpanded(false, animated: true)
     }
 
-    @objc private func onFloorNavigationZoomChanged(_ sender: UISlider) {
-        floorNavigationMapView.setZoomScale(CGFloat(sender.value))
+    @objc private func onFloorNavigationPinch(_ gesture: UIPinchGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            floorNavigationZoomBase = floorNavigationMapView.currentZoomScale
+        case .changed:
+            let next = floorNavigationZoomBase * gesture.scale
+            floorNavigationMapView.setZoomScale(next)
+        default: break
+        }
+    }
+
+    @objc private func onFloorNavigationZoomIn() {
+        let next = floorNavigationMapView.currentZoomScale * 1.3
+        floorNavigationMapView.setZoomScale(next)
+    }
+
+    @objc private func onFloorNavigationZoomOut() {
+        let next = floorNavigationMapView.currentZoomScale / 1.3
+        floorNavigationMapView.setZoomScale(next)
     }
 
     private func setFloorNavigationExpanded(_ expanded: Bool, animated: Bool) {
@@ -2233,12 +2356,15 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
 
         floorNavigationCollapsedHeightConstraint.isActive = !expanded
         floorNavigationExpandedHeightConstraint.isActive = expanded
-        currentStepMapSpacingConstraint.isActive = !expanded
         floorNavigationContainerView.layer.cornerRadius = expanded ? 0 : MapDesignTokens.Metric.containerTopCornerRadius
-        floorNavigationExpandButton.setImage(floorNavigationExpandIcon(expanded: expanded), for: .normal)
 
         setARSceneRenderingPausedForFloorMap(expanded)
         setNonMapHUDHiddenForExpandedMap(expanded)
+
+        if expanded {
+            self.view.bringSubviewToFront(navCardView)
+            self.view.bringSubviewToFront(navCardSubView)
+        }
 
         let updates = { self.view.layoutIfNeeded() }
         if animated {
@@ -2254,13 +2380,12 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     }
 
     private func setNonMapHUDHiddenForExpandedMap(_ hidden: Bool) {
-        // Phase 6 후속: destinationPillView/closeButton 개별 → navBarContainerView 로 통합.
-        // closeButton 은 navBarContainerView 자식이므로 별도 처리 불필요.
+        // Phase 6 후속: nav 카드는 expanded 모드에서도 노출 유지 — fade 대상에서 제외.
         let views: [UIView?] = [
-            navBarContainerView,
             remainingCapsuleView,
             locateButton,
-            routeCalculatingView
+            routeCalculatingView,
+            closeButton
         ]
         UIView.animate(withDuration: hidden ? 0.18 : 0.2) {
             views.compactMap { $0 }.forEach { view in
@@ -2571,11 +2696,28 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
-            // 1. 상단 nav-bar — 다음 액션 아이콘 + 거리 + 방향 라벨
-            self.navBarIconView.image = self.actionImage(for: vm.action)
+            // 1. 좌상단 nav 카드 — 다음 액션 아이콘 + 거리(굵게) + 방향 라벨. path 확정 후 첫 update 에서 노출.
+            self.navCardView.isHidden = false
+            self.navCardIconView.image = self.actionImage(for: vm.action)
             let navDistInt = max(0, Int(vm.distanceMeters.rounded()))
-            self.navBarDistanceLabel.text = "\(navDistInt)m"
-            self.navBarDirectionLabel.text = self.actionLabel(for: vm.action)
+            let kernAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: NavCardStyle.distanceFontSize, weight: .bold),
+                .foregroundColor: UIColor.white,
+                .kern: -0.5
+            ]
+            self.navCardDistanceLabel.attributedText = NSAttributedString(
+                string: "\(navDistInt)m", attributes: kernAttrs
+            )
+            self.navCardDirectionLabel.text = self.actionLabel(for: vm.action)
+
+            // nav 카드 하단 보조 카드 — 목적지 이름 + 총 거리
+            self.navCardSubView.isHidden = false
+            self.navCardSubNameLabel.text = vm.destinationName
+            let totalIntSub = max(0, Int(vm.remainingTotalMeters.rounded()))
+            self.navCardSubDistanceLabel.text = "\(totalIntSub)m"
+
+            // 미니맵 위 거리 배지 — 회전 아이콘 + 다음 액션까지 거리 forward
+            self.floorNavigationMapView.updateNextAction(vm.action, distanceMeters: CGFloat(vm.distanceMeters))
 
             // Phase 6 후속: destination pill 폐기 — 옵셔널 체이닝으로 안전 갱신(현재 nil, no-op).
             if let floor = vm.destinationFloorLevel {
