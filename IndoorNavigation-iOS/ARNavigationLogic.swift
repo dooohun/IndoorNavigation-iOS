@@ -744,11 +744,24 @@ class ARNavigationLogic {
     }
     #endif
 
-    private func refreshFloorNavigationMap(routeSteps: [PathStep], currentFrame: ARFrame?) {
+    /// 2D floor map 갱신. 신규 경로 흐름에서는 configure (showFloorNavigationMap) 로 전체 재구성.
+    /// - Parameter isRelocalizeRefresh: 주기 재측위/PnP 보정 시 호출이면 true. 캐시된 map 이 있으면 configure 우회 →
+    ///   updateFloorNavigationPosition 만 호출해 위치/방향 보간 메커니즘을 활용 (시각적 점프 방지).
+    private func refreshFloorNavigationMap(routeSteps: [PathStep], currentFrame: ARFrame?, isRelocalizeRefresh: Bool = false) {
         let resolvedFloorId = localizedFloorId ?? floorId
         guard !resolvedFloorId.isEmpty else { return }
 
         let currentPose = currentFloorNavigationPose(frame: currentFrame)
+
+        // 보정 모드 + map 캐시 hit: configure 우회 → updateCurrentPosition 만 호출해 보간 작동.
+        if isRelocalizeRefresh, floorMapCache[resolvedFloorId] != nil {
+            delegate?.updateFloorNavigationPosition(
+                currentPose?.position,
+                headingDegrees: currentPose?.headingDegrees
+            )
+            return
+        }
+
         if let cached = floorMapCache[resolvedFloorId] {
             delegate?.showFloorNavigationMap(
                 cached,
@@ -1328,9 +1341,9 @@ class ARNavigationLogic {
         print(String(format: "[PeriodicV3] blended — alpha=%.2f Δpose=%.2fm conf=%.2f",
                      alpha, delta, response.confidence))
 
-        // 경로/마커 재렌더 (PnP 보정 패턴 따름)
-        self.drawPathFromSteps(self.lastPathSteps)
-        self.refreshFloorNavigationMap(routeSteps: self.lastPathSteps, currentFrame: self.arSession?.currentFrame)
+        // 경로/마커 재렌더 (PnP 보정 패턴 따름) — 보정 모드: 진행 상태(currentStepIndex / turn arrow / marker) 유지
+        self.drawPathFromSteps(self.lastPathSteps, isRelocalizeRefresh: true)
+        self.refreshFloorNavigationMap(routeSteps: self.lastPathSteps, currentFrame: self.arSession?.currentFrame, isRelocalizeRefresh: true)
     }
 
     private func runTrackingTick() {
@@ -1457,9 +1470,9 @@ class ARNavigationLogic {
         self.matchedARPose = arPose
         print(String(format: "[PnP] refined → t_W=(%.2f,%.2f,%.2f) reproj=%.2fpx", t_W.x, t_W.y, t_W.z, pose.reprojectionError))
 
-        // 보정된 pose 로 path / checkpoint 재렌더
-        self.drawPathFromSteps(self.lastPathSteps)
-        self.refreshFloorNavigationMap(routeSteps: self.lastPathSteps, currentFrame: arSession?.currentFrame)
+        // 보정된 pose 로 path / checkpoint 재렌더 — 보정 모드: 진행 상태 유지
+        self.drawPathFromSteps(self.lastPathSteps, isRelocalizeRefresh: true)
+        self.refreshFloorNavigationMap(routeSteps: self.lastPathSteps, currentFrame: arSession?.currentFrame, isRelocalizeRefresh: true)
         self.updateCheckpointNode()
     }
 
@@ -1593,7 +1606,9 @@ class ARNavigationLogic {
 
     /// pathfinding steps[].position 들을 server world → AR world 변환 후 PathChevronController 로 시각화.
     /// V3 측위 + lookup 직후 1회 호출. 매 tick 갱신 X (단, PnP 보정 시 재호출됨 — cameraPos 기준 spawn cursor 결정).
-    private func drawPathFromSteps(_ steps: [PathStep]) {
+    /// - Parameter isRelocalizeRefresh: 주기 재측위/PnP 보정으로 인한 재렌더 여부. true 면 currentStepIndex / turn arrow / marker
+    ///   초기화 단계를 건너뛰어 깜빡임을 방지한다. 다음 1Hz tick 에서 자연스럽게 재산정된다.
+    private func drawPathFromSteps(_ steps: [PathStep], isRelocalizeRefresh: Bool = false) {
         lastPathSteps = steps
         print("[NAV] path with \(lastPathSteps.count) steps:")
         for (i, s) in lastPathSteps.enumerated() {
@@ -1643,6 +1658,11 @@ class ARNavigationLogic {
             cameraPos: lastCameraPos
         )
         print("[Path] drew \(steps.count) steps as \(filteredARPoints.count) chevron-distribution points (filtered to current floor)")
+
+        if isRelocalizeRefresh {
+            // 보정 모드: currentStepIndex / turn arrow / marker 유지. 다음 1Hz tick 이 자연스럽게 재산정.
+            return
+        }
 
         // Phase 6: 경로가 새로 그려지면 step index 리셋 + 첫 vm 즉시 발신
         // 첫 vm 은 cameraPos 가 없어 fallback 거리 사용 (다음 1Hz tick 에서 정확한 거리로 갱신).

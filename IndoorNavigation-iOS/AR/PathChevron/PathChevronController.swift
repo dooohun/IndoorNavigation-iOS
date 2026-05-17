@@ -49,6 +49,11 @@ final class PathChevronController {
     private static let pulsePeriod: Double = 1.6
     /// 펄스 애니메이션 시작 오프셋 (s).
     private static let pulseOffset: Double = 0.5
+    /// setRoute 재호출 시 기존 chevron 노드를 재사용 가능한 분포 변동 최대치 (m, XZ).
+    /// 각 distribution point 가 이 거리 이하로 이동한 경우만 재사용 → 보간 트윈 적용. 그 이상이면 통째 재생성.
+    private static let chevronReuseMaxDeltaM: Float = 1.0
+    /// 재사용 분기 진입 시 노드 position/yaw 트윈 duration (s). easeInEaseOut.
+    private static let chevronReuseAnimationDuration: TimeInterval = 0.5
 
     // MARK: - 분포 단위
 
@@ -94,16 +99,12 @@ final class PathChevronController {
 
     /// path 갱신 시 호출. arPoints 는 AR world 좌표계의 path 점들 (XZ 평면 진행).
     /// floorY 는 모든 chevron 의 Y 베이스. cameraPos 가 주어지면 그 뒤쪽 chevron 은 spawn 큐에서 제외.
+    ///
+    /// 재측위/PnP 보정으로 인한 빈번한 재호출 시 통째 재생성하면 시각적 깜빡임 발생 → 분포 변동이
+    /// 작을 때는 기존 노드를 재사용하고 position/yaw 만 트윈(easeInEaseOut) 으로 보간.
     func setRoute(arPoints: [simd_float3], floorY: Float, cameraPos: simd_float3?) {
-        // 기존 entries 제거 + 상태 리셋
-        for e in entries {
-            e.node.removeFromParentNode()
-        }
-        entries.removeAll()
-        distribution.removeAll()
-        nextSpawnIndex = 0
-
         guard arPoints.count >= 2 else {
+            clearAllNodesAndDistribution()
             stopAnimationIfIdle()
             return
         }
@@ -112,7 +113,8 @@ final class PathChevronController {
         // scale 적용 시 실제 두께도 축소되므로 chevronScale 반영.
         let chevronY: Float = floorY + Float(Self.chevronExtrusionDepth) * Self.chevronScale / 2 + 0.005
 
-        // 각 segment 별로 chevron 분포 계산
+        // 새 distribution 산출 — 즉시 적용하지 않고 재사용 가능 여부 판정 후 결정.
+        var newDistribution: [DistributionPoint] = []
         for i in 0..<(arPoints.count - 1) {
             let a = arPoints[i]
             let b = arPoints[i + 1]
@@ -136,10 +138,53 @@ final class PathChevronController {
                 let x = a.x + dirX * s
                 let z = a.z + dirZ * s
                 let pos = simd_float3(x, chevronY, z)
-                distribution.append(DistributionPoint(position: pos, yaw: yaw))
+                newDistribution.append(DistributionPoint(position: pos, yaw: yaw))
                 s += Self.spacing
             }
         }
+
+        // 재사용 분기 — 기존 distribution 과 동일 길이 + 각 point XZ 이동량 임계 이하 시.
+        if canReuseDistribution(newPoints: newDistribution) {
+            for (i, e) in entries.enumerated() {
+                let idx = e.distributionIndex
+                guard idx >= 0, idx < newDistribution.count else { continue }
+                let np = newDistribution[idx]
+                // position 트윈 — 동일 키로 교체 (이전 트윈 중첩 방지)
+                let moveTo = SCNVector3(np.position.x, np.position.y, np.position.z)
+                let moveAction = SCNAction.move(to: moveTo, duration: Self.chevronReuseAnimationDuration)
+                moveAction.timingMode = .easeInEaseOut
+                e.node.removeAction(forKey: "reuseTween")
+                e.node.runAction(moveAction, forKey: "reuseTween")
+
+                // yaw 트윈 — 기존 eulerAngles 구조 (-π/2, yaw, 0) 보존.
+                let yawAction = SCNAction.rotateTo(
+                    x: CGFloat(-Float.pi / 2),
+                    y: CGFloat(np.yaw),
+                    z: 0,
+                    duration: Self.chevronReuseAnimationDuration,
+                    usesShortestUnitArc: true
+                )
+                yawAction.timingMode = .easeInEaseOut
+                e.node.removeAction(forKey: "reuseYawTween")
+                e.node.runAction(yawAction, forKey: "reuseYawTween")
+
+                // entries position 캐시도 새 좌표로 갱신 (tickCamera 통과 판정 정확도 유지)
+                // ActiveEntry.position 은 let — 새 인스턴스로 교체.
+                entries[i] = ActiveEntry(
+                    node: e.node,
+                    material: e.material,
+                    distributionIndex: e.distributionIndex,
+                    position: np.position
+                )
+            }
+            // cursor 일관성 — distribution 교체.
+            distribution = newDistribution
+            return
+        }
+
+        // 재사용 불가 — 통째 재생성.
+        clearAllNodesAndDistribution()
+        distribution = newDistribution
 
         // cameraPos 가 주어지면 카메라보다 뒤쪽 chevron 은 skip — nextSpawnIndex 를 카메라 이후로 설정.
         // 판정: 각 chevron 의 진행 방향 단위벡터 d 와 (chevron - cam) 의 XZ dot 부호.
@@ -166,6 +211,32 @@ final class PathChevronController {
         } else {
             stopAnimationIfIdle()
         }
+    }
+
+    /// 재사용 가능 여부 판정 — 기존 entries 가 있고, 새 분포 길이가 일치하며,
+    /// 각 point XZ 이동량이 모두 chevronReuseMaxDeltaM 이하일 때만 true.
+    private func canReuseDistribution(newPoints: [DistributionPoint]) -> Bool {
+        guard !entries.isEmpty else { return false }
+        guard distribution.count == newPoints.count else { return false }
+        for (old, new) in zip(distribution, newPoints) {
+            let dx = new.position.x - old.position.x
+            let dz = new.position.z - old.position.z
+            if sqrt(dx * dx + dz * dz) > Self.chevronReuseMaxDeltaM {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// 기존 entries 노드 제거 + distribution / spawn cursor 리셋. 재사용 불가 / 빈 경로 진입 시 사용.
+    private func clearAllNodesAndDistribution() {
+        for e in entries {
+            e.node.removeAllActions()
+            e.node.removeFromParentNode()
+        }
+        entries.removeAll()
+        distribution.removeAll()
+        nextSpawnIndex = 0
     }
 
     /// 1Hz 마다 ARNavigationLogic 이 호출. 첫 chevron 까지 거리 < 1m 면 제거하고 다음 spawn.
