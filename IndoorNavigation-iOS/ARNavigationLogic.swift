@@ -78,7 +78,7 @@ class ARNavigationLogic {
     /// Mock localize fixture 사용 (2026-05-13 사용자 JSON). true 면 스캔→캡처/네트워크 모두 우회.
     /// 즉시 fixture 데이터로 handleLocalizeV3Success 동등 상태 세팅 + drawPathFromSteps 호출.
     /// real 흐름 복귀: false 로 토글.
-    static let useMockLocalizeFixture: Bool = true
+    static let useMockLocalizeFixture: Bool = false
     #endif
 
     weak var delegate: ARNavigationLogicDelegate?
@@ -1253,7 +1253,7 @@ class ARNavigationLogic {
                 guard let self = self else { return }
                 switch result {
                 case .success(let response):
-                    self.handlePeriodicRelocalizeSuccess(response: response, capturedPoses: poses)
+                    self.handlePeriodicRelocalizeSuccess(response: response, capturedPoses: poses, capturedImages: images)
                 case .failure(let error):
                     print("[PeriodicV3] V3 측위 실패 — \(error). 다음 tick 까지 대기.")
                     self.isPeriodicRelocalizeInFlight = false
@@ -1267,8 +1267,12 @@ class ARNavigationLogic {
     /// - `matchedARPose`: hard-set — 캡처 시점 ARFrame pose 로 교체 (변환식 정합성).
     /// - 다른 층 응답이면 무시 (가드).
     /// - confidence < 0.3 무시.
-    private func handlePeriodicRelocalizeSuccess(response: SLAMLocalizeResponse, capturedPoses: [simd_float4x4]) {
+    private func handlePeriodicRelocalizeSuccess(response: SLAMLocalizeResponse, capturedPoses: [simd_float4x4], capturedImages: [UIImage]) {
         defer { self.isPeriodicRelocalizeInFlight = false }
+
+        // 진입 직후 prev snapshot — dump 용 (blend 적용 전 값 보존)
+        let prevLocalizedPoseSnapshot = self.localizedPose
+        let prevMatchedARPoseSnapshot = self.matchedARPose
 
         guard response.confidence >= 0.3 else {
             print("[PeriodicV3] confidence \(response.confidence) < 0.3 — 결과 무시")
@@ -1311,6 +1315,17 @@ class ARNavigationLogic {
             )
             self.matchedARPose = newMatchedARPose
             print("[PeriodicV3] hard-set (이전 pose 없음)")
+            self.dumpPeriodicRelocalizeDebug(
+                response: response,
+                capturedImages: capturedImages,
+                capturedPoses: capturedPoses,
+                arPoseIndex: arPoseIndex,
+                newMatchedARPose: newMatchedARPose,
+                prevLocalizedPose: prevLocalizedPoseSnapshot,
+                prevMatchedARPose: prevMatchedARPoseSnapshot,
+                blendedPose: self.localizedPose,
+                alpha: 1.0
+            )
             return
         }
 
@@ -1344,6 +1359,143 @@ class ARNavigationLogic {
         // 경로/마커 재렌더 (PnP 보정 패턴 따름) — 보정 모드: 진행 상태(currentStepIndex / turn arrow / marker) 유지
         self.drawPathFromSteps(self.lastPathSteps, isRelocalizeRefresh: true)
         self.refreshFloorNavigationMap(routeSteps: self.lastPathSteps, currentFrame: self.arSession?.currentFrame, isRelocalizeRefresh: true)
+
+        // 디버그 dump — drawPath / refreshMap 호출 직후 (좌회전 후 wrong-match 진단용)
+        self.dumpPeriodicRelocalizeDebug(
+            response: response,
+            capturedImages: capturedImages,
+            capturedPoses: capturedPoses,
+            arPoseIndex: arPoseIndex,
+            newMatchedARPose: newMatchedARPose,
+            prevLocalizedPose: prevLocalizedPoseSnapshot,
+            prevMatchedARPose: prevMatchedARPoseSnapshot,
+            blendedPose: self.localizedPose,
+            alpha: alpha
+        )
+    }
+
+    /// 주기 V3 재측위 응답마다 prev/new/blended pose + 변환 결과 일괄 dump.
+    /// 좌회전 후 wrong-match 케이스에서 응답 자체 문제인지 blend 끌어당김인지 분리하기 위해
+    /// 3가지 pose 로 step 좌표를 각각 변환해 저장한다.
+    private func dumpPeriodicRelocalizeDebug(
+        response: SLAMLocalizeResponse,
+        capturedImages: [UIImage],
+        capturedPoses: [simd_float4x4],
+        arPoseIndex: Int,
+        newMatchedARPose: simd_float4x4,
+        prevLocalizedPose: Pose?,
+        prevMatchedARPose: simd_float4x4?,
+        blendedPose: Pose?,
+        alpha: Float
+    ) {
+        // step 좌표 → (pos, quat) 입력으로 변환 헬퍼
+        func computeTransform(serverPos: simd_float3, serverQuat: simd_quatf) -> [(Int, simd_float3)] {
+            let input = CoordinateTransformer.Input(
+                serverPosition: serverPos,
+                serverQuaternion: serverQuat,
+                arCameraPose: newMatchedARPose
+            )
+            return lastPathSteps.enumerated().compactMap { (idx, step) -> (Int, simd_float3)? in
+                guard let pos = step.position,
+                      let x = pos.x, let y = pos.y, let z = pos.z else { return nil }
+                let ar = CoordinateTransformer.transform(
+                    serverPoint: simd_float3(Float(x), Float(y), Float(z)),
+                    input: input
+                )
+                return (step.stepNumber, ar)
+            }
+        }
+
+        // prev pose 변환 (있으면)
+        let transformedByPrev: [(Int, simd_float3)] = {
+            guard let p = prevLocalizedPose,
+                  let x = p.x, let y = p.y, let z = p.z,
+                  let qx = p.qx, let qy = p.qy, let qz = p.qz, let qw = p.qw else { return [] }
+            let pos = simd_float3(Float(x), Float(y), Float(z))
+            let q = simd_quatf(ix: Float(qx), iy: Float(qy), iz: Float(qz), r: Float(qw))
+            return computeTransform(serverPos: pos, serverQuat: q)
+        }()
+
+        // new server pose 변환
+        let transformedByNew: [(Int, simd_float3)] = {
+            guard let pos = response.pose.translation,
+                  let q = response.pose.rotationQuaternion else { return [] }
+            return computeTransform(serverPos: pos, serverQuat: q)
+        }()
+
+        // blended pose 변환
+        let transformedByBlended: [(Int, simd_float3)] = {
+            guard let p = blendedPose,
+                  let x = p.x, let y = p.y, let z = p.z,
+                  let qx = p.qx, let qy = p.qy, let qz = p.qz, let qw = p.qw else { return [] }
+            let pos = simd_float3(Float(x), Float(y), Float(z))
+            let q = simd_quatf(ix: Float(qx), iy: Float(qy), iz: Float(qz), r: Float(qw))
+            return computeTransform(serverPos: pos, serverQuat: q)
+        }()
+
+        // Δtranslation, Δrotation
+        let deltaT: Float = {
+            guard let p = prevLocalizedPose,
+                  let px = p.x, let py = p.y, let pz = p.z,
+                  let nt = response.pose.translation else { return 0 }
+            let pv = simd_float3(Float(px), Float(py), Float(pz))
+            return simd_length(nt - pv)
+        }()
+        let deltaRotDeg: Float = {
+            guard let p = prevLocalizedPose,
+                  let pqx = p.qx, let pqy = p.qy, let pqz = p.qz, let pqw = p.qw,
+                  let nq = response.pose.rotationQuaternion else { return 0 }
+            let pq = simd_quatf(ix: Float(pqx), iy: Float(pqy), iz: Float(pqz), r: Float(pqw))
+            let diff = pq.inverse * nq
+            // simd_quatf.angle 은 [0, 2π], 단위 quaternion 보장 안 되면 clamp 처리
+            let w = max(-1.0, min(1.0, diff.real))
+            let angleRad = 2.0 * acos(abs(w))
+            return Float(angleRad * 180.0 / .pi)
+        }()
+
+        let blendedSLAMPose = SLAMPose(
+            x: blendedPose?.x, y: blendedPose?.y, z: blendedPose?.z,
+            qx: blendedPose?.qx, qy: blendedPose?.qy, qz: blendedPose?.qz, qw: blendedPose?.qw,
+            floorLevel: response.pose.floorLevel, floorId: response.pose.floorId
+        )
+        let prevSLAMPose: SLAMPose? = {
+            guard let p = prevLocalizedPose else { return nil }
+            return SLAMPose(
+                x: p.x, y: p.y, z: p.z, qx: p.qx, qy: p.qy, qz: p.qz, qw: p.qw,
+                floorLevel: self.localizedFloorLevel, floorId: self.localizedFloorId
+            )
+        }()
+
+        let arCamPos: simd_float3? = {
+            guard capturedPoses.indices.contains(arPoseIndex) else { return nil }
+            let m = capturedPoses[arPoseIndex]
+            return simd_float3(m.columns.3.x, m.columns.3.y, m.columns.3.z)
+        }()
+
+        let snapshot = LocalizeDebugLogger.PeriodicSnapshot(
+            capturedImages: capturedImages,
+            capturedARPoses: capturedPoses,
+            matchedImageIndex: response.matchedImageIndex,
+            prevLocalizedPose: prevSLAMPose,
+            newServerPose: response.pose,
+            blendedLocalizedPose: blendedSLAMPose,
+            prevMatchedARPose: prevMatchedARPose,
+            newMatchedARPose: newMatchedARPose,
+            confidence: response.confidence,
+            numMatches: response.numMatches,
+            mapId: response.mapId,
+            floorLevel: response.floorLevel,
+            floorId: response.floorId,
+            blendAlpha: alpha,
+            deltaTranslationM: deltaT,
+            deltaRotationDeg: deltaRotDeg,
+            arCameraPosAtCapture: arCamPos,
+            steps: self.lastPathSteps,
+            transformedStepsByPrev: transformedByPrev,
+            transformedStepsByNew: transformedByNew,
+            transformedStepsByBlended: transformedByBlended
+        )
+        LocalizeDebugLogger.dumpPeriodic(snapshot)
     }
 
     private func runTrackingTick() {
