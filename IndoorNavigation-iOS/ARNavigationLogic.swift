@@ -78,7 +78,7 @@ class ARNavigationLogic {
     /// Mock localize fixture 사용 (2026-05-13 사용자 JSON). true 면 스캔→캡처/네트워크 모두 우회.
     /// 즉시 fixture 데이터로 handleLocalizeV3Success 동등 상태 세팅 + drawPathFromSteps 호출.
     /// real 흐름 복귀: false 로 토글.
-    static let useMockLocalizeFixture: Bool = false
+    static let useMockLocalizeFixture: Bool = true
     #endif
 
     weak var delegate: ARNavigationLogicDelegate?
@@ -687,13 +687,13 @@ class ARNavigationLogic {
             startV3Pathfinding(scanId: response.mapId,
                                startFloorLevel: response.pose.floorLevel,
                                translation: translation)
-            // 주기 재측위 시작 — 초기 측위 성공 후 cadence 마다 V3 호출로 drift 보정.
-            // 거리 가드 초기값: 첫 cadence 진입 시 강제 발사되도록 캡처 시점 ARFrame pose 캐시.
-            if let mPose = self.matchedARPose {
-                let c = mPose.columns.3
-                lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
-            }
-            startPeriodicRelocalize()
+            // 주기 재측위 일시 비활성화 — 사용자 요청.
+            // (재활성화 시 아래 블록 주석 해제)
+            // if let mPose = self.matchedARPose {
+            //     let c = mPose.columns.3
+            //     lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
+            // }
+            // startPeriodicRelocalize()
         }
     }
 
@@ -1834,10 +1834,23 @@ class ARNavigationLogic {
         )
         print("[Path] drew \(steps.count) steps as \(filteredARPoints.count) chevron-distribution points (filtered to current floor)")
 
+        // 도착 감지용 destination AR 좌표 갱신. 매 drawPathFromSteps 호출마다 최신 값으로 set
+        // (재측위 시에도 갱신되어 transform drift 보정 반영). 마지막 PathStep.position 기준.
+        if let lastStep = steps.last, let p = lastStep.position,
+           let lx = p.x, let ly = p.y, let lz = p.z {
+            let serverDest = simd_float3(Float(lx), Float(ly), Float(lz))
+            let arDest = CoordinateTransformer.transform(serverPoint: serverDest, input: input)
+            destinationARPosition = simd_float3(arDest.x, floorY, arDest.z)
+            print("[Arrival] destinationARPosition = \(destinationARPosition!) (threshold=\(arrivalThreshold)m)")
+        }
+
         if isRelocalizeRefresh {
             // 보정 모드: currentStepIndex / turn arrow / marker 유지. 다음 1Hz tick 이 자연스럽게 재산정.
             return
         }
+
+        // 새 경로 → 도착 감지 타이머 시작 (재측위 분기 이후에만 — 첫 측위 1회만 invalidate→reschedule)
+        startArrivalCheck()
 
         // Phase 6: 경로가 새로 그려지면 step index 리셋 + 첫 vm 즉시 발신
         // 첫 vm 은 cameraPos 가 없어 fallback 거리 사용 (다음 1Hz tick 에서 정확한 거리로 갱신).

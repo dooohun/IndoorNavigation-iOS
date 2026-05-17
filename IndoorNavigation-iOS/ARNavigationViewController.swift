@@ -1666,8 +1666,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var scanFailedView: UIView!
     var scanFailedLabel: UILabel!
     var arrivalBadge: UIView!
-    private var arrivalDestinationNameLabel: UILabel?
-    private var arrivalConfirmButton: UIButton?
 
     var hudContainerView: UIView!
     // Phase 6: 기존 HUD 멤버는 신규 카드 UX 흐름에서 미사용 — 옵셔널화로 nil 안전
@@ -2155,114 +2153,94 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     private func setupArrivalBadge() {
         let bounds = self.view.bounds
 
-        // 반투명 어두운 배경 — modal dim
-        arrivalBadge = UIView(frame: bounds)
-        arrivalBadge.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        // 도착 dim 컨테이너 — 검정 0.55 dim 으로 시선을 pill/버튼에 집중.
+        // hit-test 는 자식(pill 영역 외 거의 transparent) 외엔 pass-through.
+        arrivalBadge = HUDPassthroughView(frame: bounds)
+        arrivalBadge.backgroundColor = UIColor.black.withAlphaComponent(0.55)
         arrivalBadge.isHidden = true
         arrivalBadge.isUserInteractionEnabled = true
         arrivalBadge.autoresizingMask = [.flexibleWidth, .flexibleHeight]
 
-        // 중앙 카드 컨테이너
-        let card = UIView()
-        card.backgroundColor = .white
-        card.layer.cornerRadius = 16
-        card.layer.masksToBounds = true
-        card.translatesAutoresizingMaskIntoConstraints = false
-        arrivalBadge.addSubview(card)
+        // 필(pill) 형태 배지
+        let pill = UIView()
+        pill.backgroundColor = UIColor.white.withAlphaComponent(0.95)
+        pill.layer.cornerRadius = 22
+        pill.layer.shadowColor = UIColor.black.cgColor
+        pill.layer.shadowOpacity = 0.15
+        pill.layer.shadowRadius = 6
+        pill.layer.shadowOffset = CGSize(width: 0, height: 2)
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        arrivalBadge.addSubview(pill)
 
-        // 상단 핀 아이콘
-        let iconImage: UIImage? = {
-            if let pin = UIImage(named: "destinationPin") {
-                return pin
-            }
-            let config = UIImage.SymbolConfiguration(pointSize: 48, weight: .semibold)
-            return UIImage(systemName: "mappin.circle.fill", withConfiguration: config)
-        }()
+        // 위치 핀 아이콘
+        let iconConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+        let iconImage = UIImage(systemName: "mappin.circle.fill", withConfiguration: iconConfig)
         let iconView = UIImageView(image: iconImage)
-        iconView.contentMode = .scaleAspectFit
         iconView.tintColor = .systemRed
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(iconView)
+        pill.addSubview(iconView)
 
-        // 제목: "목적지에 도착했습니다"
-        let titleLabel = UILabel()
-        titleLabel.text = "목적지에 도착했습니다"
-        titleLabel.textColor = .darkText
-        titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
-        titleLabel.textAlignment = .center
-        titleLabel.numberOfLines = 0
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(titleLabel)
+        // "목적지 도착" 텍스트
+        let label = UILabel()
+        label.text = "목적지 도착"
+        label.textColor = .darkText
+        label.font = .systemFont(ofSize: 16, weight: .semibold)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        pill.addSubview(label)
 
-        // 부제: destinationName
-        let subLabel = UILabel()
-        subLabel.text = destinationName
-        subLabel.textColor = .secondaryLabel
-        subLabel.font = .systemFont(ofSize: 15, weight: .regular)
-        subLabel.textAlignment = .center
-        subLabel.numberOfLines = 0
-        subLabel.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(subLabel)
-        arrivalDestinationNameLabel = subLabel
-
-        // "확인" 버튼
+        // 확인 버튼 — pill 아래 표시
         let confirmButton: UIButton
         if #available(iOS 15.0, *) {
             var config = UIButton.Configuration.filled()
             config.title = "확인"
             config.baseBackgroundColor = .systemBlue
             config.baseForegroundColor = .white
-            config.cornerStyle = .medium
+            config.cornerStyle = .capsule
             confirmButton = UIButton(configuration: config)
         } else {
             confirmButton = UIButton(type: .system)
             confirmButton.setTitle("확인", for: .normal)
             confirmButton.setTitleColor(.white, for: .normal)
             confirmButton.backgroundColor = .systemBlue
-            confirmButton.layer.cornerRadius = 10
+            confirmButton.layer.cornerRadius = 22
             confirmButton.layer.masksToBounds = true
         }
-        confirmButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        confirmButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
         confirmButton.translatesAutoresizingMaskIntoConstraints = false
         confirmButton.addTarget(self, action: #selector(onArrivalConfirmTapped), for: .touchUpInside)
-        card.addSubview(confirmButton)
-        arrivalConfirmButton = confirmButton
+        arrivalBadge.addSubview(confirmButton)
 
         self.view.addSubview(arrivalBadge)
 
         NSLayoutConstraint.activate([
-            card.centerXAnchor.constraint(equalTo: arrivalBadge.centerXAnchor),
-            card.centerYAnchor.constraint(equalTo: arrivalBadge.centerYAnchor),
-            card.leadingAnchor.constraint(equalTo: arrivalBadge.leadingAnchor, constant: 32),
-            card.trailingAnchor.constraint(equalTo: arrivalBadge.trailingAnchor, constant: -32),
+            pill.centerXAnchor.constraint(equalTo: arrivalBadge.centerXAnchor),
+            pill.centerYAnchor.constraint(equalTo: arrivalBadge.centerYAnchor),
+            pill.heightAnchor.constraint(equalToConstant: 44),
+            // pill 가로 폭은 자식(iconView + label) intrinsic content + 좌우 inset 으로 결정 — 모호한 width 0 방지
+            pill.leadingAnchor.constraint(equalTo: iconView.leadingAnchor, constant: -16),
+            pill.trailingAnchor.constraint(equalTo: label.trailingAnchor, constant: 20),
 
-            iconView.topAnchor.constraint(equalTo: card.topAnchor, constant: 24),
-            iconView.centerXAnchor.constraint(equalTo: card.centerXAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 48),
-            iconView.heightAnchor.constraint(equalToConstant: 48),
+            iconView.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 22),
+            iconView.heightAnchor.constraint(equalToConstant: 22),
 
-            titleLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 16),
-            titleLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
-            titleLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
+            label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
+            label.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
 
-            subLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
-            subLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
-            subLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
-
-            confirmButton.topAnchor.constraint(equalTo: subLabel.bottomAnchor, constant: 20),
-            confirmButton.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
-            confirmButton.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
-            confirmButton.heightAnchor.constraint(equalToConstant: 48),
-            confirmButton.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -20),
+            confirmButton.centerXAnchor.constraint(equalTo: arrivalBadge.centerXAnchor),
+            confirmButton.topAnchor.constraint(equalTo: pill.bottomAnchor, constant: 16),
+            confirmButton.widthAnchor.constraint(equalToConstant: 140),
+            confirmButton.heightAnchor.constraint(equalToConstant: 44),
         ])
-        _ = bounds // suppress unused-warning
+        _ = bounds  // suppress unused-warning
     }
 
-    /// 도착 모달 "확인" 버튼 콜백 — AR/타이머 정리 후 root(네이버 지도) 로 복귀.
+    /// 도착 pill 의 "확인" 버튼 콜백 — AR/타이머 정리 후 root(네이버 지도)로 복귀.
     @objc private func onArrivalConfirmTapped() {
         arrivalBadge.isHidden = true
 
-        // AR/타이머/노드 정리
         logic.stopCapture()
         logic.stopArrivalCheck()
         logic.stopPathProgressTracking()
@@ -2270,7 +2248,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         markerController.hideAll()
         sceneView.session.pause()
 
-        // present 로 진입한 경우와 push 로 진입한 경우 모두 대응
         let presentingNav = (presentingViewController as? UINavigationController)
             ?? presentingViewController?.navigationController
         if presentingViewController != nil {
@@ -2799,7 +2776,6 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
 
     func showArrivalNotification() {
         setHUDVisible(false)
-        arrivalDestinationNameLabel?.text = destinationName
         arrivalBadge.alpha = 0
         arrivalBadge.isHidden = false
         // arrivalBadge 가 hudContainerView 보다 먼저 추가되었을 수 있으므로 최상단으로 끌어올림.
@@ -2807,6 +2783,7 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
         UIView.animate(withDuration: 0.3) {
             self.arrivalBadge.alpha = 1
         }
+        // 자동 페이드 아웃 없음 — 사용자가 "확인" 버튼을 눌러야 root 복귀.
     }
 
     func showScanFailed(message: String) {
