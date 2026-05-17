@@ -1,8 +1,8 @@
-# Phase 3: 초기 측위 + 경로 데이터 확보
+# Phase 3: 초기 측위 + 경로 데이터 확보 + 주기 재측위
 
 ## 상태
 
-**부분 구현 (M2 진행 중)** — V3 측위 → pathfinding → multi-query lookup → keyframe pack 메모리 적재 흐름 동작. 일부 fallback 분기·dtype·NaN 가드 정리 필요.
+**부분 구현 (M2 진행 중) + 주기 재측위 활성** — V3 측위 → pathfinding → multi-query lookup → keyframe pack 메모리 적재 흐름 동작. LightGlue 추적 정지(2026-05-10) 이후 ARKit pose drift 보정을 위해 **주기 V3 재측위(2026-05-12)** 도입. lookup 흐름은 본문 보존 + early return.
 
 ## 목표
 
@@ -151,6 +151,94 @@ options: {
 - [ ] **층 전환 잔여 경로 재시작** — `isFloorTransitionRestart=true` 분기에서 pathfinding 호출 생략 + 재 lookup 흐름 미구현 (`handleLocalizeV3Success:941~949` TODO).
 - [ ] **`globalDescriptor` cosine prefilter** — keyframe 100+ 시 매칭 후보 축소용 (Phase 4 입력 정리). 응답에 이미 포함됨.
 - [ ] **캡처 yaw 분산 정책** — 현재 `captureInterval` 시간 기반. yaw delta 임계 기반 샘플링으로 교체 시 V3 매칭 품질 개선 여지.
+
+---
+
+## 주기 재측위 (2026-05-12 추가)
+
+LightGlue 추적이 비활성된 상태에서 ARKit pose 누적 drift 를 보정하기 위해 초기 V3 측위 성공 직후 cadence 마다 V3 호출.
+
+### 흐름
+
+```
+[handleLocalizeV3Success]  ← 초기 측위 성공
+   │ startV3Pathfinding 호출 직후
+   ▼
+[startPeriodicRelocalize]
+   │ periodicRelocalizeTimer = Timer (interval=10s, repeat=true)
+   │
+   ▼ (매 10초)
+[runPeriodicRelocalizeTick]
+   │ guard !isPeriodicRelocalizeInFlight (중복 호출 차단)
+   │ guard !hasActiveFloorTransition (층 전환 중 skip)
+   │ guard !hasNotifiedArrival (도착 후 skip)
+   │ guard arSession.currentFrame != nil (AR 미준비 skip)
+   │ guard 이동 거리 (cam XZ) >= 2.0m (정지 상태 skip — 첫 cadence 는 강제 통과)
+   │ lastPeriodicRelocalizeCameraPos = curCamPos (다음 cadence 비교용)
+   │ periodicCapturedImages = [] / periodicCapturedARPoses = []
+   │ periodicCaptureStartTime = now (timeout 기준)
+   │ periodicRelocalizeCaptureTimer = Timer (interval=0.4s) → capturePeriodicFrame() × 3
+   │       └─ limited tracking 이 5s 이상 지속되면 abort + in-flight 락 해제
+   ▼
+[sendPeriodicRelocalize]
+   │ NetworkManager.localizeV3(buildingId:images:)
+   ▼
+[handlePeriodicRelocalizeSuccess]
+   │ confidence < 0.3 → 무시
+   │ response.pose.floorLevel ≠ localizedFloorLevel → 무시 (다른 층 가드)
+   │ localizedPose = blend(prev, response, alpha=0.3)
+   │      translation: simd_mix
+   │      quaternion : simd_slerp
+   │ matchedARPose = hard-set (캡처 시점 ARFrame transform — blend X, 좌표 변환식 정합성)
+   │ drawPathFromSteps(lastPathSteps) + refreshFloorNavigationMap (재렌더)
+```
+
+### 정지 지점
+
+| 지점 | 호출 |
+|------|------|
+| `resetForNewTrial` | 새 trial 시작 시 — 모든 타이머·in-flight 플래그 초기화 |
+| `triggerFloorTransition` | 층 전환 모달 표시 시 — 다른 층 응답 방어 |
+| `checkArrival` 도착 성공 | 더 이상 보정 불필요 |
+| `ARNavigationViewController.viewWillDisappear` | 화면 dismiss 시 |
+
+### 파라미터
+
+| 이름 | 현재값 | 비고 |
+|------|--------|------|
+| `periodicRelocalizeIntervalSec` | 10.0 | cadence — 발열·배터리 vs drift 보정 균형 |
+| `periodicRelocalizeImageCount` | 3 | 주기 보정용 경량화 (초기 측위 5장 대비 60%) — 발열·트래픽 절감 |
+| `periodicRelocalizeCaptureInterval` | 0.4 | 3장 캡처에 ~1.2초 |
+| `periodicRelocalizeBlendAlpha` | 0.3 | 신 측위 가중치. 1.0 = hard-set, 0.0 = 무시 |
+| `periodicRelocalizeMinTravelM` | 2.0 | 직전 발사 시점 카메라 위치 대비 XZ 이동 거리 가드. 정지 상태 V3 호출 회피 |
+| `periodicRelocalizeCaptureTimeoutSec` | 5.0 | 캡처 시작 후 N장 도달 timeout. limited tracking 무한 대기 → 데드락 방지 |
+| `confidence 임계` | 0.3 | 초기 측위와 동일 |
+
+### 정책
+
+- **matchedARPose**: hard-set 유지 (`blendAlpha=0.3` 적용 X). 좌표 변환식 정합성 — 측위 응답 pose 와 짝지을 AR frame 은 캡처 시점의 그것 그대로여야 함.
+- **다른 층 응답 가드**: `response.pose.floorLevel` 이 현재 `localizedFloorLevel` 과 다르면 결과 무시 + 로그 출력. 잘못된 층 측위로 인한 path 재렌더 오류 방어.
+- **lookup 비활성화**: `fetchBundleForPath` / `triggerNewLookup` 본문은 보존하되 `Self.useLightGlueMatcher` 가 false 면 early return. LightGlue 재활성화 시 본문 그대로 복귀 가능.
+- **이동 거리 2m 가드**: cadence 진입 시 직전 발사 시점 카메라 위치(XZ) 와의 거리가 2m 미만이면 skip. 정지 상태에서 매 10초 V3 호출되는 발열·트래픽 낭비 회피. 첫 cadence 는 캐시 nil 이라면 강제 통과 (단, `handleLocalizeV3Success` 에서 초기 측위 시점의 카메라 위치를 미리 캐시하므로 정지 상태에선 첫 cadence 도 skip 됨).
+- **캡처 timeout 5s**: ARKit `trackingState == .limited` 가 0.4s tick 마다 영속되면 3장에 도달 못 해 in-flight 락이 영구 점유될 위험. 캡처 시작 후 5s 초과 시 abort 하고 `isPeriodicRelocalizeInFlight = false` 로 락 해제 → 다음 cadence 에서 재시도.
+
+### 미해결
+
+- [ ] cadence 사용자/환경별 튜닝 (배터리 vs drift 균형)
+- [ ] blend alpha 동적 조정 (drift 크기에 따라 강한 보정 / 약한 보정)
+- [ ] 다른 층 응답 N회 연속 시 강제 재측위 트리거 (현재는 무한 무시)
+- [ ] confidence 추세 로깅 (반복 측위 confidence 변화 추적)
+
+#### 시각적 점프 / 깜빡임 (사용자 경험)
+
+주기 측위는 silent 정책 + blend α=0.3 + 2m 가드로 진폭·빈도를 줄였지만, 다음 세 가지가 사용자 시야에 그대로 노출됨. 보정 시점에 chevron / 미니맵 / step card 가 깜빡인다는 보고가 있을 때 우선 검토할 항목.
+
+- [ ] **chevron 통째 재생성**: `PathChevronController.setRoute` 가 기존 entries 를 전부 `removeFromParentNode` 후 새 좌표로 spawn — 보간/페이드 전환 없음. blend 로 좌표 차이가 작아도 노드는 사라졌다 다시 나타남. **대응안**: setRoute 가 직전 좌표와 비교해 차이 < threshold 면 노드 재사용 + 위치만 보간 트윈 (SCNAction.move(to:duration:)). 신규 경로는 기존처럼 통째 재생성.
+- [ ] **`drawPathFromSteps` 의 진행 상태 리셋**: 보정 시에도 `currentStepIndex = 0` + `updateTurnArrow(nil)` + `updateMarkers([])` 가 실행되어 turn arrow / marker 가 빈 상태로 갔다가 다음 1Hz tick 에서 재산정됨 → 짧은 깜빡임. **대응안**: `drawPathFromSteps` 가 "신규 경로" 와 "주기 측위 보정 재렌더" 를 구분하는 모드 인자 추가. 보정 모드면 `currentStepIndex` / turn arrow / marker 유지.
+- [ ] **미니맵 마커 점프**: `refreshFloorNavigationMap` 도 보정마다 호출되어 현재 위치 마커가 blend 차이만큼 점프. **대응안**: 미니맵 마커 위치를 직전값과 보간 (NavigationMapView 측 트윈 도입).
+
+휴리스틱 옵션 (위 세 가지와 별도/보완):
+- [ ] 카메라 yaw 가 chevron 정면을 향하지 않을 때만 보정 적용 — 사용자 시야 밖에서 처리해 점프 자체를 안 보이게.
 
 ---
 

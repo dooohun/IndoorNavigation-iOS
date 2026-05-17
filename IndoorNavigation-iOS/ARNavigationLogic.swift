@@ -189,6 +189,29 @@ class ARNavigationLogic {
     /// PnP 최소 매칭 점 수 (DLT 이론상 6, 실용은 더 많을수록 안정).
     private let pnpMinPairs: Int = 6
 
+    // MARK: - 주기 재측위 (V3 only)
+    /// LightGlue 기반 추적이 비활성된 상태에서 ARKit pose 누적 drift 를 보정하는 주기적 V3 측위.
+    /// `startPeriodicRelocalize` 가 초기 측위 성공 후 타이머 시작 → cadence 마다 5장 캡처 → V3 호출.
+    /// 응답 pose 는 기존 `localizedPose` 와 `blendAlpha=0.3` 으로 SLERP/lerp blend (서서히 보정).
+    /// `matchedARPose` 는 좌표 변환식 정합성 위해 hard-set (blend X) — 캡처 시점의 AR frame 으로 교체.
+    private let periodicRelocalizeIntervalSec: TimeInterval = 10.0
+    private let periodicRelocalizeImageCount: Int = 3
+    private let periodicRelocalizeCaptureInterval: TimeInterval = 0.4
+    private let periodicRelocalizeBlendAlpha: Float = 0.3
+    /// 직전 주기 측위 발사 시점 카메라 위치(XZ) 와의 최소 이동 거리. 정지 상태 V3 호출 회피.
+    private static let periodicRelocalizeMinTravelM: Float = 2.0
+    /// 캡처 시작 후 N장 도달까지 허용 timeout. limited tracking 무한 대기 → in-flight 락 영구 점유 방지.
+    private static let periodicRelocalizeCaptureTimeoutSec: TimeInterval = 5.0
+    private var periodicRelocalizeTimer: Timer?
+    private var periodicRelocalizeCaptureTimer: Timer?
+    private var isPeriodicRelocalizeInFlight: Bool = false
+    private var periodicCapturedImages: [UIImage] = []
+    private var periodicCapturedARPoses: [simd_float4x4] = []
+    /// 직전 주기 측위 발사 시점 카메라 위치 캐시(XZ만 사용). nil 이면 첫 cadence 강제 통과.
+    private var lastPeriodicRelocalizeCameraPos: simd_float3?
+    /// 캡처 시작 시각(Date timeIntervalSince1970). timeout 판정에 사용. 정상/abort 시 nil 로 정리.
+    private var periodicCaptureStartTime: TimeInterval?
+
     // MARK: - Phase 8 추적 cadence (A 트랙)
     /// 추적 측위 주기 (초). SuperPoint ~700ms + LightGlue 5kf × ~100ms ≈ 1.2s.
     /// cadence 5.0s = thermal throttle 회피 + prefix drop 충분 빈도.
@@ -420,6 +443,7 @@ class ARNavigationLogic {
         trackingTimer = nil
         captureTimer?.invalidate()
         captureTimer = nil
+        stopPeriodicRelocalize()
 
         // 상태 클리어
         allSteps = []
@@ -663,6 +687,13 @@ class ARNavigationLogic {
             startV3Pathfinding(scanId: response.mapId,
                                startFloorLevel: response.pose.floorLevel,
                                translation: translation)
+            // 주기 재측위 시작 — 초기 측위 성공 후 cadence 마다 V3 호출로 drift 보정.
+            // 거리 가드 초기값: 첫 cadence 진입 시 강제 발사되도록 캡처 시점 ARFrame pose 캐시.
+            if let mPose = self.matchedARPose {
+                let c = mPose.columns.3
+                lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
+            }
+            startPeriodicRelocalize()
         }
     }
 
@@ -878,6 +909,16 @@ class ARNavigationLogic {
     /// pathfinding 응답 steps 좌표 multi-query (또는 fallback 단일 query) 로 lookup 호출.
     /// 받은 keyframe pack 으로 추적 측위 시작.
     private func fetchBundleForPath(steps: [PathStep], fallbackTranslation: simd_float3, fallbackFloorLevel: Int?) {
+        // 주기 재측위 정책 전환 — lookup 기반 추적(LightGlue) 폐기. 본 함수는 본문 보존하되 early return.
+        // 후속 UI 상태 직접 정리 (loading off + status update) — 호출자가 기대하던 상태로 복귀.
+        if !Self.useLightGlueMatcher {
+            print("[NetworkBundle] lookup disabled — 주기 재측위 정책 (early return)")
+            self.delegate?.showRouteCalculating(false)
+            self.delegate?.setLoading(false)
+            self.delegate?.updateStatus("\(self.destinationName) 방향으로 이동하세요.", color: .white)
+            return
+        }
+
         // query 좌표 결정: steps 가 충분하면 그것, 아니면 사용자 좌표 1개
         var queryPoints: [NetworkBundleProvider.QueryPoint] = []
         if !steps.isEmpty {
@@ -988,6 +1029,7 @@ class ARNavigationLogic {
 
         arrivalCheckTimer?.invalidate()
         arrivalCheckTimer = nil
+        stopPeriodicRelocalize()
 
         // AR 경로 chevron 숨김 (세션은 유지)
         pathChevronController.setHidden(true)
@@ -1069,6 +1111,226 @@ class ARNavigationLogic {
     func stopTracking() {
         trackingTimer?.invalidate()
         trackingTimer = nil
+    }
+
+    // MARK: - 주기 재측위
+
+    /// 초기 V3 측위 성공 직후 호출. cadence 마다 5장 캡처 → V3 호출 → blend.
+    /// 층 전환 / 도착 / 화면 dismiss / 새 trial 시 정지.
+    private func startPeriodicRelocalize() {
+        periodicRelocalizeTimer?.invalidate()
+        periodicRelocalizeTimer = Timer.scheduledTimer(
+            withTimeInterval: periodicRelocalizeIntervalSec, repeats: true
+        ) { [weak self] _ in
+            self?.runPeriodicRelocalizeTick()
+        }
+        print("[PeriodicV3] 시작 — cadence=\(periodicRelocalizeIntervalSec)s, images=\(periodicRelocalizeImageCount)")
+    }
+
+    func stopPeriodicRelocalize() {
+        periodicRelocalizeTimer?.invalidate()
+        periodicRelocalizeTimer = nil
+        periodicRelocalizeCaptureTimer?.invalidate()
+        periodicRelocalizeCaptureTimer = nil
+        periodicCapturedImages = []
+        periodicCapturedARPoses = []
+        isPeriodicRelocalizeInFlight = false
+        lastPeriodicRelocalizeCameraPos = nil
+        periodicCaptureStartTime = nil
+    }
+
+    /// 한 cadence tick — 캡처 타이머 시작. 이미 진행 중이면 skip.
+    private func runPeriodicRelocalizeTick() {
+        guard !isPeriodicRelocalizeInFlight else {
+            print("[PeriodicV3] tick skip — 직전 측위 미완료")
+            return
+        }
+        guard !hasActiveFloorTransition else {
+            print("[PeriodicV3] tick skip — 층 전환 활성")
+            return
+        }
+        guard !hasNotifiedArrival else {
+            print("[PeriodicV3] tick skip — 도착 후")
+            return
+        }
+        guard let frame = arSession?.currentFrame else {
+            print("[PeriodicV3] tick skip — AR 세션 미준비")
+            return
+        }
+
+        // 이동 거리 가드 — 정지 상태(직전 발사 위치 대비 2m 미만) 면 skip.
+        // 첫 cadence (캐시 nil) 는 강제 통과 후 캐시 채움.
+        let camCol = frame.camera.transform.columns.3
+        let curCamPos = simd_float3(camCol.x, camCol.y, camCol.z)
+        if let lastPos = lastPeriodicRelocalizeCameraPos {
+            let dx = curCamPos.x - lastPos.x
+            let dz = curCamPos.z - lastPos.z
+            let dist = sqrt(dx * dx + dz * dz)
+            guard dist >= Self.periodicRelocalizeMinTravelM else {
+                print("[PeriodicV3] skip — 이동 \(String(format: "%.2f", dist))m < \(Self.periodicRelocalizeMinTravelM)m")
+                return
+            }
+        }
+        lastPeriodicRelocalizeCameraPos = curCamPos
+
+        isPeriodicRelocalizeInFlight = true
+        periodicCapturedImages = []
+        periodicCapturedARPoses = []
+        periodicCaptureStartTime = Date().timeIntervalSince1970
+
+        periodicRelocalizeCaptureTimer?.invalidate()
+        periodicRelocalizeCaptureTimer = Timer.scheduledTimer(
+            withTimeInterval: periodicRelocalizeCaptureInterval, repeats: true
+        ) { [weak self] _ in
+            self?.capturePeriodicFrame()
+        }
+    }
+
+    private func capturePeriodicFrame() {
+        // Timeout 가드 — limited tracking 등으로 N장 영영 못 채울 경우 in-flight 락이
+        // 영구 점유되는 데드락 방지. abort 후 다음 cadence 에서 재시도.
+        if let start = periodicCaptureStartTime,
+           Date().timeIntervalSince1970 - start > Self.periodicRelocalizeCaptureTimeoutSec {
+            print("[PeriodicV3] 캡처 timeout (\(Self.periodicRelocalizeCaptureTimeoutSec)s) — abort")
+            periodicRelocalizeCaptureTimer?.invalidate()
+            periodicRelocalizeCaptureTimer = nil
+            periodicCapturedImages.removeAll()
+            periodicCapturedARPoses.removeAll()
+            periodicCaptureStartTime = nil
+            isPeriodicRelocalizeInFlight = false
+            return
+        }
+
+        guard let frame = arSession?.currentFrame else { return }
+
+        // ARKit 모션 가드 — limited 면 skip (다음 tick 까지 대기). 본 frame 은 누락.
+        if case .limited = frame.camera.trackingState {
+            return
+        }
+
+        let pixelBuffer = frame.capturedImage
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext(options: nil)
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
+        let uiImage = UIImage(cgImage: cgImage)
+
+        periodicCapturedImages.append(uiImage)
+        periodicCapturedARPoses.append(frame.camera.transform)
+
+        if periodicCapturedImages.count >= periodicRelocalizeImageCount {
+            periodicRelocalizeCaptureTimer?.invalidate()
+            periodicRelocalizeCaptureTimer = nil
+            periodicCaptureStartTime = nil
+            sendPeriodicRelocalize()
+        }
+    }
+
+    private func sendPeriodicRelocalize() {
+        guard !periodicCapturedImages.isEmpty else {
+            isPeriodicRelocalizeInFlight = false
+            return
+        }
+
+        let images = periodicCapturedImages
+        let poses = periodicCapturedARPoses
+        print("[PeriodicV3] V3 측위 호출 — images=\(images.count)")
+
+        NetworkManager.shared.localizeV3(buildingId: buildingId, images: images) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                switch result {
+                case .success(let response):
+                    self.handlePeriodicRelocalizeSuccess(response: response, capturedPoses: poses)
+                case .failure(let error):
+                    print("[PeriodicV3] V3 측위 실패 — \(error). 다음 tick 까지 대기.")
+                    self.isPeriodicRelocalizeInFlight = false
+                }
+            }
+        }
+    }
+
+    /// 주기 V3 측위 응답 핸들러. UI 토스트/HUD 변경 없이 silent blend.
+    /// - `localizedPose`: 기존 ↔ 새 응답 사이 `blendAlpha=0.3` 으로 lerp (translation) + slerp (quaternion).
+    /// - `matchedARPose`: hard-set — 캡처 시점 ARFrame pose 로 교체 (변환식 정합성).
+    /// - 다른 층 응답이면 무시 (가드).
+    /// - confidence < 0.3 무시.
+    private func handlePeriodicRelocalizeSuccess(response: SLAMLocalizeResponse, capturedPoses: [simd_float4x4]) {
+        defer { self.isPeriodicRelocalizeInFlight = false }
+
+        guard response.confidence >= 0.3 else {
+            print("[PeriodicV3] confidence \(response.confidence) < 0.3 — 결과 무시")
+            return
+        }
+
+        if let respFloor = response.pose.floorLevel,
+           let curFloor = self.localizedFloorLevel,
+           respFloor != curFloor {
+            print("[PeriodicV3] 다른 층 응답 (current=\(curFloor) vs response=\(respFloor)) — 결과 무시")
+            return
+        }
+
+        guard let translation = response.pose.translation,
+              let quat = response.pose.rotationQuaternion else {
+            print("[PeriodicV3] pose translation/quat 누락 — 결과 무시")
+            return
+        }
+
+        guard !capturedPoses.isEmpty else {
+            print("[PeriodicV3] capturedPoses 비어있음 — 결과 무시")
+            return
+        }
+        let arPoseIndex: Int = {
+            if let idx = response.matchedImageIndex, capturedPoses.indices.contains(idx) {
+                return idx
+            }
+            return capturedPoses.count - 1
+        }()
+        let newMatchedARPose = capturedPoses[arPoseIndex]
+
+        // 기존 pose 가 없으면 hard-set (첫 호출 방어, 정상 흐름에선 도달 X)
+        guard let prev = self.localizedPose,
+              let px = prev.x, let py = prev.y, let pz = prev.z,
+              let pqx = prev.qx, let pqy = prev.qy, let pqz = prev.qz, let pqw = prev.qw else {
+            self.localizedPose = Pose(
+                x: Double(translation.x), y: Double(translation.y), z: Double(translation.z),
+                qx: Double(quat.imag.x), qy: Double(quat.imag.y),
+                qz: Double(quat.imag.z), qw: Double(quat.real)
+            )
+            self.matchedARPose = newMatchedARPose
+            print("[PeriodicV3] hard-set (이전 pose 없음)")
+            return
+        }
+
+        let alpha = periodicRelocalizeBlendAlpha
+        let prevTranslation = simd_float3(Float(px), Float(py), Float(pz))
+        let newTranslation = translation
+        let blendedTranslation = simd_mix(prevTranslation, newTranslation, simd_float3(repeating: alpha))
+
+        let prevQuat = simd_quatf(ix: Float(pqx), iy: Float(pqy), iz: Float(pqz), r: Float(pqw))
+        let blendedQuat = simd_slerp(prevQuat, quat, alpha)
+
+        self.localizedPose = Pose(
+            x: Double(blendedTranslation.x),
+            y: Double(blendedTranslation.y),
+            z: Double(blendedTranslation.z),
+            qx: Double(blendedQuat.imag.x),
+            qy: Double(blendedQuat.imag.y),
+            qz: Double(blendedQuat.imag.z),
+            qw: Double(blendedQuat.real)
+        )
+        // matchedARPose: blend X, hard-set 유지 (좌표 변환식 정합성)
+        self.matchedARPose = newMatchedARPose
+
+        let dx = Float(translation.x) - prevTranslation.x
+        let dy = Float(translation.y) - prevTranslation.y
+        let dz = Float(translation.z) - prevTranslation.z
+        let delta = sqrt(dx*dx + dy*dy + dz*dz)
+        print(String(format: "[PeriodicV3] blended — alpha=%.2f Δpose=%.2fm conf=%.2f",
+                     alpha, delta, response.confidence))
+
+        // 경로/마커 재렌더 (PnP 보정 패턴 따름)
+        self.drawPathFromSteps(self.lastPathSteps)
+        self.refreshFloorNavigationMap(routeSteps: self.lastPathSteps, currentFrame: self.arSession?.currentFrame)
     }
 
     private func runTrackingTick() {
@@ -1439,6 +1701,12 @@ class ARNavigationLogic {
 
     /// 후보 1개 이하 도달 시 — 다음 query 좌표(또는 목적지) 로 새 lookup. 결과로 후보 갱신.
     private func triggerNewLookup() {
+        // 주기 재측위 정책 전환 — lookup 기반 추적(LightGlue) 폐기. 본 함수는 본문 보존하되 early return.
+        if !Self.useLightGlueMatcher {
+            print("[NetworkBundle] triggerNewLookup disabled — 주기 재측위 정책 (early return)")
+            return
+        }
+
         consumedQueryPointIndex += 1
         let nextQueryPoint: NetworkBundleProvider.QueryPoint
         if consumedQueryPointIndex < pathQueryPoints.count {
@@ -1899,6 +2167,7 @@ class ARNavigationLogic {
             guidanceDirector.reset()
             arrivalCheckTimer?.invalidate()
             arrivalCheckTimer = nil
+            stopPeriodicRelocalize()
             DispatchQueue.main.async {
                 self.delegate?.showArrivalNotification()
             }

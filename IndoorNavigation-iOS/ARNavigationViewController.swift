@@ -2577,6 +2577,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         logic.stopCapture()
         logic.stopArrivalCheck()
         logic.stopPathProgressTracking()
+        logic.stopPeriodicRelocalize()
         markerController.hideAll()
         sceneView.session.pause()
     }

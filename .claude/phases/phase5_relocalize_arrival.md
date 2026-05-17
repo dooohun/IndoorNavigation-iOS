@@ -2,6 +2,14 @@
 
 ## 상태
 
+**폐기 (2026-05-12)** — LightGlue 매처 정확도 한계 확정(Phase 8 / 2026-05-08) → 추적 측위 정지 후속 조치로 본 phase 가 의존하는 재 lookup 흐름 자체 폐기. 코드상 `fetchBundleForPath` / `triggerNewLookup` 본문은 보존하되 `Self.useLightGlueMatcher == false` 일 때 **early return** 처리. LightGlue 재활성화 시 본문 그대로 복귀 가능.
+
+**대체**: 초기 V3 측위 후 **주기 V3 재측위** 로 drift 보정 — Phase 3 의 "주기 재측위" 섹션 참조. 도착 판정은 `checkArrival` (Phase 3 흐름 유지, XZ 평면 2m).
+
+이하 본문은 LightGlue 재활성화 대비 historical reference 로 보존.
+
+---
+
 **구현됨 (M2 마무리)** — 후보 소진 시 다음 query 좌표로 자동 재 lookup + 모든 query 소비 + 카메라 도달 시 도착 판정 동작. 중복 호출 가드·실패 retry·층 전환 분기 등 정책 미정.
 
 ## 목표
