@@ -52,7 +52,7 @@ protocol ARNavigationLogicDelegate: AnyObject {
     func updateMarkers(_ markers: [ARMarkerNode])
     func setHUDVisible(_ visible: Bool)
     func setLocateButtonVisible(_ visible: Bool)
-    func showFloorNavigationMap(_ map: FloorMapResponse, routeSteps: [PathStep], currentPosition: Position?, currentHeadingDegrees: Float?)
+    func showFloorNavigationMap(_ map: FloorMapResponse, routeSteps: [PathStep], currentPosition: Position?, currentHeadingDegrees: Float?, destinationName: String?, destinationWorldPoint: CGPoint?)
     func updateFloorNavigationPosition(_ position: Position?, headingDegrees: Float?)
     func hideFloorNavigationMap()
     func showRouteCalculating(_ visible: Bool)
@@ -762,12 +762,25 @@ class ARNavigationLogic {
             return
         }
 
+        let cachedFloorLevel = floorMapCache[resolvedFloorId]?.floorLevel ?? localizedFloorLevel
+        let destinationPoint: CGPoint? = {
+            if let lvl = cachedFloorLevel,
+               let pos = routeSteps.last(where: { $0.floorLevel == lvl })?.position,
+               let x = pos.x, let y = pos.y {
+                return CGPoint(x: x, y: y)
+            }
+            guard let pos = routeSteps.last?.position, let x = pos.x, let y = pos.y else { return nil }
+            return CGPoint(x: x, y: y)
+        }()
+
         if let cached = floorMapCache[resolvedFloorId] {
             delegate?.showFloorNavigationMap(
                 cached,
                 routeSteps: routeSteps,
                 currentPosition: currentPose?.position,
-                currentHeadingDegrees: currentPose?.headingDegrees
+                currentHeadingDegrees: currentPose?.headingDegrees,
+                destinationName: self.destinationName,
+                destinationWorldPoint: destinationPoint
             )
             return
         }
@@ -782,11 +795,21 @@ class ARNavigationLogic {
                 case .success(let map):
                     self.floorMapCache[resolvedFloorId] = map
                     let currentPose = self.currentFloorNavigationPose(frame: self.arSession?.currentFrame)
+                    let destinationPoint: CGPoint? = {
+                        guard let pos = routeSteps.last(where: { $0.floorLevel == map.floorLevel })?.position,
+                              let x = pos.x, let y = pos.y else {
+                            guard let pos = routeSteps.last?.position, let x = pos.x, let y = pos.y else { return nil }
+                            return CGPoint(x: x, y: y)
+                        }
+                        return CGPoint(x: x, y: y)
+                    }()
                     self.delegate?.showFloorNavigationMap(
                         map,
                         routeSteps: routeSteps,
                         currentPosition: currentPose?.position,
-                        currentHeadingDegrees: currentPose?.headingDegrees
+                        currentHeadingDegrees: currentPose?.headingDegrees,
+                        destinationName: self.destinationName,
+                        destinationWorldPoint: destinationPoint
                     )
                 case .failure(let error):
                     print("[FloorMap] fetch failed floorId=\(resolvedFloorId): \(error)")

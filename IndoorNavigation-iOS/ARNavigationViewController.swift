@@ -34,6 +34,8 @@ private final class FloorNavigationMapView: UIView {
     private var floorMap: FloorMapResponse?
     private var routeSteps: [PathStep] = []
     private var currentPosition: Position?
+    private var destinationName: String?
+    private var destinationWorldPoint: CGPoint?
     private var polygonRings: [[CGPoint]] = []
     private var navigationPolygons: [MapPolygon] = []
     private var activeNavigationPolygonIndex: Int?
@@ -201,10 +203,14 @@ private final class FloorNavigationMapView: UIView {
     func configure(map: FloorMapResponse,
                    routeSteps: [PathStep],
                    currentPosition: Position?,
-                   currentHeadingDegrees: Float?) {
+                   currentHeadingDegrees: Float?,
+                   destinationName: String?,
+                   destinationWorldPoint: CGPoint?) {
         self.floorMap = map
         self.routeSteps = routeSteps
         self.currentPosition = currentPosition
+        self.destinationName = destinationName
+        self.destinationWorldPoint = destinationWorldPoint
         let nextAutoScaleLockSignature = Self.autoScaleLockSignature(map: map, routeSteps: routeSteps)
         if currentAutoScaleLockSignature != nextAutoScaleLockSignature {
             currentAutoScaleLockSignature = nextAutoScaleLockSignature
@@ -422,6 +428,7 @@ private final class FloorNavigationMapView: UIView {
             }
             drawRoute(context: cgContext, floorLevel: floorMap.floorLevel, transform: transform)
             drawMarkers(context: cgContext, map: floorMap, transform: transform, clipRect: drawRect)
+            drawDestinationPin(context: cgContext, transform: transform, clipRect: drawRect)
             cgContext.restoreGState()
         }
         staticContentLayer.contents = image.cgImage
@@ -576,6 +583,12 @@ private final class FloorNavigationMapView: UIView {
     private func mapMarkers(from map: FloorMapResponse) -> [MapMarker] {
         map.nodes.compactMap { node in
             guard let kind = markerKind(for: node) else { return nil }
+            // 목적지 핀과 겹치는 0.2m 이내 POI 노드는 별도 destinationPin 으로 그려지므로 제외.
+            if let dest = destinationWorldPoint {
+                let dx = CGFloat(node.x) - dest.x
+                let dy = CGFloat(node.y) - dest.y
+                if hypot(dx, dy) < 0.2 { return nil }
+            }
             return MapMarker(kind: kind,
                              worldPoint: CGPoint(x: node.x, y: node.y),
                              label: node.label)
@@ -629,6 +642,56 @@ private final class FloorNavigationMapView: UIView {
         ]
         let textRect = layout.bubbleRect.insetBy(dx: 9, dy: 5)
         (label as NSString).draw(in: textRect, withAttributes: attributes)
+    }
+
+    /// 목적지 핀(빨간 위치 아이콘) + 상단 destinationName 텍스트를 그린다.
+    /// pin tip 이 목적지 world point 위에 오도록 배치.
+    private func drawDestinationPin(context: CGContext,
+                                    transform: (CGPoint) -> CGPoint,
+                                    clipRect: CGRect) {
+        guard let destinationWorldPoint else { return }
+        let screenPoint = transform(destinationWorldPoint)
+        let visibleRect = clipRect.insetBy(dx: -24, dy: -24)
+        guard visibleRect.contains(screenPoint) else { return }
+
+        let pinWidth: CGFloat = 30
+        let pinHeight: CGFloat = 37
+        let pinRect = CGRect(
+            x: screenPoint.x - pinWidth / 2,
+            y: screenPoint.y - pinHeight,
+            width: pinWidth,
+            height: pinHeight
+        )
+
+        if let pinImage = UIImage(named: "destinationPin") {
+            context.saveGState()
+            context.setShadow(offset: CGSize(width: 0, height: 2), blur: 4, color: UIColor.black.withAlphaComponent(0.25).cgColor)
+            pinImage.draw(in: pinRect)
+            context.restoreGState()
+        } else {
+            // Fallback — 핀 이미지 누락 시에도 빨간 원형 핀으로 표기
+            context.saveGState()
+            UIColor(red: 0.894, green: 0.227, blue: 0.188, alpha: 1.0).setFill()
+            context.fillEllipse(in: pinRect)
+            context.restoreGState()
+        }
+
+        if let name = destinationName, !name.isEmpty {
+            let textAttributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 12, weight: .semibold),
+                .foregroundColor: UIColor.black
+            ]
+            let textSize = (name as NSString).size(withAttributes: textAttributes)
+            let textOrigin = CGPoint(
+                x: screenPoint.x - textSize.width / 2,
+                y: pinRect.minY - textSize.height - 2
+            )
+
+            context.saveGState()
+            context.setShadow(offset: CGSize(width: 0, height: 1), blur: 2, color: UIColor.white.withAlphaComponent(0.85).cgColor)
+            (name as NSString).draw(at: textOrigin, withAttributes: textAttributes)
+            context.restoreGState()
+        }
     }
 
     private func markerPinLayout(label: String,
@@ -1495,7 +1558,9 @@ final class FloorNavigationMapMockViewController: UIViewController {
             mapView.configure(map: floorMap,
                               routeSteps: routeSteps,
                               currentPosition: position,
-                              currentHeadingDegrees: sample.bearingDegrees)
+                              currentHeadingDegrees: sample.bearingDegrees,
+                              destinationName: destinationName,
+                              destinationWorldPoint: routePoints.last)
         } else {
             mapView.updateCurrentPosition(position, headingDegrees: sample.bearingDegrees)
         }
@@ -1601,6 +1666,8 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var scanFailedView: UIView!
     var scanFailedLabel: UILabel!
     var arrivalBadge: UIView!
+    private var arrivalDestinationNameLabel: UILabel?
+    private var arrivalConfirmButton: UIButton?
 
     var hudContainerView: UIView!
     // Phase 6: 기존 HUD 멤버는 신규 카드 UX 흐름에서 미사용 — 옵셔널화로 nil 안전
@@ -2088,51 +2155,131 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     private func setupArrivalBadge() {
         let bounds = self.view.bounds
 
-        // 반투명 어두운 배경
+        // 반투명 어두운 배경 — modal dim
         arrivalBadge = UIView(frame: bounds)
         arrivalBadge.backgroundColor = UIColor.black.withAlphaComponent(0.5)
         arrivalBadge.isHidden = true
-        arrivalBadge.isUserInteractionEnabled = false
+        arrivalBadge.isUserInteractionEnabled = true
+        arrivalBadge.autoresizingMask = [.flexibleWidth, .flexibleHeight]
 
-        // 필(pill) 형태 배지
-        let pill = UIView()
-        pill.backgroundColor = UIColor.white.withAlphaComponent(0.9)
-        pill.layer.cornerRadius = 22
-        pill.translatesAutoresizingMaskIntoConstraints = false
-        arrivalBadge.addSubview(pill)
+        // 중앙 카드 컨테이너
+        let card = UIView()
+        card.backgroundColor = .white
+        card.layer.cornerRadius = 16
+        card.layer.masksToBounds = true
+        card.translatesAutoresizingMaskIntoConstraints = false
+        arrivalBadge.addSubview(card)
 
-        // 위치 핀 아이콘
-        let iconConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
-        let iconImage = UIImage(systemName: "mappin.circle.fill", withConfiguration: iconConfig)
+        // 상단 핀 아이콘
+        let iconImage: UIImage? = {
+            if let pin = UIImage(named: "destinationPin") {
+                return pin
+            }
+            let config = UIImage.SymbolConfiguration(pointSize: 48, weight: .semibold)
+            return UIImage(systemName: "mappin.circle.fill", withConfiguration: config)
+        }()
         let iconView = UIImageView(image: iconImage)
+        iconView.contentMode = .scaleAspectFit
         iconView.tintColor = .systemRed
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        pill.addSubview(iconView)
+        card.addSubview(iconView)
 
-        // "목적지 도착" 텍스트
-        let label = UILabel()
-        label.text = "목적지 도착"
-        label.textColor = .darkText
-        label.font = .systemFont(ofSize: 16, weight: .semibold)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        pill.addSubview(label)
+        // 제목: "목적지에 도착했습니다"
+        let titleLabel = UILabel()
+        titleLabel.text = "목적지에 도착했습니다"
+        titleLabel.textColor = .darkText
+        titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        titleLabel.textAlignment = .center
+        titleLabel.numberOfLines = 0
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(titleLabel)
+
+        // 부제: destinationName
+        let subLabel = UILabel()
+        subLabel.text = destinationName
+        subLabel.textColor = .secondaryLabel
+        subLabel.font = .systemFont(ofSize: 15, weight: .regular)
+        subLabel.textAlignment = .center
+        subLabel.numberOfLines = 0
+        subLabel.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(subLabel)
+        arrivalDestinationNameLabel = subLabel
+
+        // "확인" 버튼
+        let confirmButton: UIButton
+        if #available(iOS 15.0, *) {
+            var config = UIButton.Configuration.filled()
+            config.title = "확인"
+            config.baseBackgroundColor = .systemBlue
+            config.baseForegroundColor = .white
+            config.cornerStyle = .medium
+            confirmButton = UIButton(configuration: config)
+        } else {
+            confirmButton = UIButton(type: .system)
+            confirmButton.setTitle("확인", for: .normal)
+            confirmButton.setTitleColor(.white, for: .normal)
+            confirmButton.backgroundColor = .systemBlue
+            confirmButton.layer.cornerRadius = 10
+            confirmButton.layer.masksToBounds = true
+        }
+        confirmButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        confirmButton.translatesAutoresizingMaskIntoConstraints = false
+        confirmButton.addTarget(self, action: #selector(onArrivalConfirmTapped), for: .touchUpInside)
+        card.addSubview(confirmButton)
+        arrivalConfirmButton = confirmButton
 
         self.view.addSubview(arrivalBadge)
 
         NSLayoutConstraint.activate([
-            pill.centerXAnchor.constraint(equalTo: arrivalBadge.centerXAnchor),
-            pill.bottomAnchor.constraint(equalTo: arrivalBadge.bottomAnchor, constant: -bounds.height * 0.35),
-            pill.heightAnchor.constraint(equalToConstant: 44),
+            card.centerXAnchor.constraint(equalTo: arrivalBadge.centerXAnchor),
+            card.centerYAnchor.constraint(equalTo: arrivalBadge.centerYAnchor),
+            card.leadingAnchor.constraint(equalTo: arrivalBadge.leadingAnchor, constant: 32),
+            card.trailingAnchor.constraint(equalTo: arrivalBadge.trailingAnchor, constant: -32),
 
-            iconView.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 16),
-            iconView.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 22),
-            iconView.heightAnchor.constraint(equalToConstant: 22),
+            iconView.topAnchor.constraint(equalTo: card.topAnchor, constant: 24),
+            iconView.centerXAnchor.constraint(equalTo: card.centerXAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 48),
+            iconView.heightAnchor.constraint(equalToConstant: 48),
 
-            label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
-            label.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
-            label.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -20),
+            titleLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 16),
+            titleLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
+            titleLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
+
+            subLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
+            subLabel.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
+            subLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
+
+            confirmButton.topAnchor.constraint(equalTo: subLabel.bottomAnchor, constant: 20),
+            confirmButton.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
+            confirmButton.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
+            confirmButton.heightAnchor.constraint(equalToConstant: 48),
+            confirmButton.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -20),
         ])
+        _ = bounds // suppress unused-warning
+    }
+
+    /// 도착 모달 "확인" 버튼 콜백 — AR/타이머 정리 후 root(네이버 지도) 로 복귀.
+    @objc private func onArrivalConfirmTapped() {
+        arrivalBadge.isHidden = true
+
+        // AR/타이머/노드 정리
+        logic.stopCapture()
+        logic.stopArrivalCheck()
+        logic.stopPathProgressTracking()
+        logic.stopPeriodicRelocalize()
+        markerController.hideAll()
+        sceneView.session.pause()
+
+        // present 로 진입한 경우와 push 로 진입한 경우 모두 대응
+        let presentingNav = (presentingViewController as? UINavigationController)
+            ?? presentingViewController?.navigationController
+        if presentingViewController != nil {
+            dismiss(animated: true) {
+                presentingNav?.popToRootViewController(animated: false)
+            }
+        } else {
+            navigationController?.popToRootViewController(animated: true)
+        }
     }
 
     // MARK: - Phase 6 신규 HUD setup (setupHUD 분해)
@@ -2652,18 +2799,13 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
 
     func showArrivalNotification() {
         setHUDVisible(false)
+        arrivalDestinationNameLabel?.text = destinationName
         arrivalBadge.alpha = 0
         arrivalBadge.isHidden = false
+        // arrivalBadge 가 hudContainerView 보다 먼저 추가되었을 수 있으므로 최상단으로 끌어올림.
+        self.view.bringSubviewToFront(arrivalBadge)
         UIView.animate(withDuration: 0.3) {
             self.arrivalBadge.alpha = 1
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-            UIView.animate(withDuration: 0.4) {
-                self.arrivalBadge.alpha = 0
-            } completion: { _ in
-                self.arrivalBadge.isHidden = true
-            }
         }
     }
 
@@ -2903,14 +3045,18 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
     func showFloorNavigationMap(_ map: FloorMapResponse,
                                 routeSteps: [PathStep],
                                 currentPosition: Position?,
-                                currentHeadingDegrees: Float?) {
+                                currentHeadingDegrees: Float?,
+                                destinationName: String?,
+                                destinationWorldPoint: CGPoint?) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.floorNavigationMapView.configure(
                 map: map,
                 routeSteps: routeSteps,
                 currentPosition: currentPosition,
-                currentHeadingDegrees: currentHeadingDegrees
+                currentHeadingDegrees: currentHeadingDegrees,
+                destinationName: destinationName,
+                destinationWorldPoint: destinationWorldPoint
             )
             guard self.floorNavigationContainerView.isHidden else { return }
             self.floorNavigationContainerView.alpha = 0
