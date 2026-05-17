@@ -210,9 +210,11 @@ LightGlue 추적이 비활성된 상태에서 ARKit pose 누적 drift 를 보정
 | `periodicRelocalizeImageCount` | 3 | 주기 보정용 경량화 (초기 측위 5장 대비 60%) — 발열·트래픽 절감 |
 | `periodicRelocalizeCaptureInterval` | 0.4 | 3장 캡처에 ~1.2초 |
 | `periodicRelocalizeBlendAlpha` | 0.3 | 신 측위 가중치. 1.0 = hard-set, 0.0 = 무시 |
+| `periodicRelocalizeHardSetThresholdM` | 2.0 | prev↔new translation 차이가 이 값을 초과하면 blend 우회하고 hard-set (α=1.0). 좌회전 후 첫 측위 같은 큰 변화에서 blend 끌어당김으로 인한 wrong-jump 회피 |
 | `periodicRelocalizeMinTravelM` | 2.0 | 직전 발사 시점 카메라 위치 대비 XZ 이동 거리 가드. 정지 상태 V3 호출 회피 |
 | `periodicRelocalizeCaptureTimeoutSec` | 5.0 | 캡처 시작 후 N장 도달 timeout. limited tracking 무한 대기 → 데드락 방지 |
-| `confidence 임계` | 0.3 | 초기 측위와 동일 |
+| `confidence 임계` | **0.5** | 0.3 → 0.5 강화 (2026-05-17). wrong-match 사전 차단 |
+| `numMatches 임계` | **50** | 신규 (2026-05-17). 매칭 점 수 미달 응답은 wrong-match 위험으로 무시 |
 
 ### 정책
 
@@ -221,11 +223,13 @@ LightGlue 추적이 비활성된 상태에서 ARKit pose 누적 drift 를 보정
 - **lookup 비활성화**: `fetchBundleForPath` / `triggerNewLookup` 본문은 보존하되 `Self.useLightGlueMatcher` 가 false 면 early return. LightGlue 재활성화 시 본문 그대로 복귀 가능.
 - **이동 거리 2m 가드**: cadence 진입 시 직전 발사 시점 카메라 위치(XZ) 와의 거리가 2m 미만이면 skip. 정지 상태에서 매 10초 V3 호출되는 발열·트래픽 낭비 회피. 첫 cadence 는 캐시 nil 이라면 강제 통과 (단, `handleLocalizeV3Success` 에서 초기 측위 시점의 카메라 위치를 미리 캐시하므로 정지 상태에선 첫 cadence 도 skip 됨).
 - **캡처 timeout 5s**: ARKit `trackingState == .limited` 가 0.4s tick 마다 영속되면 3장에 도달 못 해 in-flight 락이 영구 점유될 위험. 캡처 시작 후 5s 초과 시 abort 하고 `isPeriodicRelocalizeInFlight = false` 로 락 해제 → 다음 cadence 에서 재시도.
+- **큰 변화 hard-set** (2026-05-17): prev 와 new 의 translation 차이가 `periodicRelocalizeHardSetThresholdM = 2.0m` 를 초과하면 blend 우회하고 hard-set (α=1.0) 적용. 이유: 좌회전 후 첫 측위 같은 큰 변화는 측위 정확도가 높을 때 즉시 반영해야 wrong-jump 회피. 디버그 dump `periodic-20260517-115947` 분석 결과 blend α=0.3 끌어당김(delta=18.41m 인데 prev 70% 보존)이 사용자가 본 wrong-jump 의 직접 원인이었음.
+- **confidence/numMatches 가드 강화** (2026-05-17): 기존 `confidence ≥ 0.3` 만 가드 → `confidence ≥ 0.5` + `numMatches ≥ 50` 동시 가드. wrong-match 사전 차단 — 양쪽이 낮은 응답이 큰 변화 hard-set 과 결합되면 사용자가 멀리 점프하는 케이스를 응답 단계에서 거름.
 
 ### 미해결
 
 - [ ] cadence 사용자/환경별 튜닝 (배터리 vs drift 균형)
-- [ ] blend alpha 동적 조정 (drift 크기에 따라 강한 보정 / 약한 보정)
+- [ ] blend alpha 연속 동적 조정 — 2026-05-17 임계 기반 binary 분기(>2m → hard-set, 그 외 → α=0.3)로 부분 절충됨. drift 크기 함수 형태의 연속 alpha 매핑은 여전히 미해결
 - [ ] 다른 층 응답 N회 연속 시 강제 재측위 트리거 (현재는 무한 무시)
 - [ ] confidence 추세 로깅 (반복 측위 confidence 변화 추적)
 

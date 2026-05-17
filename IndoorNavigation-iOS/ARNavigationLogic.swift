@@ -198,6 +198,13 @@ class ARNavigationLogic {
     private let periodicRelocalizeImageCount: Int = 3
     private let periodicRelocalizeCaptureInterval: TimeInterval = 0.4
     private let periodicRelocalizeBlendAlpha: Float = 0.3
+    /// 주기 V3 재측위 응답이 prev 와 이만큼(XYZ) 차이나면 blend 우회하고 hard-set. 큰 변화는 정확한 측위로 간주하고 즉시 반영.
+    /// 좌회전 후 첫 측위 같은 케이스 — blend 끌어당김으로 인한 wrong-jump 회피.
+    private let periodicRelocalizeHardSetThresholdM: Float = 2.0
+    /// 주기 V3 재측위 confidence 가드. 이 값 미만 응답은 wrong-match 위험으로 무시.
+    private let periodicRelocalizeMinConfidence: Double = 0.5
+    /// 주기 V3 재측위 매칭 점 수 가드. 이 값 미만이면 wrong-match 위험.
+    private let periodicRelocalizeMinMatches: Int = 50
     /// 직전 주기 측위 발사 시점 카메라 위치(XZ) 와의 최소 이동 거리. 정지 상태 V3 호출 회피.
     private static let periodicRelocalizeMinTravelM: Float = 2.0
     /// 캡처 시작 후 N장 도달까지 허용 timeout. limited tracking 무한 대기 → in-flight 락 영구 점유 방지.
@@ -1286,10 +1293,10 @@ class ARNavigationLogic {
     }
 
     /// 주기 V3 측위 응답 핸들러. UI 토스트/HUD 변경 없이 silent blend.
-    /// - `localizedPose`: 기존 ↔ 새 응답 사이 `blendAlpha=0.3` 으로 lerp (translation) + slerp (quaternion).
+    /// - `localizedPose`: 큰 변화(>2m)는 hard-set, 그 외는 기존 ↔ 새 응답 사이 `blendAlpha=0.3` 으로 lerp (translation) + slerp (quaternion).
     /// - `matchedARPose`: hard-set — 캡처 시점 ARFrame pose 로 교체 (변환식 정합성).
     /// - 다른 층 응답이면 무시 (가드).
-    /// - confidence < 0.3 무시.
+    /// - confidence ≥ 0.5, numMatches ≥ 50 — 미달 시 wrong-match 위험으로 무시.
     private func handlePeriodicRelocalizeSuccess(response: SLAMLocalizeResponse, capturedPoses: [simd_float4x4], capturedImages: [UIImage]) {
         defer { self.isPeriodicRelocalizeInFlight = false }
 
@@ -1297,8 +1304,13 @@ class ARNavigationLogic {
         let prevLocalizedPoseSnapshot = self.localizedPose
         let prevMatchedARPoseSnapshot = self.matchedARPose
 
-        guard response.confidence >= 0.3 else {
-            print("[PeriodicV3] confidence \(response.confidence) < 0.3 — 결과 무시")
+        guard response.confidence >= periodicRelocalizeMinConfidence else {
+            print("[PeriodicV3] confidence \(response.confidence) < \(periodicRelocalizeMinConfidence) — 결과 무시")
+            return
+        }
+
+        if let matches = response.numMatches, matches < periodicRelocalizeMinMatches {
+            print("[PeriodicV3] numMatches \(matches) < \(periodicRelocalizeMinMatches) — 결과 무시")
             return
         }
 
@@ -1352,13 +1364,28 @@ class ARNavigationLogic {
             return
         }
 
-        let alpha = periodicRelocalizeBlendAlpha
         let prevTranslation = simd_float3(Float(px), Float(py), Float(pz))
         let newTranslation = translation
-        let blendedTranslation = simd_mix(prevTranslation, newTranslation, simd_float3(repeating: alpha))
 
-        let prevQuat = simd_quatf(ix: Float(pqx), iy: Float(pqy), iz: Float(pqz), r: Float(pqw))
-        let blendedQuat = simd_slerp(prevQuat, quat, alpha)
+        // 큰 변화 감지 — blend 우회 판정용 (blend 적용 전 미리 산출)
+        let dxPre = newTranslation.x - prevTranslation.x
+        let dyPre = newTranslation.y - prevTranslation.y
+        let dzPre = newTranslation.z - prevTranslation.z
+        let deltaTranslationM = sqrt(dxPre*dxPre + dyPre*dyPre + dzPre*dzPre)
+
+        let useHardSet = deltaTranslationM > periodicRelocalizeHardSetThresholdM
+        let appliedAlpha: Float = useHardSet ? 1.0 : periodicRelocalizeBlendAlpha
+
+        let blendedTranslation: simd_float3
+        let blendedQuat: simd_quatf
+        if useHardSet {
+            blendedTranslation = newTranslation
+            blendedQuat = quat
+        } else {
+            blendedTranslation = simd_mix(prevTranslation, newTranslation, simd_float3(repeating: appliedAlpha))
+            let prevQuat = simd_quatf(ix: Float(pqx), iy: Float(pqy), iz: Float(pqz), r: Float(pqw))
+            blendedQuat = simd_slerp(prevQuat, quat, appliedAlpha)
+        }
 
         self.localizedPose = Pose(
             x: Double(blendedTranslation.x),
@@ -1372,12 +1399,9 @@ class ARNavigationLogic {
         // matchedARPose: blend X, hard-set 유지 (좌표 변환식 정합성)
         self.matchedARPose = newMatchedARPose
 
-        let dx = Float(translation.x) - prevTranslation.x
-        let dy = Float(translation.y) - prevTranslation.y
-        let dz = Float(translation.z) - prevTranslation.z
-        let delta = sqrt(dx*dx + dy*dy + dz*dz)
-        print(String(format: "[PeriodicV3] blended — alpha=%.2f Δpose=%.2fm conf=%.2f",
-                     alpha, delta, response.confidence))
+        print(String(format: "[PeriodicV3] %@ — alpha=%.2f Δpose=%.2fm conf=%.2f matches=%d",
+                     useHardSet ? "hard-set (큰 변화)" : "blended",
+                     appliedAlpha, deltaTranslationM, response.confidence, response.numMatches ?? -1))
 
         // 경로/마커 재렌더 (PnP 보정 패턴 따름) — 보정 모드: 진행 상태(currentStepIndex / turn arrow / marker) 유지
         self.drawPathFromSteps(self.lastPathSteps, isRelocalizeRefresh: true)
@@ -1393,7 +1417,7 @@ class ARNavigationLogic {
             prevLocalizedPose: prevLocalizedPoseSnapshot,
             prevMatchedARPose: prevMatchedARPoseSnapshot,
             blendedPose: self.localizedPose,
-            alpha: alpha
+            alpha: appliedAlpha
         )
     }
 
