@@ -78,7 +78,7 @@ class ARNavigationLogic {
     /// Mock localize fixture 사용 (2026-05-13 사용자 JSON). true 면 스캔→캡처/네트워크 모두 우회.
     /// 즉시 fixture 데이터로 handleLocalizeV3Success 동등 상태 세팅 + drawPathFromSteps 호출.
     /// real 흐름 복귀: false 로 토글.
-    static let useMockLocalizeFixture: Bool = true
+    static let useMockLocalizeFixture: Bool = false
     #endif
 
     weak var delegate: ARNavigationLogicDelegate?
