@@ -2647,6 +2647,11 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             configuration.frameSemantics.insert(.sceneDepth)
         }
+        // LiDAR scene mesh — WallCenteringController 가 좌우 벽 raycast 에 사용.
+        // 미지원 단말(non-LiDAR)이면 미세팅 → frame.anchors 에 ARMeshAnchor 0개 → controller no-op.
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+            configuration.sceneReconstruction = .mesh
+        }
         sceneView.session.delegate = self
         sceneView.session.run(configuration)
     }

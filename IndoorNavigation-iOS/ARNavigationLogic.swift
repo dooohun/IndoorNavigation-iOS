@@ -196,6 +196,10 @@ class ARNavigationLogic {
     /// PnP 최소 매칭 점 수 (DLT 이론상 6, 실용은 더 많을수록 안정).
     private let pnpMinPairs: Int = 6
 
+    // MARK: - Wall centering (drift 보정 — LiDAR mesh 기반)
+    private var wallCenteringController: WallCenteringController?
+    private var floorMapPolygonRingsCache: [[CGPoint]] = []
+
     // MARK: - 주기 재측위 (V3 only)
     /// LightGlue 기반 추적이 비활성된 상태에서 ARKit pose 누적 drift 를 보정하는 주기적 V3 측위.
     /// `startPeriodicRelocalize` 가 초기 측위 성공 후 타이머 시작 → cadence 마다 5장 캡처 → V3 호출.
@@ -460,6 +464,9 @@ class ARNavigationLogic {
         captureTimer?.invalidate()
         captureTimer = nil
         stopPeriodicRelocalize()
+        wallCenteringController?.stop()
+        wallCenteringController = nil
+        floorMapPolygonRingsCache = []
 
         // 상태 클리어
         allSteps = []
@@ -755,6 +762,43 @@ class ARNavigationLogic {
         //     lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
         // }
         // startPeriodicRelocalize()
+        startWallCenteringIfNeeded()
+    }
+
+    /// LiDAR 지원 단말에서 WallCenteringController 시작 (idempotent).
+    /// 첫 V3 측위 성공 또는 polygon 첫 fetch 시점에 호출.
+    private func startWallCenteringIfNeeded() {
+        guard let arSession else { return }
+        guard ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) else {
+            print("[Wall] LiDAR 미지원 — controller 시작 생략")
+            return
+        }
+        if wallCenteringController == nil {
+            let controller = WallCenteringController()
+            controller.delegate = self
+            wallCenteringController = controller
+        }
+        let closure: (simd_float3) -> CGPoint = { [weak self] arPos in
+            guard let self,
+                  let pose = self.localizedPose,
+                  let arPose = self.matchedARPose,
+                  let pX = pose.x, let pY = pose.y, let pZ = pose.z,
+                  let qx = pose.qx, let qy = pose.qy, let qz = pose.qz, let qw = pose.qw else {
+                return .zero
+            }
+            let input = CoordinateTransformer.Input(
+                serverPosition: simd_float3(Float(pX), Float(pY), Float(pZ)),
+                serverQuaternion: simd_quatf(ix: Float(qx), iy: Float(qy), iz: Float(qz), r: Float(qw)),
+                arCameraPose: arPose
+            )
+            let serverPos = self.arWorldPointToServer(arPos, input: input)
+            return CGPoint(x: CGFloat(serverPos.x), y: CGFloat(serverPos.y))
+        }
+        wallCenteringController?.start(
+            session: arSession,
+            polygonRings: floorMapPolygonRingsCache,
+            serverFromARWorldXZ: closure
+        )
     }
 
     #if DEBUG
@@ -839,6 +883,13 @@ class ARNavigationLogic {
         }()
 
         if let cached = floorMapCache[cacheKey] {
+            // 캐시 hit 라도 polygon rings 캐시는 비어있을 수 있음(이전 trial 등) — 동기화.
+            let rings = Self.extractPolygonRings(fromPolygonRaw: cached.polygon.raw)
+            self.floorMapPolygonRingsCache = rings
+            self.wallCenteringController?.updatePolygonRings(rings)
+            if self.wallCenteringController == nil {
+                self.startWallCenteringIfNeeded()
+            }
             delegate?.showFloorNavigationMap(
                 cached,
                 routeSteps: routeSteps,
@@ -859,6 +910,12 @@ class ARNavigationLogic {
                 switch result {
                 case .success(let map):
                     self.floorMapCache[cacheKey] = map
+                    let rings = Self.extractPolygonRings(fromPolygonRaw: map.polygon.raw)
+                    self.floorMapPolygonRingsCache = rings
+                    self.wallCenteringController?.updatePolygonRings(rings)
+                    if self.wallCenteringController == nil {
+                        self.startWallCenteringIfNeeded()
+                    }
                     let currentPose = self.currentFloorNavigationPose(frame: self.arSession?.currentFrame)
                     let destinationPoint: CGPoint? = {
                         guard let pos = routeSteps.last(where: { $0.floorLevel == map.floorLevel })?.position,
@@ -1157,6 +1214,9 @@ class ARNavigationLogic {
         destinationARPosition = nil
         hasNotifiedArrival = false
         lastStartSnapDistance = nil
+        wallCenteringController?.stop()
+        wallCenteringController = nil
+        floorMapPolygonRingsCache = []
 
         // Phase 5: director 상태도 초기화. 새 setRoute가 들어오면 isPaused 자동 해제.
         guidanceDirector.reset()
@@ -1280,6 +1340,7 @@ class ARNavigationLogic {
         lastPeriodicRelocalizeCameraPos = curCamPos
 
         isPeriodicRelocalizeInFlight = true
+        wallCenteringController?.suspend()
         periodicCapturedImages = []
         periodicCapturedARPoses = []
         periodicCapturedDepths = []
@@ -1306,6 +1367,7 @@ class ARNavigationLogic {
             periodicCapturedDepths.removeAll()
             periodicCaptureStartTime = nil
             isPeriodicRelocalizeInFlight = false
+            wallCenteringController?.resume(resetCumulative: false)
             return
         }
 
@@ -1340,6 +1402,7 @@ class ARNavigationLogic {
     private func sendPeriodicRelocalize() {
         guard !periodicCapturedImages.isEmpty else {
             isPeriodicRelocalizeInFlight = false
+            wallCenteringController?.resume(resetCumulative: false)
             return
         }
 
@@ -1368,6 +1431,7 @@ class ARNavigationLogic {
                 case .failure(let error):
                     print("[PeriodicV3] V3 측위 실패 — \(error). 다음 tick 까지 대기.")
                     self.isPeriodicRelocalizeInFlight = false
+                    self.wallCenteringController?.resume(resetCumulative: false)
                 }
             }
         }
@@ -1381,6 +1445,7 @@ class ARNavigationLogic {
     /// - reject 케이스도 디버그 dump (사유 식별용) — `dumpPeriodicRelocalizeReject` 호출.
     private func handlePeriodicRelocalizeSuccess(response: SLAMLocalizeResponse, capturedPoses: [simd_float4x4], capturedImages: [UIImage]) {
         defer { self.isPeriodicRelocalizeInFlight = false }
+        defer { self.wallCenteringController?.resume(resetCumulative: true) }
 
         // 진입 직후 prev snapshot — dump 용 (blend 적용 전 값 보존)
         let prevLocalizedPoseSnapshot = self.localizedPose
@@ -2629,5 +2694,85 @@ class ARNavigationLogic {
     func stopArrivalCheck() {
         arrivalCheckTimer?.invalidate()
         arrivalCheckTimer = nil
+    }
+
+    // MARK: - Polygon 파싱 (Wall centering 용)
+
+    /// FloorMapResponse.polygon.raw (GeoJSON) 에서 polygon ring 들을 추출. 우선 `floor_union` kind 만,
+    /// 없으면 전체 feature 의 polygon ring 합집합. WallCenteringController 가 사용자 위치 contains 검사에 사용.
+    private static func extractPolygonRings(fromPolygonRaw raw: Data) -> [[CGPoint]] {
+        guard let root = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
+              let features = root["features"] as? [[String: Any]] else { return [] }
+
+        var floorUnion: [[CGPoint]] = []
+        var allRings: [[CGPoint]] = []
+        for feature in features {
+            let kind = (feature["properties"] as? [String: Any])?["kind"] as? String
+            guard let geometry = feature["geometry"] as? [String: Any] else { continue }
+            let rings = ringsFromGeoJSON(geometry: geometry)
+            if rings.isEmpty { continue }
+            if kind == "floor_union" {
+                floorUnion.append(contentsOf: rings)
+            }
+            allRings.append(contentsOf: rings)
+        }
+        return floorUnion.isEmpty ? allRings : floorUnion
+    }
+
+    private static func ringsFromGeoJSON(geometry: [String: Any]) -> [[CGPoint]] {
+        guard let type = geometry["type"] as? String,
+              let coordinates = geometry["coordinates"] as? [Any] else { return [] }
+        switch type {
+        case "Polygon":
+            return coordinates.compactMap { ring in
+                guard let r = ring as? [Any] else { return nil }
+                return pointsFromGeoJSONRing(r)
+            }
+        case "MultiPolygon":
+            return coordinates.flatMap { polygon -> [[CGPoint]] in
+                guard let p = polygon as? [Any] else { return [] }
+                return p.compactMap { ring in
+                    guard let r = ring as? [Any] else { return nil }
+                    return pointsFromGeoJSONRing(r)
+                }
+            }
+        default: return []
+        }
+    }
+
+    private static func pointsFromGeoJSONRing(_ ring: [Any]) -> [CGPoint] {
+        ring.compactMap { item in
+            guard let pair = item as? [Any], pair.count >= 2,
+                  let x = doubleValueGeoJSON(pair[0]),
+                  let y = doubleValueGeoJSON(pair[1]) else { return nil }
+            return CGPoint(x: x, y: y)
+        }
+    }
+
+    private static func doubleValueGeoJSON(_ value: Any) -> Double? {
+        if let n = value as? NSNumber { return n.doubleValue }
+        if let s = value as? String { return Double(s) }
+        return nil
+    }
+}
+
+// MARK: - WallCenteringControllerDelegate
+
+extension ARNavigationLogic: WallCenteringControllerDelegate {
+    func wallCenteringDidApplyShift(_ shift: simd_float3) {
+        // setWorldOrigin(relativeTransform: T) — 새 world = T^-1 * 옛 world.
+        // 캐시한 matchedARPose 는 옛 world 좌표 → -shift translation 적용.
+        guard let pose = self.matchedARPose else { return }
+        var T = matrix_identity_float4x4
+        T.columns.3 = SIMD4<Float>(shift.x, 0, shift.z, 1)
+        self.matchedARPose = T.inverse * pose
+
+        // 보정 후 경로/미니맵 재렌더 (PnP 보정 / V3 재측위 패턴 따름)
+        self.drawPathFromSteps(self.lastPathSteps, isRelocalizeRefresh: true)
+        self.refreshFloorNavigationMap(
+            routeSteps: self.lastPathSteps,
+            currentFrame: self.arSession?.currentFrame,
+            isRelocalizeRefresh: true
+        )
     }
 }
