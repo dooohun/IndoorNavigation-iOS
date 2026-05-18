@@ -1,0 +1,8 @@
+<svg width="15" height="15" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg">
+<circle cx="7.5" cy="7.5" r="7.1" fill="white" stroke="#7E708C" stroke-width="0.8"/>
+<rect x="3.4" y="3.4" width="8.2" height="8.2" rx="1.6" fill="white" stroke="#7E708C" stroke-width="0.8"/>
+<line x1="5.95" y1="7" x2="5.95" y2="10" stroke="#7E708C" stroke-width="0.9"/>
+<path d="M6 5L7.29904 7.25H4.70096L6 5Z" fill="#7E708C"/>
+<line y1="-0.45" x2="3" y2="-0.45" transform="matrix(0 -1 -1 0 8.5 8)" stroke="#7E708C" stroke-width="0.9"/>
+<path d="M9 10L10.299 7.75H7.70096L9 10Z" fill="#7E708C"/>
+</svg>
