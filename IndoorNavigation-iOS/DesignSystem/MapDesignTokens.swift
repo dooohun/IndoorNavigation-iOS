@@ -72,6 +72,8 @@ enum MapDesignTokens {
         static let marker = UIColor(white: 0.0, alpha: 0.14)
         static let positionHalo = UIColor(white: 0.0, alpha: 0.18)
         static let positionArrow = UIColor(white: 0.0, alpha: 0.20)
+        /// 아이콘 기반 마커용 약화 그림자 (기존 marker 0.14 → 0.10).
+        static let markerIcon = UIColor(white: 0.0, alpha: 0.10)
     }
 
     // MARK: - Metric
@@ -107,5 +109,11 @@ enum MapDesignTokens {
         static let positionPuckDiameter: CGFloat = 34
         /// POI/층간연결 marker bubble 높이.
         static let markerBubbleHeight: CGFloat = 28
+        /// 2D 지도 마커 SVG 아이콘 한 변 크기 (정사각).
+        static let markerIconSize: CGFloat = 18
+        /// 마커 아이콘과 하단 라벨 사이 세로 간격.
+        static let markerLabelGap: CGFloat = 1
+        /// 마커 라벨 폰트 크기 (room POI 전용).
+        static let markerLabelFontSize: CGFloat = 8
     }
 }

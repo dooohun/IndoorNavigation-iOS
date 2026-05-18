@@ -92,21 +92,12 @@ private final class FloorNavigationMapView: UIView {
             }
         }
 
-        var symbol: String {
+        /// 마커 그리기에 사용할 Asset 이름. escalator는 stairs 폴백.
+        var imageName: String {
             switch self {
-            case .poi: return ""
-            case .elevator: return "E"
-            case .stairs: return "St"
-            case .escalator: return "Es"
-            }
-        }
-
-        var fillColor: UIColor {
-            switch self {
-            case .poi: return MapDesignTokens.Accent.poi
-            case .elevator: return MapDesignTokens.Accent.elevator
-            case .stairs: return MapDesignTokens.Accent.stairs
-            case .escalator: return MapDesignTokens.Accent.escalator
+            case .poi: return "roomIcon"
+            case .elevator: return "elevator"
+            case .stairs, .escalator: return "stairs"
             }
         }
     }
@@ -118,12 +109,14 @@ private final class FloorNavigationMapView: UIView {
     }
 
     private struct MarkerPinLayout {
-        let bubbleRect: CGRect
-        let tipPoint: CGPoint
-        let pointsDown: Bool
-
+        /// 아이콘이 그려질 사각형 (가로/세로 = markerIconSize).
+        let iconRect: CGRect
+        /// (있을 경우) 라벨이 그려질 사각형. nil 이면 라벨 미표시.
+        let labelRect: CGRect?
+        /// 충돌 판정에 쓸 합쳐진 영역 (iconRect ∪ labelRect).
         var collisionRect: CGRect {
-            bubbleRect.union(CGRect(x: tipPoint.x - 6, y: tipPoint.y - 6, width: 12, height: 12))
+            guard let labelRect else { return iconRect }
+            return iconRect.union(labelRect)
         }
     }
 
@@ -542,8 +535,6 @@ private final class FloorNavigationMapView: UIView {
 
         let visibleRect = clipRect.insetBy(dx: -24, dy: -24)
         let currentScreenPoint = currentWorldPoint.map(transform)
-        let floorRouteWorldPoints = routeWorldPoints(filterFloorLevel: map.floorLevel)
-        let routeScreenPoints = (floorRouteWorldPoints.count >= 2 ? floorRouteWorldPoints : routeWorldPoints(filterFloorLevel: nil)).map(transform)
         var occupiedRects: [CGRect] = []
         if let currentScreenPoint {
             let positionDiameter = MapDesignTokens.Metric.positionPuckDiameter + 8
@@ -568,13 +559,12 @@ private final class FloorNavigationMapView: UIView {
         }
 
         for (marker, screenPoint) in visibleMarkers {
-            guard let label = markerText(for: marker),
-                  currentScreenPoint.map({ screenDistance(screenPoint, $0) >= 42 }) ?? true,
-                  let layout = markerPinLayout(label: label,
+            if let currentScreenPoint, screenDistance(screenPoint, currentScreenPoint) < 42 { continue }
+            let label = markerText(for: marker)
+            guard let layout = markerPinLayout(label: label,
                                                point: screenPoint,
                                                clipRect: clipRect,
-                                               occupiedRects: occupiedRects,
-                                               routeScreenPoints: routeScreenPoints) else { continue }
+                                               occupiedRects: occupiedRects) else { continue }
             drawMarkerPin(context: context, kind: marker.kind, label: label, layout: layout)
             occupiedRects.append(layout.collisionRect.insetBy(dx: -4, dy: -4))
         }
@@ -617,31 +607,25 @@ private final class FloorNavigationMapView: UIView {
         return nil
     }
 
-    private func drawMarkerPin(context: CGContext, kind: MapMarkerKind, label: String, layout: MarkerPinLayout) {
-        context.saveGState()
-        context.setShadow(offset: CGSize(width: 0, height: 2), blur: 5, color: MapDesignTokens.Shadow.marker.cgColor)
-
-        let path = UIBezierPath(roundedRect: layout.bubbleRect, cornerRadius: layout.bubbleRect.height / 2)
-        if layout.pointsDown {
-            path.move(to: CGPoint(x: layout.tipPoint.x - 5, y: layout.bubbleRect.maxY - 2))
-            path.addLine(to: layout.tipPoint)
-            path.addLine(to: CGPoint(x: layout.tipPoint.x + 5, y: layout.bubbleRect.maxY - 2))
-        } else {
-            path.move(to: CGPoint(x: layout.tipPoint.x - 5, y: layout.bubbleRect.minY + 2))
-            path.addLine(to: layout.tipPoint)
-            path.addLine(to: CGPoint(x: layout.tipPoint.x + 5, y: layout.bubbleRect.minY + 2))
+    private func drawMarkerPin(context: CGContext,
+                               kind: MapMarkerKind,
+                               label: String?,
+                               layout: MarkerPinLayout) {
+        if let image = UIImage(named: kind.imageName) {
+            context.saveGState()
+            context.setShadow(offset: CGSize(width: 0, height: 2),
+                              blur: 5,
+                              color: MapDesignTokens.Shadow.markerIcon.cgColor)
+            image.draw(in: layout.iconRect)
+            context.restoreGState()
         }
-        path.close()
-        kind.fillColor.setFill()
-        path.fill()
-        context.restoreGState()
-
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: 11.5, weight: .bold),
-            .foregroundColor: MapDesignTokens.Text.onAccent
-        ]
-        let textRect = layout.bubbleRect.insetBy(dx: 9, dy: 5)
-        (label as NSString).draw(in: textRect, withAttributes: attributes)
+        if let labelRect = layout.labelRect, let label, !label.isEmpty {
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: MapDesignTokens.Metric.markerLabelFontSize, weight: .medium),
+                .foregroundColor: MapDesignTokens.Text.primary
+            ]
+            (label as NSString).draw(in: labelRect, withAttributes: attrs)
+        }
     }
 
     /// 목적지 핀(빨간 위치 아이콘) + 상단 destinationName 텍스트를 그린다.
@@ -694,46 +678,34 @@ private final class FloorNavigationMapView: UIView {
         }
     }
 
-    private func markerPinLayout(label: String,
+    private func markerPinLayout(label: String?,
                                  point: CGPoint,
                                  clipRect: CGRect,
-                                 occupiedRects: [CGRect],
-                                 routeScreenPoints: [CGPoint]) -> MarkerPinLayout? {
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: 11.5, weight: .bold)
-        ]
-        let textSize = (label as NSString).size(withAttributes: attributes)
-        let bubbleHeight = MapDesignTokens.Metric.markerBubbleHeight
-        let bubbleWidth = min(max(textSize.width + 20, 42), 94)
-        let pointerHeight: CGFloat = 7
-        let gap: CGFloat = 2
-        let aboveBubble = CGRect(
-            x: point.x - bubbleWidth / 2,
-            y: point.y - bubbleHeight - pointerHeight - gap,
-            width: bubbleWidth,
-            height: bubbleHeight
-        )
-        let belowBubble = CGRect(
-            x: point.x - bubbleWidth / 2,
-            y: point.y + pointerHeight + gap,
-            width: bubbleWidth,
-            height: bubbleHeight
-        )
-        let candidates = [
-            MarkerPinLayout(bubbleRect: aboveBubble,
-                            tipPoint: CGPoint(x: point.x, y: point.y - gap),
-                            pointsDown: true),
-            MarkerPinLayout(bubbleRect: belowBubble,
-                            tipPoint: CGPoint(x: point.x, y: point.y + gap),
-                            pointsDown: false)
-        ]
-        return candidates.first { candidate in
-            let expanded = candidate.collisionRect.insetBy(dx: -3, dy: -3)
-            guard clipRect.contains(candidate.collisionRect) else { return false }
-            guard !occupiedRects.contains(where: { $0.intersects(expanded) }) else { return false }
-            guard routeScreenPoints.allSatisfy({ screenDistance($0, point) >= 18 || !expanded.contains($0) }) else { return false }
-            return true
+                                 occupiedRects: [CGRect]) -> MarkerPinLayout? {
+        let iconSize = MapDesignTokens.Metric.markerIconSize
+        let iconRect = CGRect(x: point.x - iconSize / 2,
+                              y: point.y - iconSize / 2,
+                              width: iconSize,
+                              height: iconSize)
+
+        var labelRect: CGRect?
+        if let label, !label.isEmpty {
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: MapDesignTokens.Metric.markerLabelFontSize, weight: .medium)
+            ]
+            let size = (label as NSString).size(withAttributes: attrs)
+            let gap = MapDesignTokens.Metric.markerLabelGap
+            labelRect = CGRect(x: point.x - size.width / 2,
+                               y: iconRect.maxY + gap,
+                               width: size.width,
+                               height: size.height)
         }
+
+        let candidate = MarkerPinLayout(iconRect: iconRect, labelRect: labelRect)
+        let expanded = candidate.collisionRect.insetBy(dx: -3, dy: -3)
+        guard clipRect.contains(candidate.collisionRect) else { return nil }
+        guard !occupiedRects.contains(where: { $0.intersects(expanded) }) else { return nil }
+        return candidate
     }
 
     private func displayLabel(_ label: String?) -> String? {
@@ -748,9 +720,9 @@ private final class FloorNavigationMapView: UIView {
     private func markerText(for marker: MapMarker) -> String? {
         switch marker.kind {
         case .poi:
-            return displayLabel(marker.label) ?? "POI"
+            return displayLabel(marker.label)
         case .elevator, .stairs, .escalator:
-            return displayLabel(marker.label) ?? marker.kind.symbol
+            return nil
         }
     }
 
