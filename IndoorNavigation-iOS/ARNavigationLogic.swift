@@ -694,13 +694,13 @@ class ARNavigationLogic {
             startV3Pathfinding(scanId: response.mapId,
                                startFloorLevel: response.pose.floorLevel,
                                translation: translation)
-            // 주기 재측위 일시 비활성화 — 사용자 요청.
-            // (재활성화 시 아래 블록 주석 해제)
-            // if let mPose = self.matchedARPose {
-            //     let c = mPose.columns.3
-            //     lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
-            // }
-            // startPeriodicRelocalize()
+            // 주기 재측위 시작 — 초기 측위 성공 후 cadence 마다 V3 호출로 drift 보정.
+            // 거리 가드 초기값: 첫 cadence 진입 시 강제 발사되도록 캡처 시점 ARFrame pose 캐시.
+            if let mPose = self.matchedARPose {
+                let c = mPose.columns.3
+                lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
+            }
+            startPeriodicRelocalize()
         }
     }
 
