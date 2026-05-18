@@ -1440,7 +1440,7 @@ final class FloorNavigationMapMockViewController: UIViewController {
             return
         }
 
-        NetworkManager.shared.fetchFloorMap(floorId: floorId) { [weak self] result in
+        NetworkManager.shared.fetchFloorMap(floorId: floorId, areaId: nil) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch result {
@@ -1598,12 +1598,12 @@ final class FloorNavigationMapMockViewController: UIViewController {
         {"type":"FeatureCollection","features":[{"type":"Feature","properties":{"kind":"floor_union"},"geometry":{"type":"Polygon","coordinates":[[[0,0],[18,0],[18,5],[10,5],[10,18],[4,18],[4,5],[0,5],[0,0]]]}}]}
         """
         let nodes = [
-            FloorMapNode(id: "n0", type: "corridor", x: 2, y: 2.5, z: 0, label: nil, connector: nil),
-            FloorMapNode(id: "n1", type: "corridor", x: 14, y: 2.5, z: 0, label: nil, connector: nil),
-            FloorMapNode(id: "n2", type: "corridor", x: 7, y: 2.5, z: 0, label: nil, connector: nil),
-            FloorMapNode(id: "n3", type: "corridor", x: 7, y: 15, z: 0, label: nil, connector: nil),
-            FloorMapNode(id: "p1", type: "poi", x: 15.5, y: 2.5, z: 0, label: "POI 15", connector: nil),
-            FloorMapNode(id: "s1", type: "passage_stairs", x: 7, y: 16, z: 0, label: "St", connector: FloorMapConnector(type: "stairs", key: nil))
+            FloorMapNode(id: "n0", type: "corridor", x: 2, y: 2.5, z: 0, label: nil, category: nil, connector: nil),
+            FloorMapNode(id: "n1", type: "corridor", x: 14, y: 2.5, z: 0, label: nil, category: nil, connector: nil),
+            FloorMapNode(id: "n2", type: "corridor", x: 7, y: 2.5, z: 0, label: nil, category: nil, connector: nil),
+            FloorMapNode(id: "n3", type: "corridor", x: 7, y: 15, z: 0, label: nil, category: nil, connector: nil),
+            FloorMapNode(id: "p1", type: "poi", x: 15.5, y: 2.5, z: 0, label: "POI 15", category: nil, connector: nil),
+            FloorMapNode(id: "s1", type: "passage_stairs", x: 7, y: 16, z: 0, label: "St", category: nil, connector: FloorMapConnector(type: "stairs", key: nil))
         ]
         return FloorMapResponse(
             floorId: floorId.isEmpty ? "mock-floor" : floorId,
@@ -1622,7 +1622,9 @@ final class FloorNavigationMapMockViewController: UIViewController {
                 FloorMapEdge(id: "e2", fromId: "n1", toId: "p1", lengthM: 1.5, type: "poi"),
                 FloorMapEdge(id: "e3", fromId: "n3", toId: "s1", lengthM: 1, type: "passage")
             ],
-            etag: "mock"
+            etag: "mock",
+            destinations: nil,
+            connectors: nil
         )
     }
 
@@ -1713,8 +1715,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var routeCalculatingLabel: UILabel!
 
     var floorTransitionOverlayView: UIView!
-    var floorTransitionTitleLabel: UILabel!
-    var floorTransitionTargetLabel: UILabel!
     var floorTransitionRestartButton: UIButton!
 
     // Phase 5: 방향 안내 UI
@@ -2560,103 +2560,80 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     private func setupFloorTransitionOverlay() {
         let bounds = self.view.bounds
 
-        // 컨테이너 (전체화면 어두운 배경)
+        // 도착 UI(arrivalBadge) 와 동일한 패턴 — 검정 dim + 중앙 흰 pill + 그 아래 파란 capsule 버튼.
         floorTransitionOverlayView = UIView(frame: bounds)
-        floorTransitionOverlayView.backgroundColor = UIColor.black.withAlphaComponent(0.75)
+        floorTransitionOverlayView.backgroundColor = UIColor.black.withAlphaComponent(0.55)
         floorTransitionOverlayView.isHidden = true
         floorTransitionOverlayView.isUserInteractionEnabled = true
-        self.view.addSubview(floorTransitionOverlayView)
+        floorTransitionOverlayView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
 
-        // 카드 뷰 (중앙)
-        let cardView = UIView()
-        cardView.backgroundColor = UIColor.white
-        cardView.layer.cornerRadius = 20
-        cardView.layer.shadowColor = UIColor.black.cgColor
-        cardView.layer.shadowOpacity = 0.2
-        cardView.layer.shadowRadius = 12
-        cardView.layer.shadowOffset = CGSize(width: 0, height: 4)
-        cardView.translatesAutoresizingMaskIntoConstraints = false
-        floorTransitionOverlayView.addSubview(cardView)
+        // 필(pill) 형태 안내 라벨
+        let pill = UIView()
+        pill.backgroundColor = UIColor.white.withAlphaComponent(0.95)
+        pill.layer.cornerRadius = 22
+        pill.layer.shadowColor = UIColor.black.cgColor
+        pill.layer.shadowOpacity = 0.15
+        pill.layer.shadowRadius = 6
+        pill.layer.shadowOffset = CGSize(width: 0, height: 2)
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        floorTransitionOverlayView.addSubview(pill)
 
-        // 아이콘
-        let iconConfig = UIImage.SymbolConfiguration(pointSize: 50, weight: .medium)
-        let iconImage = UIImage(systemName: "figure.stairs", withConfiguration: iconConfig)
+        // 아이콘 (층 이동 의미 — 위아래 화살표 원형)
+        let iconConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+        let iconImage = UIImage(systemName: "arrow.up.arrow.down.circle.fill", withConfiguration: iconConfig)
         let iconView = UIImageView(image: iconImage)
         iconView.tintColor = .systemBlue
         iconView.contentMode = .scaleAspectFit
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        cardView.addSubview(iconView)
+        pill.addSubview(iconView)
 
-        // 타이틀 라벨
-        floorTransitionTitleLabel = UILabel()
-        floorTransitionTitleLabel.text = "계단을 이용해주세요"
-        floorTransitionTitleLabel.textColor = .darkText
-        floorTransitionTitleLabel.font = .systemFont(ofSize: 20, weight: .bold)
-        floorTransitionTitleLabel.textAlignment = .center
-        floorTransitionTitleLabel.numberOfLines = 0
-        floorTransitionTitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        cardView.addSubview(floorTransitionTitleLabel)
+        // pill 안 안내 텍스트
+        let label = UILabel()
+        label.text = "도착층으로 이동"
+        label.textColor = .darkText
+        label.font = .systemFont(ofSize: 16, weight: .semibold)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        pill.addSubview(label)
 
-        // 본문 라벨 (정적)
-        let bodyLabel = UILabel()
-        bodyLabel.text = "원하는 층에 도착하면 다시 스캔해야 합니다."
-        bodyLabel.textColor = .gray
-        bodyLabel.font = .systemFont(ofSize: 14, weight: .regular)
-        bodyLabel.textAlignment = .center
-        bodyLabel.numberOfLines = 0
-        bodyLabel.translatesAutoresizingMaskIntoConstraints = false
-        cardView.addSubview(bodyLabel)
+        // "이동 완료" 버튼 (파란 capsule, iOS 15+ Configuration)
+        var buttonConfig = UIButton.Configuration.filled()
+        buttonConfig.cornerStyle = .capsule
+        buttonConfig.image = UIImage(systemName: "checkmark")
+        buttonConfig.imagePadding = 8
+        buttonConfig.baseBackgroundColor = .systemBlue
+        buttonConfig.baseForegroundColor = .white
+        buttonConfig.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 24, bottom: 12, trailing: 24)
+        var titleAttr = AttributedString("이동 완료")
+        titleAttr.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
+        buttonConfig.attributedTitle = titleAttr
 
-        // 목표 층 라벨
-        floorTransitionTargetLabel = UILabel()
-        floorTransitionTargetLabel.text = "목표: ―층으로 이동"
-        floorTransitionTargetLabel.textColor = .systemBlue
-        floorTransitionTargetLabel.font = .systemFont(ofSize: 16, weight: .semibold)
-        floorTransitionTargetLabel.textAlignment = .center
-        floorTransitionTargetLabel.numberOfLines = 0
-        floorTransitionTargetLabel.translatesAutoresizingMaskIntoConstraints = false
-        cardView.addSubview(floorTransitionTargetLabel)
-
-        // 버튼
-        floorTransitionRestartButton = UIButton(type: .system)
-        floorTransitionRestartButton.setTitle("도착했습니다 — 다시 스캔하기", for: .normal)
-        floorTransitionRestartButton.setTitleColor(.white, for: .normal)
-        floorTransitionRestartButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
-        floorTransitionRestartButton.backgroundColor = .systemBlue
-        floorTransitionRestartButton.tintColor = .white
-        floorTransitionRestartButton.layer.cornerRadius = 12
+        floorTransitionRestartButton = UIButton(configuration: buttonConfig, primaryAction: nil)
         floorTransitionRestartButton.translatesAutoresizingMaskIntoConstraints = false
         floorTransitionRestartButton.addTarget(self, action: #selector(onFloorTransitionRestartTapped), for: .touchUpInside)
-        cardView.addSubview(floorTransitionRestartButton)
+        floorTransitionOverlayView.addSubview(floorTransitionRestartButton)
+
+        self.view.addSubview(floorTransitionOverlayView)
 
         NSLayoutConstraint.activate([
-            cardView.centerXAnchor.constraint(equalTo: floorTransitionOverlayView.centerXAnchor),
-            cardView.centerYAnchor.constraint(equalTo: floorTransitionOverlayView.centerYAnchor),
-            cardView.leadingAnchor.constraint(equalTo: floorTransitionOverlayView.leadingAnchor, constant: 24),
-            cardView.trailingAnchor.constraint(equalTo: floorTransitionOverlayView.trailingAnchor, constant: -24),
+            // pill 중앙, 가로 폭은 자식(iconView + label) intrinsic + 좌우 inset 으로 결정
+            pill.centerXAnchor.constraint(equalTo: floorTransitionOverlayView.centerXAnchor),
+            pill.centerYAnchor.constraint(equalTo: floorTransitionOverlayView.centerYAnchor),
+            pill.heightAnchor.constraint(equalToConstant: 44),
+            pill.leadingAnchor.constraint(equalTo: iconView.leadingAnchor, constant: -16),
+            pill.trailingAnchor.constraint(equalTo: label.trailingAnchor, constant: 20),
 
-            iconView.centerXAnchor.constraint(equalTo: cardView.centerXAnchor),
-            iconView.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 28),
-            iconView.widthAnchor.constraint(equalToConstant: 60),
-            iconView.heightAnchor.constraint(equalToConstant: 60),
+            iconView.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 22),
+            iconView.heightAnchor.constraint(equalToConstant: 22),
 
-            floorTransitionTitleLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 16),
-            floorTransitionTitleLabel.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 20),
-            floorTransitionTitleLabel.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -20),
+            label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
+            label.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
 
-            bodyLabel.topAnchor.constraint(equalTo: floorTransitionTitleLabel.bottomAnchor, constant: 16),
-            bodyLabel.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 20),
-            bodyLabel.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -20),
-
-            floorTransitionTargetLabel.topAnchor.constraint(equalTo: bodyLabel.bottomAnchor, constant: 16),
-            floorTransitionTargetLabel.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 20),
-            floorTransitionTargetLabel.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -20),
-
-            floorTransitionRestartButton.topAnchor.constraint(equalTo: floorTransitionTargetLabel.bottomAnchor, constant: 16),
-            floorTransitionRestartButton.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 20),
-            floorTransitionRestartButton.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -20),
-            floorTransitionRestartButton.heightAnchor.constraint(equalToConstant: 50),
-            floorTransitionRestartButton.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -28),
+            // 이동 완료 버튼 — pill 아래 16pt 간격
+            floorTransitionRestartButton.centerXAnchor.constraint(equalTo: floorTransitionOverlayView.centerXAnchor),
+            floorTransitionRestartButton.topAnchor.constraint(equalTo: pill.bottomAnchor, constant: 16),
         ])
     }
 
@@ -2692,6 +2669,10 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         super.viewWillAppear(animated)
         let configuration = ARWorldTrackingConfiguration()
         configuration.worldAlignment = .gravity
+        // LiDAR sceneDepth — V3 localize multipart 의 depth 첨부 용. 미지원 단말이면 frameSemantics 미세팅 → frame.sceneDepth=nil.
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            configuration.frameSemantics.insert(.sceneDepth)
+        }
         sceneView.session.delegate = self
         sceneView.session.run(configuration)
     }
@@ -3103,20 +3084,12 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
     }
 
     func showFloorTransition(transitionType: String, targetFloor: Int?, currentFloor: Int?) {
-        if transitionType == "ELEVATOR" {
-            floorTransitionTitleLabel.text = "엘리베이터를 이용해주세요"
-        } else {
-            floorTransitionTitleLabel.text = "계단을 이용해주세요"
-        }
-
-        if let target = targetFloor {
-            floorTransitionTargetLabel.text = "목표: \(target)층으로 이동"
-        } else {
-            floorTransitionTargetLabel.text = "목표 층으로 이동해주세요"
-        }
+        // UI는 정적(아이콘/텍스트 변경 없음). transitionType/targetFloor 는 향후 확장용으로 시그니처 보존.
+        _ = (transitionType, targetFloor, currentFloor)
 
         floorTransitionOverlayView.alpha = 0
         floorTransitionOverlayView.isHidden = false
+        self.view.bringSubviewToFront(floorTransitionOverlayView)
         UIView.animate(withDuration: 0.3) {
             self.floorTransitionOverlayView.alpha = 1
         }

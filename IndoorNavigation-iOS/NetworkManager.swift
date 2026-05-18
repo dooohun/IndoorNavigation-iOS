@@ -30,8 +30,8 @@ private func log(_ tag: String, _ items: Any...) {
 
 class NetworkManager {
     static let shared = NetworkManager()
-    let baseURL = "http://218.150.183.198:8080/api/v1"
-    let slamBaseURL = "http://218.150.183.198:8080/api/slam/v3"
+    let baseURL = "http://218.150.183.198:8000/api/v1"
+    let slamBaseURL = "http://218.150.183.198:8000/api/slam/v3"
 
     // MARK: - Buildings
 
@@ -84,13 +84,25 @@ class NetworkManager {
         Self.performData(request, completion: completion)
     }
 
-    /// `GET /buildings/{bid}/floors/{fid}/map` — 층 지도 메타(JSON) + GeoJSON polygon + nodes/edges.
+    /// `GET /floors/{fid}/map` — 층 지도 메타(JSON) + GeoJSON polygon + nodes/edges.
+    /// - Parameters:
+    ///   - areaId: 신서버 area 스코프(층 내 sub-area) 식별자. 지정 시 query 로 첨부.
+    ///   - ifNoneMatch: ETag 조건부 GET. 지정 시 If-None-Match 헤더 첨부 (서버 304 응답 시 캐시 사용).
     func fetchFloorMap(floorId: String,
+                       areaId: String? = nil,
+                       ifNoneMatch: String? = nil,
                        completion: @escaping (Result<FloorMapResponse, Error>) -> Void) {
-        guard let url = URL(string: "\(baseURL)/floors/\(floorId)/map") else { return }
+        var components = URLComponents(string: "\(baseURL)/floors/\(floorId)/map")
+        if let areaId, !areaId.isEmpty {
+            components?.queryItems = [URLQueryItem(name: "areaId", value: areaId)]
+        }
+        guard let url = components?.url else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 30
+        if let ifNoneMatch, !ifNoneMatch.isEmpty {
+            request.setValue(ifNoneMatch, forHTTPHeaderField: "If-None-Match")
+        }
 
         log("REQ", "GET", url.absoluteString)
         Self.performJSON(request, completion: completion)
@@ -207,11 +219,26 @@ class NetworkManager {
 
     /// `POST /api/slam/v3/localize` — multipart 이미지 업로드.
     /// 서버에서 SuperPoint 추출 + LightGlue 매칭 + PnP 까지 수행 — 5장 처리에 30초+ 걸려 timeout 90s.
+    ///
+    /// 신서버 스펙: `building_id` / `map_id` / `floor_id` 는 query parameter, multipart 본문에는 images + depths 만.
+    /// `depths` 는 LiDAR sceneDepth FP32 raw bytes (옵셔널 — 서버는 곧 optional 로 변경 예정).
+    /// `floorId` 는 신서버에서 uuid 문자열로 전달 (이전엔 floorLevel Int 였음).
     func localizeV3(buildingId: String,
                     images: [UIImage],
-                    floorLevel: Int? = nil,
+                    depths: [Data]? = nil,
+                    mapId: String? = nil,
+                    floorId: String? = nil,
                     completion: @escaping (Result<SLAMLocalizeResponse, Error>) -> Void) {
-        guard let url = URL(string: "\(slamBaseURL)/localize") else { return }
+        var components = URLComponents(string: "\(slamBaseURL)/localize")
+        var queryItems: [URLQueryItem] = [URLQueryItem(name: "building_id", value: buildingId)]
+        if let mapId, !mapId.isEmpty {
+            queryItems.append(URLQueryItem(name: "map_id", value: mapId))
+        }
+        if let floorId, !floorId.isEmpty {
+            queryItems.append(URLQueryItem(name: "floor_id", value: floorId))
+        }
+        components?.queryItems = queryItems
+        guard let url = components?.url else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 90
@@ -220,17 +247,6 @@ class NetworkManager {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         var body = Data()
-        func appendField(_ name: String, _ value: String) {
-            body.append("--\(boundary)\r\n".data(using: .utf8)!)
-            body.append("Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8)!)
-            body.append(value.data(using: .utf8)!)
-            body.append("\r\n".data(using: .utf8)!)
-        }
-
-        appendField("building_id", buildingId)
-        if let floorLevel {
-            appendField("floor_id", String(floorLevel))
-        }
 
         // 다운샘플링: 원본 1920×1440 → longer side 960. 업로드 75% 감소 + 서버 SP 처리 빠름.
         for (index, image) in images.enumerated() {
@@ -242,14 +258,26 @@ class NetworkManager {
             body.append(imageData)
             body.append("\r\n".data(using: .utf8)!)
         }
+
+        // depth 첨부 — LiDAR 미지원 단말이면 nil 이라 첨부 X (서버는 optional 처리 예정).
+        if let depths, !depths.isEmpty {
+            for (index, depthData) in depths.enumerated() {
+                body.append("--\(boundary)\r\n".data(using: .utf8)!)
+                body.append("Content-Disposition: form-data; name=\"depths\"; filename=\"depth\(index).bin\"\r\n".data(using: .utf8)!)
+                body.append("Content-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
+                body.append(depthData)
+                body.append("\r\n".data(using: .utf8)!)
+            }
+        }
+
         body.append("--\(boundary)--\r\n".data(using: .utf8)!)
         request.httpBody = body
 
-        log("REQ", "POST localize images=\(images.count) floor=\(floorLevel.map(String.init) ?? "ANY") body=\(body.count / 1024)KB")
+        log("REQ", "POST localize images=\(images.count) depths=\(depths?.count ?? 0) floorId=\(floorId ?? "ANY") mapId=\(mapId ?? "ANY") body=\(body.count / 1024)KB")
 
         Self.performJSON(request) { (result: Result<SLAMLocalizeResponse, Error>) in
             if case .success(let resp) = result {
-                log("RES", "localize: confidence=\(String(format: "%.2f", resp.confidence)) floor=\(resp.floorLevel.map(String.init) ?? "?") matches=\(resp.numMatches ?? 0)")
+                log("RES", "localize: confidence=\(String(format: "%.2f", resp.confidence)) floor=\(resp.floorLevel.map(String.init) ?? "?") matches=\(resp.numMatches ?? 0) areaId=\(resp.areaId ?? "?")")
             }
             completion(result)
         }

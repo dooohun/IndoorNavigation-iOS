@@ -75,13 +75,15 @@ struct FloorMapResponse: Codable {
     let scanId: String
     let floorLevel: Int
     let floorName: String?
-    let buildJobId: String
+    let buildJobId: String?
     let coordinateSystem: FloorMapCoordinateSystem?
     let bounds: FloorMapBounds
     let polygon: PolygonRaw
     let nodes: [FloorMapNode]
     let edges: [FloorMapEdge]
     let etag: String
+    let destinations: [FloorMapDestination]?
+    let connectors: [FloorMapConnectorDetail]?
 }
 
 struct FloorMapCoordinateSystem: Codable {
@@ -105,6 +107,7 @@ struct FloorMapNode: Codable {
     let y: Double
     let z: Double
     let label: String?
+    let category: String?
     let connector: FloorMapConnector?
 }
 
@@ -119,6 +122,44 @@ struct FloorMapEdge: Codable {
     let toId: String
     let lengthM: Double
     let type: String
+
+    // 서버 응답 키 호환: 신서버는 fromNodeId / toNodeId 로 응답하지만, 클라 내부 호출자(ARNavigationViewController 등)는
+    // 기존 프로퍼티명 fromId / toId 를 유지한다.
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case fromId = "fromNodeId"
+        case toId = "toNodeId"
+        case lengthM
+        case type
+    }
+}
+
+// MARK: - FloorMap 부속 (destinations / connectors)
+
+/// `FloorMapResponse.destinations[]` — 층 내 도착 가능 노드(POI 등) 메타.
+/// 현재 클라는 미사용이나, JSONDecoder 가 모르는 필드를 무시하지 않도록 옵셔널로 보존.
+struct FloorMapDestination: Codable {
+    let id: String?
+    let routeNodeId: String?
+    let name: String?
+    let label: String?
+    let category: String?
+    let x: Double?
+    let y: Double?
+    let z: Double?
+}
+
+/// `FloorMapResponse.connectors[]` — 층 내 수직 통로(엘리베이터/계단) 진입점 메타.
+/// 현재 클라는 미사용. stops 같은 free-form 필드는 생략.
+struct FloorMapConnectorDetail: Codable {
+    let connectorId: String?
+    let type: String?
+    let key: String?
+    let name: String?
+    let routeNodeId: String?
+    let x: Double?
+    let y: Double?
+    let z: Double?
 }
 
 /// polygon GeoJSON 자유 schema — raw JSON bytes 로 보존만 한다 (현재 클라 미사용).
@@ -193,10 +234,12 @@ struct PathfindingRequest: Codable {
     let destinationName: String
     let preference: RoutePreference?
     let verticalPreference: VerticalPreference?
+    let startScanId: String?
+    let startAreaId: String?
 }
 
 struct PathfindingResponse: Codable {
-    let buildingId: String
+    let buildingId: String?
     let totalDistance: Double
     let estimatedTimeSeconds: Int
     let steps: [PathStepResponse]
@@ -243,6 +286,7 @@ struct V1Position: Codable {
     let x: Double
     let y: Double
     let z: Double
+    let floorLevel: Int?
 }
 
 struct FloorTransitionResponse: Codable {
@@ -387,6 +431,7 @@ struct SLAMLocalizeResponse: Codable {
     let matchedImageIndex: Int?
     let floorId: String?
     let floorLevel: Int?
+    let areaId: String?
 }
 
 struct SLAMPose: Codable {

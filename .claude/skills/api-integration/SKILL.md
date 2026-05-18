@@ -7,8 +7,8 @@ description: IndoorNavigation iOS 앱의 NetworkManager.swift 수정, 새 API �
 
 ## 기본 정보
 
-- **REST Base URL**: `http://218.150.183.198:8080/api/v1`
-- **SLAM Base URL**: `http://218.150.183.198:8080/api/slam/v3` (로컬라이즈 전용)
+- **REST Base URL**: `http://218.150.183.198:8000/api/v1`
+- **SLAM Base URL**: `http://218.150.183.198:8000/api/slam/v3` (로컬라이즈 전용)
 - **인증**: 없음 (현재)
 - **로깅**: 모든 요청/응답은 파일 상단 private `log(_:_:)` 헬퍼로 `[REQ]`/`[RES]`/`[ERR]` 태그를 찍는다
 
@@ -16,12 +16,21 @@ description: IndoorNavigation iOS 앱의 NetworkManager.swift 수정, 새 API �
 
 | # | 메서드 | 경로 | 함수 | 응답 DTO |
 |---|-------|------|------|---------|
-| 1 | POST | `/api/slam/v3/localize` | `localize(buildingId:mapId:images:)` | `SLAMLocalizeResponse` |
-| 2 | POST | `/buildings/{bid}/floors/{fid}/routes/coordinates` | `findRouteByCoordinates(buildingId:floorId:request:)` | `FloorCoordinateRouteResponse` |
-| 3 | GET | `/buildings?status=ACTIVE` | `fetchBuildings(status:)` | `[BuildingResponse]` |
-| 4 | GET | `/buildings/{bid}` | `fetchBuildingDetail(buildingId:)` | `BuildingDetailResponse` |
-| 5 | GET | `/buildings/{bid}/pois` | `fetchPOIs(buildingId:)` | `[POIResponse]` |
-| 6 | GET | `/buildings/{bid}/pois/search?query=` | `searchPOIs(buildingId:query:)` | `[POIResponse]` |
+| 1 | POST | `/api/slam/v3/localize?building_id&map_id&floor_id` | `localizeV3(buildingId:images:depths:mapId:floorId:)` | `SLAMLocalizeResponse` (`+ areaId`) |
+| 2 | POST | `/buildings/{bid}/pathfinding` | `pathfinding(buildingId:request:)` (`PathfindingRequest + startScanId/startAreaId`, `PathfindingResponse + buildingId?`) | `PathfindingResponse` |
+| 3 | POST | `/buildings/{bid}/floors/{fid}/routes/coordinates` | `findRouteByCoordinates(buildingId:floorId:request:)` | `FloorCoordinateRouteResponse` |
+| 4 | GET | `/floors/{fid}/map?areaId=` | `fetchFloorMap(floorId:areaId:ifNoneMatch:)` | `FloorMapResponse` (`+ destinations/connectors`) |
+| 5 | GET | `/buildings?status=ACTIVE` | `fetchBuildings(status:)` | `[BuildingResponse]` |
+| 6 | GET | `/buildings/{bid}` | `fetchBuildingDetail(buildingId:)` | `BuildingDetailResponse` |
+| 7 | GET | `/buildings/{bid}/pois` | `fetchPOIs(buildingId:)` | `[POIResponse]` |
+| 8 | GET | `/buildings/{bid}/pois/search?query=` | `searchPOIs(buildingId:query:)` | `[POIResponse]` |
+
+신서버(8000 포트) 전환 시점 정합 노트:
+- `localizeV3` 의 `building_id` / `map_id` / `floor_id` 는 모두 **query parameter**. multipart 본문은 `images` + `depths` (FP32 raw bytes) 뿐.
+- `floor_id` 는 신서버에서 **uuid 문자열** (구서버의 `floor_level: Int` 와 의미 변경).
+- `depths` 는 LiDAR sceneDepth FP32 raw bytes — LiDAR 미지원 단말이면 클라가 multipart 첨부 자체를 skip (서버 optional).
+- `fetchFloorMap` 은 응답에 ETag 가 있어 If-None-Match 조건부 GET 가능 (304 시 캐시 사용).
+- `FloorMapEdge` 는 서버 응답 키가 `fromNodeId/toNodeId` 지만 클라 Swift 프로퍼티는 `fromId/toId` 유지 — `CodingKeys` 로 매핑.
 
 `BuildingDetailResponse`는 `floors: [FloorResponse]`, `verticalPassages: [VerticalPassageResponse]`를 포함한다. 층 ID(`floorId`)가 필요한 경로 탐색의 출처.
 

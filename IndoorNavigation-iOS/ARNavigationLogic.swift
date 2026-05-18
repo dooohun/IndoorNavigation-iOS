@@ -117,8 +117,12 @@ class ARNavigationLogic {
     private var localizedFloorId: String?
     private var localizedFloorLevel: Int?
     private var localizedScanId: String?  // V3 응답 mapId — B4 PathfindingRequest.startScanId 인계용
+    private var localizedAreaId: String?  // V3 응답 areaId — pathfinding/map 호출에 동반.
     private var capturedImages: [UIImage] = []
     private var capturedARPoses: [simd_float4x4] = []
+    /// LiDAR sceneDepth FP32 raw bytes. capturedImages 와 같은 인덱스로 채움.
+    /// LiDAR 미지원 단말 / sceneDepth 미활성이면 빈 배열 — server multipart 에 첨부 안 함.
+    private var capturedDepths: [Data] = []
     private var captureTimer: Timer?
 
     // LocalizeDebugLogger 용 — drawPathFromSteps 까지 살아남을 데이터
@@ -214,6 +218,8 @@ class ARNavigationLogic {
     private var isPeriodicRelocalizeInFlight: Bool = false
     private var periodicCapturedImages: [UIImage] = []
     private var periodicCapturedARPoses: [simd_float4x4] = []
+    /// 주기 V3 재측위용 LiDAR sceneDepth FP32 raw bytes. periodicCapturedImages 와 짝.
+    private var periodicCapturedDepths: [Data] = []
     /// 직전 주기 측위 발사 시점 카메라 위치 캐시(XZ만 사용). nil 이면 첫 cadence 강제 통과.
     private var lastPeriodicRelocalizeCameraPos: simd_float3?
     /// 캡처 시작 시각(Date timeIntervalSince1970). timeout 판정에 사용. 정상/abort 시 nil 로 정리.
@@ -458,6 +464,7 @@ class ARNavigationLogic {
         matchedARPose = nil
         localizedPose = nil
         localizedScanId = nil
+        localizedAreaId = nil
         destinationARPosition = nil
         lastStartSnapDistance = nil
         hasNotifiedArrival = false
@@ -482,6 +489,7 @@ class ARNavigationLogic {
         // capture 버퍼 클리어
         capturedImages = []
         capturedARPoses = []
+        capturedDepths = []
         lastCaptureTimestamp = nil
 
         // GuidanceDirector 도 reset (Phase 5 dead path 지만 호출 부수효과 없게)
@@ -576,6 +584,10 @@ class ARNavigationLogic {
 
         capturedImages.append(uiImage)
         capturedARPoses.append(frame.camera.transform)
+        if let depthPB = frame.sceneDepth?.depthMap,
+           let depthData = Self.depthMapData(from: depthPB) {
+            capturedDepths.append(depthData)
+        }
         lastCaptureTimestamp = frame.timestamp
 
         let count = capturedImages.count
@@ -586,6 +598,34 @@ class ARNavigationLogic {
             stopCapture()
             sendToServer()
         }
+    }
+
+    /// `kCVPixelFormatType_DepthFloat32` CVPixelBuffer → FP32 raw little-endian bytes.
+    /// row stride padding 이 width*4 와 다를 수 있어 row 단위로 복사.
+    /// 다른 픽셀 포맷(혹은 nil) 이면 nil 반환 — multipart 첨부 skip.
+    static func depthMapData(from pixelBuffer: CVPixelBuffer) -> Data? {
+        guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_DepthFloat32 else {
+            return nil
+        }
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let rowBytes = width * MemoryLayout<Float32>.size
+        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
+
+        var data = Data(count: height * rowBytes)
+        data.withUnsafeMutableBytes { destRaw in
+            guard let destBase = destRaw.baseAddress else { return }
+            for row in 0..<height {
+                let src = base.advanced(by: row * bytesPerRow)
+                let dst = destBase.advanced(by: row * rowBytes)
+                memcpy(dst, src, rowBytes)
+            }
+        }
+        return data
     }
 
     func stopCapture() {
@@ -604,14 +644,23 @@ class ARNavigationLogic {
             return
         }
 
-        let floorHint: Int? = {
-            if isFloorTransitionRestart {
-                return localizedFloorLevel ?? userCurrentFloorLevel
+        // 신서버 floorId 는 uuid 문자열. 층 전환 복귀 시 직전 측위 결과 floorId 우선,
+        // 그 외 케이스에서는 본 화면 진입 시 받은 floorId 사용. 둘 다 비어있으면 nil → 서버 ANY 매칭.
+        let floorIdHint: String? = {
+            if isFloorTransitionRestart, let f = localizedFloorId, !f.isEmpty {
+                return f
             }
-            return userCurrentFloorLevel
+            return self.floorId.isEmpty ? nil : self.floorId
         }()
+        let depthsForUpload: [Data]? = capturedDepths.isEmpty ? nil : capturedDepths
 
-        NetworkManager.shared.localizeV3(buildingId: buildingId, images: capturedImages, floorLevel: floorHint) { [weak self] result in
+        NetworkManager.shared.localizeV3(
+            buildingId: buildingId,
+            images: capturedImages,
+            depths: depthsForUpload,
+            mapId: nil,
+            floorId: floorIdHint
+        ) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.delegate?.setScanningOverlay(visible: false)
@@ -676,32 +725,33 @@ class ARNavigationLogic {
         localizedFloorId = response.pose.floorId ?? self.floorId
         localizedFloorLevel = response.pose.floorLevel
         localizedScanId = response.mapId
+        localizedAreaId = response.areaId
 
         delegate?.showScanComplete()
 
+        // 층 전환 후 재측위든 초기 측위든 동일 흐름 — 새 위치 기준 pathfinding 호출하여
+        // 잔여 경로(같은 층 → 다음 층 전환점 / 또는 최종 목적지)를 서버에서 자동 재계산.
+        // AR chevron + 2D mini-map 은 결과를 받아 drawPathFromSteps / showFloorNavigationMap 로 갱신.
         if isFloorTransitionRestart {
-            // 층 전환 잔여 경로 재시작 — 추적 모델에서 미지원 (TODO)
-            delegate?.showRouteCalculating(false)
-            delegate?.updateStatus("경로를 따라 이동하세요.", color: .white)
-            pendingRemainingSteps = []
             isFloorTransitionRestart = false
-            delegate?.setLoading(false)
-        } else {
-            delegate?.showRouteCalculating(false)
-            delegate?.setLoading(false)
-            delegate?.updateStatus("\(destinationName) 방향으로 이동하세요.", color: .white)
-            delegate?.setHUDVisible(true)
-            startV3Pathfinding(scanId: response.mapId,
-                               startFloorLevel: response.pose.floorLevel,
-                               translation: translation)
-            // 주기 재측위 시작 — 초기 측위 성공 후 cadence 마다 V3 호출로 drift 보정.
-            // 거리 가드 초기값: 첫 cadence 진입 시 강제 발사되도록 캡처 시점 ARFrame pose 캐시.
-            if let mPose = self.matchedARPose {
-                let c = mPose.columns.3
-                lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
-            }
-            startPeriodicRelocalize()
+            pendingRemainingSteps = []
         }
+
+        delegate?.showRouteCalculating(false)
+        delegate?.setLoading(false)
+        delegate?.updateStatus("\(destinationName) 방향으로 이동하세요.", color: .white)
+        delegate?.setHUDVisible(true)
+        startV3Pathfinding(scanId: response.mapId,
+                           startFloorLevel: response.pose.floorLevel,
+                           translation: translation,
+                           areaId: response.areaId)
+        // 주기 재측위 일시 비활성화 — 사용자 요청.
+        // (재활성화 시 아래 블록 주석 해제)
+        // if let mPose = self.matchedARPose {
+        //     let c = mPose.columns.3
+        //     lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
+        // }
+        // startPeriodicRelocalize()
     }
 
     #if DEBUG
@@ -732,6 +782,7 @@ class ARNavigationLogic {
         localizedFloorId = response.pose.floorId ?? self.floorId
         localizedFloorLevel = response.pose.floorLevel
         localizedScanId = response.mapId
+        localizedAreaId = response.areaId
 
         // 3) 스캔 완료 UI
         delegate?.setScanningOverlay(visible: false)
@@ -758,10 +809,14 @@ class ARNavigationLogic {
         let resolvedFloorId = localizedFloorId ?? floorId
         guard !resolvedFloorId.isEmpty else { return }
 
+        // 캐시 키는 floorId#areaId 조합 — 같은 층이라도 area 가 다르면 다른 map 응답.
+        let resolvedAreaId = localizedAreaId ?? ""
+        let cacheKey = "\(resolvedFloorId)#\(resolvedAreaId)"
+
         let currentPose = currentFloorNavigationPose(frame: currentFrame)
 
         // 보정 모드 + map 캐시 hit: configure 우회 → updateCurrentPosition 만 호출해 보간 작동.
-        if isRelocalizeRefresh, floorMapCache[resolvedFloorId] != nil {
+        if isRelocalizeRefresh, floorMapCache[cacheKey] != nil {
             delegate?.updateFloorNavigationPosition(
                 currentPose?.position,
                 headingDegrees: currentPose?.headingDegrees
@@ -769,7 +824,7 @@ class ARNavigationLogic {
             return
         }
 
-        let cachedFloorLevel = floorMapCache[resolvedFloorId]?.floorLevel ?? localizedFloorLevel
+        let cachedFloorLevel = floorMapCache[cacheKey]?.floorLevel ?? localizedFloorLevel
         let destinationPoint: CGPoint? = {
             if let lvl = cachedFloorLevel,
                let pos = routeSteps.last(where: { $0.floorLevel == lvl })?.position,
@@ -780,7 +835,7 @@ class ARNavigationLogic {
             return CGPoint(x: x, y: y)
         }()
 
-        if let cached = floorMapCache[resolvedFloorId] {
+        if let cached = floorMapCache[cacheKey] {
             delegate?.showFloorNavigationMap(
                 cached,
                 routeSteps: routeSteps,
@@ -794,13 +849,13 @@ class ARNavigationLogic {
 
         floorMapRequestGeneration += 1
         let generation = floorMapRequestGeneration
-        NetworkManager.shared.fetchFloorMap(floorId: resolvedFloorId) { [weak self] result in
+        NetworkManager.shared.fetchFloorMap(floorId: resolvedFloorId, areaId: localizedAreaId) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self,
                       self.floorMapRequestGeneration == generation else { return }
                 switch result {
                 case .success(let map):
-                    self.floorMapCache[resolvedFloorId] = map
+                    self.floorMapCache[cacheKey] = map
                     let currentPose = self.currentFloorNavigationPose(frame: self.arSession?.currentFrame)
                     let destinationPoint: CGPoint? = {
                         guard let pos = routeSteps.last(where: { $0.floorLevel == map.floorLevel })?.position,
@@ -819,7 +874,7 @@ class ARNavigationLogic {
                         destinationWorldPoint: destinationPoint
                     )
                 case .failure(let error):
-                    print("[FloorMap] fetch failed floorId=\(resolvedFloorId): \(error)")
+                    print("[FloorMap] fetch failed floorId=\(resolvedFloorId) areaId=\(self.localizedAreaId ?? "nil"): \(error)")
                 }
             }
         }
@@ -892,7 +947,7 @@ class ARNavigationLogic {
 
     // NOTE(B4): floorTransitions[] 는 detectFloorTransition 이 step 변화로 자동 처리 — 별도 매핑 불요.
     // 키워드 미스매치 발견 시 detectFloorTransition 의 stairsKeywords/elevatorKeywords 보강.
-    private func startV3Pathfinding(scanId: String?, startFloorLevel: Int?, translation: simd_float3, retriedWithoutScanId: Bool = false) {
+    private func startV3Pathfinding(scanId: String?, startFloorLevel: Int?, translation: simd_float3, areaId: String? = nil, retriedWithoutScanId: Bool = false) {
         // 서버 PathfindingRequest: startScanId 우선, 없으면 startFloorLevel — 둘 다 nil 이면 422 START_NOT_SPECIFIED
         guard scanId != nil || startFloorLevel != nil else {
             delegate?.setLoading(false)
@@ -909,7 +964,9 @@ class ARNavigationLogic {
             startZ: Double(translation.z),
             destinationName: self.destinationName,
             preference: .shortest,
-            verticalPreference: .elevator
+            verticalPreference: .elevator,
+            startScanId: scanId,
+            startAreaId: areaId
         )
         let pathfindingTrial = trialNumber
         NetworkManager.shared.pathfinding(buildingId: buildingId, request: req) { [weak self] result in
@@ -938,6 +995,7 @@ class ARNavigationLogic {
                         self.startV3Pathfinding(scanId: nil,
                                                 startFloorLevel: startFloorLevel,
                                                 translation: translation,
+                                                areaId: areaId,
                                                 retriedWithoutScanId: true)
                         return
                     }
@@ -1112,6 +1170,7 @@ class ARNavigationLogic {
 
         capturedImages = []
         capturedARPoses = []
+        capturedDepths = []
         lastCaptureTimestamp = nil
 
         captureTimer = Timer.scheduledTimer(withTimeInterval: captureInterval, repeats: true) { [weak self] _ in
@@ -1177,6 +1236,7 @@ class ARNavigationLogic {
         periodicRelocalizeCaptureTimer = nil
         periodicCapturedImages = []
         periodicCapturedARPoses = []
+        periodicCapturedDepths = []
         isPeriodicRelocalizeInFlight = false
         lastPeriodicRelocalizeCameraPos = nil
         periodicCaptureStartTime = nil
@@ -1219,6 +1279,7 @@ class ARNavigationLogic {
         isPeriodicRelocalizeInFlight = true
         periodicCapturedImages = []
         periodicCapturedARPoses = []
+        periodicCapturedDepths = []
         periodicCaptureStartTime = Date().timeIntervalSince1970
 
         periodicRelocalizeCaptureTimer?.invalidate()
@@ -1239,6 +1300,7 @@ class ARNavigationLogic {
             periodicRelocalizeCaptureTimer = nil
             periodicCapturedImages.removeAll()
             periodicCapturedARPoses.removeAll()
+            periodicCapturedDepths.removeAll()
             periodicCaptureStartTime = nil
             isPeriodicRelocalizeInFlight = false
             return
@@ -1259,6 +1321,10 @@ class ARNavigationLogic {
 
         periodicCapturedImages.append(uiImage)
         periodicCapturedARPoses.append(frame.camera.transform)
+        if let depthPB = frame.sceneDepth?.depthMap,
+           let depthData = Self.depthMapData(from: depthPB) {
+            periodicCapturedDepths.append(depthData)
+        }
 
         if periodicCapturedImages.count >= periodicRelocalizeImageCount {
             periodicRelocalizeCaptureTimer?.invalidate()
@@ -1276,9 +1342,21 @@ class ARNavigationLogic {
 
         let images = periodicCapturedImages
         let poses = periodicCapturedARPoses
-        print("[PeriodicV3] V3 측위 호출 — images=\(images.count)")
+        let depths = periodicCapturedDepths
+        let depthsForUpload: [Data]? = depths.isEmpty ? nil : depths
+        let floorIdHint: String? = {
+            if let f = localizedFloorId, !f.isEmpty { return f }
+            return self.floorId.isEmpty ? nil : self.floorId
+        }()
+        print("[PeriodicV3] V3 측위 호출 — images=\(images.count) depths=\(depths.count)")
 
-        NetworkManager.shared.localizeV3(buildingId: buildingId, images: images) { [weak self] result in
+        NetworkManager.shared.localizeV3(
+            buildingId: buildingId,
+            images: images,
+            depths: depthsForUpload,
+            mapId: localizedScanId,
+            floorId: floorIdHint
+        ) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 switch result {
@@ -1390,6 +1468,7 @@ class ARNavigationLogic {
                 qz: Double(quat.imag.z), qw: Double(quat.real)
             )
             self.matchedARPose = newMatchedARPose
+            self.localizedAreaId = response.areaId ?? self.localizedAreaId
             print("[PeriodicV3] hard-set (이전 pose 없음)")
             self.dumpPeriodicRelocalizeDebug(
                 response: response,
@@ -1439,6 +1518,8 @@ class ARNavigationLogic {
         )
         // matchedARPose: blend X, hard-set 유지 (좌표 변환식 정합성)
         self.matchedARPose = newMatchedARPose
+        // areaId: 응답에 있으면 갱신, 없으면 prev 유지 (서버 응답 누락 방어)
+        self.localizedAreaId = response.areaId ?? self.localizedAreaId
 
         print(String(format: "[PeriodicV3] %@ — alpha=%.2f Δpose=%.2fm conf=%.2f matches=%d",
                      useHardSet ? "hard-set (큰 변화)" : "blended",
