@@ -1628,6 +1628,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var buildingId: String = ""
     var floorId: String = ""
     var destinationName: String = ""
+    var destinationId: String = ""
     var goal: Coordinate = Coordinate(x: 0, y: 0, z: 0)
     var userCurrentFloorLevel: Int? = nil
 
@@ -1715,6 +1716,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
             buildingId: buildingId,
             floorId: floorId,
             destinationName: destinationName,
+            destinationId: destinationId,
             goal: goal,
             userCurrentFloorLevel: userCurrentFloorLevel
         )

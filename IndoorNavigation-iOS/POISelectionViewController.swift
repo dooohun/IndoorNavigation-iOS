@@ -303,6 +303,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
             let arVC = ARNavigationViewController()
             arVC.buildingId = self.building.buildingId
             arVC.destinationName = poi.name ?? ""
+            arVC.destinationId = poi.poiId
             arVC.floorId = poi.floorId ?? ""
             let dp = poi.displayPoint
             arVC.goal = Coordinate(x: dp?.x ?? 0, y: dp?.y ?? 0, z: dp?.z ?? 0)

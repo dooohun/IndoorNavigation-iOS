@@ -88,17 +88,20 @@ class ARNavigationLogic {
     let buildingId: String
     let floorId: String
     let destinationName: String
+    let destinationId: String
     let goal: Coordinate
     let userCurrentFloorLevel: Int?
 
     init(buildingId: String,
          floorId: String,
          destinationName: String,
+         destinationId: String,
          goal: Coordinate,
          userCurrentFloorLevel: Int? = nil) {
         self.buildingId = buildingId
         self.floorId = floorId
         self.destinationName = destinationName
+        self.destinationId = destinationId
         self.goal = goal
         self.userCurrentFloorLevel = userCurrentFloorLevel
     }
@@ -962,7 +965,7 @@ class ARNavigationLogic {
             startX: Double(translation.x),
             startY: Double(translation.y),
             startZ: Double(translation.z),
-            destinationName: self.destinationName,
+            destinationId: self.destinationId,
             preference: .shortest,
             verticalPreference: .elevator,
             startScanId: scanId,
