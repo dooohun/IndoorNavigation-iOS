@@ -213,8 +213,8 @@ LightGlue 추적이 비활성된 상태에서 ARKit pose 누적 drift 를 보정
 | `periodicRelocalizeHardSetThresholdM` | 2.0 | prev↔new translation 차이가 이 값을 초과하면 blend 우회하고 hard-set (α=1.0). 좌회전 후 첫 측위 같은 큰 변화에서 blend 끌어당김으로 인한 wrong-jump 회피 |
 | `periodicRelocalizeMinTravelM` | 2.0 | 직전 발사 시점 카메라 위치 대비 XZ 이동 거리 가드. 정지 상태 V3 호출 회피 |
 | `periodicRelocalizeCaptureTimeoutSec` | 5.0 | 캡처 시작 후 N장 도달 timeout. limited tracking 무한 대기 → 데드락 방지 |
-| `confidence 임계` | **0.5** | 0.3 → 0.5 강화 (2026-05-17). wrong-match 사전 차단 |
-| `numMatches 임계` | **50** | 신규 (2026-05-17). 매칭 점 수 미달 응답은 wrong-match 위험으로 무시 |
+| `confidence 임계` | **0.3** | 0.5 → 0.3 원복 (2026-05-18). 0.5 임계가 정상 응답까지 reject — 완화 + reject dump 로 사후 추적 |
+| `numMatches 임계` | **30** | 50 → 30 완화 (2026-05-18). 같은 사유 — 과한 게이팅 완화 |
 
 ### 정책
 
@@ -225,6 +225,7 @@ LightGlue 추적이 비활성된 상태에서 ARKit pose 누적 drift 를 보정
 - **캡처 timeout 5s**: ARKit `trackingState == .limited` 가 0.4s tick 마다 영속되면 3장에 도달 못 해 in-flight 락이 영구 점유될 위험. 캡처 시작 후 5s 초과 시 abort 하고 `isPeriodicRelocalizeInFlight = false` 로 락 해제 → 다음 cadence 에서 재시도.
 - **큰 변화 hard-set** (2026-05-17): prev 와 new 의 translation 차이가 `periodicRelocalizeHardSetThresholdM = 2.0m` 를 초과하면 blend 우회하고 hard-set (α=1.0) 적용. 이유: 좌회전 후 첫 측위 같은 큰 변화는 측위 정확도가 높을 때 즉시 반영해야 wrong-jump 회피. 디버그 dump `periodic-20260517-115947` 분석 결과 blend α=0.3 끌어당김(delta=18.41m 인데 prev 70% 보존)이 사용자가 본 wrong-jump 의 직접 원인이었음.
 - **confidence/numMatches 가드 강화** (2026-05-17): 기존 `confidence ≥ 0.3` 만 가드 → `confidence ≥ 0.5` + `numMatches ≥ 50` 동시 가드. wrong-match 사전 차단 — 양쪽이 낮은 응답이 큰 변화 hard-set 과 결합되면 사용자가 멀리 점프하는 케이스를 응답 단계에서 거름.
+- **임계 완화 + reject dump** (2026-05-18): 위 강화 (0.5/50) 가 정상 응답까지 reject 시키는 의심 → `confidence ≥ 0.3` (원복) + `numMatches ≥ 30` (완화) 으로 조정. 동시에 reject 케이스도 디버그 dump (`dumpPeriodicRelocalizeReject`) 로 사유 추적 가능. dump 디렉토리는 `periodic-rejected-<timestamp>` 패턴, meta.json `kind = "periodic_relocalize_rejected"` + `reject_reason` 키로 식별.
 
 ### 미해결
 

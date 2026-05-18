@@ -103,7 +103,7 @@ enum LocalizeDebugLogger {
         let matchedImageIndex: Int?
         let prevLocalizedPose: SLAMPose?        // blend 전 (nil 이면 첫 호출 / hard-set 분기)
         let newServerPose: SLAMPose             // 응답 그대로
-        let blendedLocalizedPose: SLAMPose      // blend 결과 (실제 localizedPose 에 저장된 값)
+        let blendedLocalizedPose: SLAMPose?     // blend 결과 (실제 localizedPose 에 저장된 값). reject 시 nil.
         let prevMatchedARPose: simd_float4x4?   // blend 직전 matchedARPose
         let newMatchedARPose: simd_float4x4     // 응답 후 적용된 matchedARPose
         let confidence: Double
@@ -119,11 +119,14 @@ enum LocalizeDebugLogger {
         let transformedStepsByPrev: [(stepNumber: Int, ar: simd_float3)]
         let transformedStepsByNew: [(stepNumber: Int, ar: simd_float3)]
         let transformedStepsByBlended: [(stepNumber: Int, ar: simd_float3)]
+        /// nil 이면 정상 accepted, 그 외엔 가드 fail 사유 (e.g. "confidence_below_threshold")
+        let rejectReason: String?
     }
 
     @discardableResult
     static func dumpPeriodic(_ snapshot: PeriodicSnapshot) -> URL? {
-        guard let dir = makeSessionDir(prefix: "periodic-") else {
+        let dirPrefix = snapshot.rejectReason == nil ? "periodic-" : "periodic-rejected-"
+        guard let dir = makeSessionDir(prefix: dirPrefix) else {
             print("[PeriodicDebug] Documents 디렉터리 접근 실패")
             return nil
         }
@@ -138,7 +141,8 @@ enum LocalizeDebugLogger {
         // 2) meta.json
         let meta: [String: Any] = [
             "captured_at": isoTimestamp(),
-            "kind": "periodic_relocalize",
+            "kind": snapshot.rejectReason == nil ? "periodic_relocalize" : "periodic_relocalize_rejected",
+            "reject_reason": snapshot.rejectReason as Any,
             "matched_image_index": snapshot.matchedImageIndex as Any,
             "captured_image_count": snapshot.capturedImages.count,
             "confidence": snapshot.confidence,

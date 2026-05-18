@@ -202,9 +202,9 @@ class ARNavigationLogic {
     /// 좌회전 후 첫 측위 같은 케이스 — blend 끌어당김으로 인한 wrong-jump 회피.
     private let periodicRelocalizeHardSetThresholdM: Float = 2.0
     /// 주기 V3 재측위 confidence 가드. 이 값 미만 응답은 wrong-match 위험으로 무시.
-    private let periodicRelocalizeMinConfidence: Double = 0.5
+    private let periodicRelocalizeMinConfidence: Double = 0.3
     /// 주기 V3 재측위 매칭 점 수 가드. 이 값 미만이면 wrong-match 위험.
-    private let periodicRelocalizeMinMatches: Int = 50
+    private let periodicRelocalizeMinMatches: Int = 30
     /// 직전 주기 측위 발사 시점 카메라 위치(XZ) 와의 최소 이동 거리. 정지 상태 V3 호출 회피.
     private static let periodicRelocalizeMinTravelM: Float = 2.0
     /// 캡처 시작 후 N장 도달까지 허용 timeout. limited tracking 무한 대기 → in-flight 락 영구 점유 방지.
@@ -1296,7 +1296,8 @@ class ARNavigationLogic {
     /// - `localizedPose`: 큰 변화(>2m)는 hard-set, 그 외는 기존 ↔ 새 응답 사이 `blendAlpha=0.3` 으로 lerp (translation) + slerp (quaternion).
     /// - `matchedARPose`: hard-set — 캡처 시점 ARFrame pose 로 교체 (변환식 정합성).
     /// - 다른 층 응답이면 무시 (가드).
-    /// - confidence ≥ 0.5, numMatches ≥ 50 — 미달 시 wrong-match 위험으로 무시.
+    /// - confidence ≥ 0.3, numMatches ≥ 30 — 미달 시 wrong-match 위험으로 무시.
+    /// - reject 케이스도 디버그 dump (사유 식별용) — `dumpPeriodicRelocalizeReject` 호출.
     private func handlePeriodicRelocalizeSuccess(response: SLAMLocalizeResponse, capturedPoses: [simd_float4x4], capturedImages: [UIImage]) {
         defer { self.isPeriodicRelocalizeInFlight = false }
 
@@ -1306,11 +1307,27 @@ class ARNavigationLogic {
 
         guard response.confidence >= periodicRelocalizeMinConfidence else {
             print("[PeriodicV3] confidence \(response.confidence) < \(periodicRelocalizeMinConfidence) — 결과 무시")
+            self.dumpPeriodicRelocalizeReject(
+                response: response,
+                capturedImages: capturedImages,
+                capturedPoses: capturedPoses,
+                prevLocalizedPose: prevLocalizedPoseSnapshot,
+                prevMatchedARPose: prevMatchedARPoseSnapshot,
+                reason: "confidence_below_threshold"
+            )
             return
         }
 
         if let matches = response.numMatches, matches < periodicRelocalizeMinMatches {
             print("[PeriodicV3] numMatches \(matches) < \(periodicRelocalizeMinMatches) — 결과 무시")
+            self.dumpPeriodicRelocalizeReject(
+                response: response,
+                capturedImages: capturedImages,
+                capturedPoses: capturedPoses,
+                prevLocalizedPose: prevLocalizedPoseSnapshot,
+                prevMatchedARPose: prevMatchedARPoseSnapshot,
+                reason: "num_matches_below_threshold"
+            )
             return
         }
 
@@ -1318,17 +1335,41 @@ class ARNavigationLogic {
            let curFloor = self.localizedFloorLevel,
            respFloor != curFloor {
             print("[PeriodicV3] 다른 층 응답 (current=\(curFloor) vs response=\(respFloor)) — 결과 무시")
+            self.dumpPeriodicRelocalizeReject(
+                response: response,
+                capturedImages: capturedImages,
+                capturedPoses: capturedPoses,
+                prevLocalizedPose: prevLocalizedPoseSnapshot,
+                prevMatchedARPose: prevMatchedARPoseSnapshot,
+                reason: "different_floor"
+            )
             return
         }
 
         guard let translation = response.pose.translation,
               let quat = response.pose.rotationQuaternion else {
             print("[PeriodicV3] pose translation/quat 누락 — 결과 무시")
+            self.dumpPeriodicRelocalizeReject(
+                response: response,
+                capturedImages: capturedImages,
+                capturedPoses: capturedPoses,
+                prevLocalizedPose: prevLocalizedPoseSnapshot,
+                prevMatchedARPose: prevMatchedARPoseSnapshot,
+                reason: "pose_missing"
+            )
             return
         }
 
         guard !capturedPoses.isEmpty else {
             print("[PeriodicV3] capturedPoses 비어있음 — 결과 무시")
+            self.dumpPeriodicRelocalizeReject(
+                response: response,
+                capturedImages: capturedImages,
+                capturedPoses: capturedPoses,
+                prevLocalizedPose: prevLocalizedPoseSnapshot,
+                prevMatchedARPose: prevMatchedARPoseSnapshot,
+                reason: "captured_poses_empty"
+            )
             return
         }
         let arPoseIndex: Int = {
@@ -1500,11 +1541,14 @@ class ARNavigationLogic {
             return Float(angleRad * 180.0 / .pi)
         }()
 
-        let blendedSLAMPose = SLAMPose(
-            x: blendedPose?.x, y: blendedPose?.y, z: blendedPose?.z,
-            qx: blendedPose?.qx, qy: blendedPose?.qy, qz: blendedPose?.qz, qw: blendedPose?.qw,
-            floorLevel: response.pose.floorLevel, floorId: response.pose.floorId
-        )
+        let blendedSLAMPose: SLAMPose? = {
+            guard let b = blendedPose else { return nil }
+            return SLAMPose(
+                x: b.x, y: b.y, z: b.z,
+                qx: b.qx, qy: b.qy, qz: b.qz, qw: b.qw,
+                floorLevel: response.pose.floorLevel, floorId: response.pose.floorId
+            )
+        }()
         let prevSLAMPose: SLAMPose? = {
             guard let p = prevLocalizedPose else { return nil }
             return SLAMPose(
@@ -1540,7 +1584,99 @@ class ARNavigationLogic {
             steps: self.lastPathSteps,
             transformedStepsByPrev: transformedByPrev,
             transformedStepsByNew: transformedByNew,
-            transformedStepsByBlended: transformedByBlended
+            transformedStepsByBlended: transformedByBlended,
+            rejectReason: nil
+        )
+        LocalizeDebugLogger.dumpPeriodic(snapshot)
+    }
+
+    /// 가드 fail 케이스용 dump. reject 사유와 함께 dump → 응답 자체가 어떤 모양이었는지 사후 추적.
+    /// - blendedLocalizedPose / transformedStepsByBlended 는 nil/빈 배열 (적용 안 됨)
+    /// - translation 누락 케이스에서는 transformedStepsByNew 도 빈 배열로 폴백
+    /// - matchedARPose 는 prev 의 값 또는 capturedPoses 마지막 인덱스
+    private func dumpPeriodicRelocalizeReject(
+        response: SLAMLocalizeResponse,
+        capturedImages: [UIImage],
+        capturedPoses: [simd_float4x4],
+        prevLocalizedPose: Pose?,
+        prevMatchedARPose: simd_float4x4?,
+        reason: String
+    ) {
+        // arPoseIndex / newMatchedARPose: capturedPoses 있으면 응답 인덱스 또는 마지막, 없으면 identity placeholder
+        let arPoseIndex: Int = {
+            if let idx = response.matchedImageIndex, capturedPoses.indices.contains(idx) {
+                return idx
+            }
+            return max(0, capturedPoses.count - 1)
+        }()
+        let newMatchedARPose: simd_float4x4 = {
+            if capturedPoses.indices.contains(arPoseIndex) {
+                return capturedPoses[arPoseIndex]
+            }
+            return matrix_identity_float4x4
+        }()
+
+        // transformed step 계산 — reject 케이스에서는 어느 pose 도 신뢰 못함. 전부 빈 배열.
+        let transformedByPrev: [(stepNumber: Int, ar: simd_float3)] = []
+        let transformedByNew: [(stepNumber: Int, ar: simd_float3)] = []
+        let transformedByBlended: [(stepNumber: Int, ar: simd_float3)] = []
+
+        // Δtranslation / Δrotation — prev + new 가 모두 있을 때만 산출
+        let deltaT: Float = {
+            guard let p = prevLocalizedPose,
+                  let px = p.x, let py = p.y, let pz = p.z,
+                  let nt = response.pose.translation else { return 0 }
+            let pv = simd_float3(Float(px), Float(py), Float(pz))
+            return simd_length(nt - pv)
+        }()
+        let deltaRotDeg: Float = {
+            guard let p = prevLocalizedPose,
+                  let pqx = p.qx, let pqy = p.qy, let pqz = p.qz, let pqw = p.qw,
+                  let nq = response.pose.rotationQuaternion else { return 0 }
+            let pq = simd_quatf(ix: Float(pqx), iy: Float(pqy), iz: Float(pqz), r: Float(pqw))
+            let diff = pq.inverse * nq
+            let w = max(-1.0, min(1.0, diff.real))
+            let angleRad = 2.0 * acos(abs(w))
+            return Float(angleRad * 180.0 / .pi)
+        }()
+
+        let prevSLAMPose: SLAMPose? = {
+            guard let p = prevLocalizedPose else { return nil }
+            return SLAMPose(
+                x: p.x, y: p.y, z: p.z, qx: p.qx, qy: p.qy, qz: p.qz, qw: p.qw,
+                floorLevel: self.localizedFloorLevel, floorId: self.localizedFloorId
+            )
+        }()
+
+        let arCamPos: simd_float3? = {
+            guard capturedPoses.indices.contains(arPoseIndex) else { return nil }
+            let m = capturedPoses[arPoseIndex]
+            return simd_float3(m.columns.3.x, m.columns.3.y, m.columns.3.z)
+        }()
+
+        let snapshot = LocalizeDebugLogger.PeriodicSnapshot(
+            capturedImages: capturedImages,
+            capturedARPoses: capturedPoses,
+            matchedImageIndex: response.matchedImageIndex,
+            prevLocalizedPose: prevSLAMPose,
+            newServerPose: response.pose,
+            blendedLocalizedPose: nil,
+            prevMatchedARPose: prevMatchedARPose,
+            newMatchedARPose: newMatchedARPose,
+            confidence: response.confidence,
+            numMatches: response.numMatches,
+            mapId: response.mapId,
+            floorLevel: response.floorLevel,
+            floorId: response.floorId,
+            blendAlpha: 0.0,
+            deltaTranslationM: deltaT,
+            deltaRotationDeg: deltaRotDeg,
+            arCameraPosAtCapture: arCamPos,
+            steps: self.lastPathSteps,
+            transformedStepsByPrev: transformedByPrev,
+            transformedStepsByNew: transformedByNew,
+            transformedStepsByBlended: transformedByBlended,
+            rejectReason: reason
         )
         LocalizeDebugLogger.dumpPeriodic(snapshot)
     }
