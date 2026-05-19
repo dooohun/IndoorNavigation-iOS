@@ -214,7 +214,11 @@ final class ARMarkerController {
     private func resolveKind(rawKind: MarkerKind, distance: Float, markerBehind: Bool) -> MarkerKind {
         switch rawKind {
         case .destination:
-            // 거리 무관 표시. 통과해도 유지 (도착지 인식 유지).
+            // 10m 초과 시 hidden — 직진 lookahead 가 .arrive 로 점프해 멀리서도 핀이 떠 있는 UX 방지.
+            // 가까워지면 다시 .destination 으로 복귀 (resolveKind 가 매 tick 평가).
+            if distance > 10.0 {
+                return .hidden
+            }
             return .destination
 
         case .elevator, .stairs:
