@@ -751,13 +751,12 @@ class ARNavigationLogic {
         startV3Pathfinding(startFloorLevel: response.floorLevel,
                            translation: translation,
                            areaId: response.areaId)
-        // 주기 재측위 일시 비활성화 — 사용자 요청.
-        // (재활성화 시 아래 블록 주석 해제)
-        // if let mPose = self.matchedARPose {
-        //     let c = mPose.columns.3
-        //     lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
-        // }
-        // startPeriodicRelocalize()
+        // 주기 V3 재측위 활성화 — 10s cadence + 2m 이동 가드 + blend.
+        if let mPose = self.matchedARPose {
+            let c = mPose.columns.3
+            lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
+        }
+        startPeriodicRelocalize()
         startWallCenteringIfNeeded()
     }
 
@@ -1002,9 +1001,17 @@ class ARNavigationLogic {
 
     // NOTE(B4): floorTransitions[] 는 detectFloorTransition 이 step 변화로 자동 처리 — 별도 매핑 불요.
     // 키워드 미스매치 발견 시 detectFloorTransition 의 stairsKeywords/elevatorKeywords 보강.
-    private func startV3Pathfinding(startFloorLevel: Int?, translation: simd_float3, areaId: String? = nil) {
+    private func startV3Pathfinding(startFloorLevel: Int?,
+                                    translation: simd_float3,
+                                    areaId: String? = nil,
+                                    isRelocalizeRefresh: Bool = false) {
         // 서버 PathfindingRequest: startFloorLevel 필요 — nil 이면 422 START_NOT_SPECIFIED
         guard startFloorLevel != nil else {
+            // 주기 refresh 인 경우 UI 차단/에러 발화 안 함 — 다음 tick 까지 대기.
+            if isRelocalizeRefresh {
+                print("[V3-PATH] periodic refresh — startFloorLevel nil, skip")
+                return
+            }
             delegate?.setLoading(false)
             delegate?.showRouteCalculating(false)
             delegate?.showScanFailed(message: "측위 결과가 부족해요.\n다시 한번 스캔해 주세요.")
@@ -1035,9 +1042,13 @@ class ARNavigationLogic {
                     let steps = resp.toPathSteps()
                     self.lastStartSnapDistance = nil
                     print("[V3-PATH] steps=\(steps.count), totalDistance=\(resp.totalDistance)m, floorTransitions=\(resp.floorTransitions?.count ?? 0)")
-                    self.drawPathFromSteps(steps)
-                    self.refreshFloorNavigationMap(routeSteps: steps, currentFrame: self.arSession?.currentFrame)
-                    self.dumpLocalizeDebug(rawSteps: resp.steps)
+                    self.drawPathFromSteps(steps, isRelocalizeRefresh: isRelocalizeRefresh)
+                    self.refreshFloorNavigationMap(routeSteps: steps,
+                                                   currentFrame: self.arSession?.currentFrame,
+                                                   isRelocalizeRefresh: isRelocalizeRefresh)
+                    if !isRelocalizeRefresh {
+                        self.dumpLocalizeDebug(rawSteps: resp.steps)
+                    }
                     // steps[].position 좌표를 lookup multi-query 로 사용 → 경로 전체 영역 keyframe pack 받음.
                     self.fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
                 case .failure(let err):
@@ -1579,6 +1590,13 @@ class ARNavigationLogic {
         // 경로/마커 재렌더 (PnP 보정 패턴 따름) — 보정 모드: 진행 상태(currentStepIndex / turn arrow / marker) 유지
         self.drawPathFromSteps(self.lastPathSteps, isRelocalizeRefresh: true)
         self.refreshFloorNavigationMap(routeSteps: self.lastPathSteps, currentFrame: self.arSession?.currentFrame, isRelocalizeRefresh: true)
+
+        // 주기 pathfinding 재호출 — 보정된 pose 기준 새 경로 받아 lastPathSteps 갱신.
+        // isRelocalizeRefresh=true 라 navigation 상태(currentStepIndex / arrival timer / UI) 는 유지됨.
+        self.startV3Pathfinding(startFloorLevel: response.floorLevel,
+                                translation: blendedTranslation,
+                                areaId: response.areaId ?? self.localizedAreaId,
+                                isRelocalizeRefresh: true)
 
         // 디버그 dump — drawPath / refreshMap 호출 직후 (좌회전 후 wrong-match 진단용)
         self.dumpPeriodicRelocalizeDebug(
