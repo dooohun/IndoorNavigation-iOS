@@ -2449,11 +2449,11 @@ class ARNavigationLogic {
         case .elevator:
             kind = .elevator
         case .turnLeft, .turnSlightLeft:
-            // ≤10m 일 때만 화살표 마커 발신. PathChevron 시스템이 원거리 안내 담당이라 distance 강등 폐기.
-            if d > 10.0 { return [] }
+            // ≤7m 일 때만 화살표 마커 발신. PathChevron 시스템이 원거리 안내 담당이라 distance 강등 폐기.
+            if d > 7.0 { return [] }
             kind = .nextTurn(direction: .left)
         case .turnRight, .turnSlightRight:
-            if d > 10.0 { return [] }
+            if d > 7.0 { return [] }
             kind = .nextTurn(direction: .right)
         case .uturn:
             return []  // hidden
