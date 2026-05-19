@@ -24,9 +24,7 @@ enum MockLocalizeFixture {
             qx: 0.6062299427760970,
             qy: 0.3886970319194225,
             qz: 0.2201992447814049,
-            qw: 0.6579606116299217,
-            floorLevel: -3,
-            floorId: "f3171970-af3b-48a0-a7c0-de05144a3749"
+            qw: 0.6579606116299217
         ),
         confidence: 0.49016100178890876,
         numMatches: 274,

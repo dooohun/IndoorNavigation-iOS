@@ -50,9 +50,7 @@ enum LocalizeDebugLogger {
                 "qx": snapshot.localizePose.qx as Any,
                 "qy": snapshot.localizePose.qy as Any,
                 "qz": snapshot.localizePose.qz as Any,
-                "qw": snapshot.localizePose.qw as Any,
-                "floor_level": snapshot.localizePose.floorLevel as Any,
-                "floor_id": snapshot.localizePose.floorId as Any
+                "qw": snapshot.localizePose.qw as Any
             ],
             "confidence": snapshot.confidence,
             "num_matches": snapshot.numMatches as Any,
@@ -203,9 +201,7 @@ enum LocalizeDebugLogger {
             "qx": pose.qx as Any,
             "qy": pose.qy as Any,
             "qz": pose.qz as Any,
-            "qw": pose.qw as Any,
-            "floor_level": pose.floorLevel as Any,
-            "floor_id": pose.floorId as Any
+            "qw": pose.qw as Any
         ]
     }
 

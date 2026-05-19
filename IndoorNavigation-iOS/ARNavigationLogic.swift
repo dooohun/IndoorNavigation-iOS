@@ -730,8 +730,8 @@ class ARNavigationLogic {
             qx: Double(quat.imag.x), qy: Double(quat.imag.y), qz: Double(quat.imag.z), qw: Double(quat.real)
         )
         localizedPose = pose
-        localizedFloorId = response.pose.floorId ?? self.floorId
-        localizedFloorLevel = response.pose.floorLevel
+        localizedFloorId = response.floorId ?? self.floorId
+        localizedFloorLevel = response.floorLevel
         localizedAreaId = response.areaId
 
         delegate?.showScanComplete()
@@ -748,7 +748,7 @@ class ARNavigationLogic {
         delegate?.setLoading(false)
         delegate?.updateStatus("\(destinationName) 방향으로 이동하세요.", color: .white)
         delegate?.setHUDVisible(true)
-        startV3Pathfinding(startFloorLevel: response.pose.floorLevel,
+        startV3Pathfinding(startFloorLevel: response.floorLevel,
                            translation: translation,
                            areaId: response.areaId)
         // 주기 재측위 일시 비활성화 — 사용자 요청.
@@ -822,8 +822,8 @@ class ARNavigationLogic {
             x: Double(translation.x), y: Double(translation.y), z: Double(translation.z),
             qx: Double(quat.imag.x), qy: Double(quat.imag.y), qz: Double(quat.imag.z), qw: Double(quat.real)
         )
-        localizedFloorId = response.pose.floorId ?? self.floorId
-        localizedFloorLevel = response.pose.floorLevel
+        localizedFloorId = response.floorId ?? self.floorId
+        localizedFloorLevel = response.floorLevel
         localizedAreaId = response.areaId
 
         // 3) 스캔 완료 UI
@@ -840,7 +840,7 @@ class ARNavigationLogic {
         print("[MOCK] inject fixture: steps=\(steps.count), localizedFloorLevel=\(localizedFloorLevel ?? -999)")
         drawPathFromSteps(steps)
         refreshFloorNavigationMap(routeSteps: steps, currentFrame: arSession?.currentFrame)
-        fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: response.pose.floorLevel)
+        fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: response.floorLevel)
     }
     #endif
 
@@ -1460,7 +1460,7 @@ class ARNavigationLogic {
             return
         }
 
-        if let respFloor = response.pose.floorLevel,
+        if let respFloor = response.floorLevel,
            let curFloor = self.localizedFloorLevel,
            respFloor != curFloor {
             print("[PeriodicV3] 다른 층 응답 (current=\(curFloor) vs response=\(respFloor)) — 결과 무시")
@@ -1677,15 +1677,13 @@ class ARNavigationLogic {
             guard let b = blendedPose else { return nil }
             return SLAMPose(
                 x: b.x, y: b.y, z: b.z,
-                qx: b.qx, qy: b.qy, qz: b.qz, qw: b.qw,
-                floorLevel: response.pose.floorLevel, floorId: response.pose.floorId
+                qx: b.qx, qy: b.qy, qz: b.qz, qw: b.qw
             )
         }()
         let prevSLAMPose: SLAMPose? = {
             guard let p = prevLocalizedPose else { return nil }
             return SLAMPose(
-                x: p.x, y: p.y, z: p.z, qx: p.qx, qy: p.qy, qz: p.qz, qw: p.qw,
-                floorLevel: self.localizedFloorLevel, floorId: self.localizedFloorId
+                x: p.x, y: p.y, z: p.z, qx: p.qx, qy: p.qy, qz: p.qz, qw: p.qw
             )
         }()
 
@@ -1774,8 +1772,7 @@ class ARNavigationLogic {
         let prevSLAMPose: SLAMPose? = {
             guard let p = prevLocalizedPose else { return nil }
             return SLAMPose(
-                x: p.x, y: p.y, z: p.z, qx: p.qx, qy: p.qy, qz: p.qz, qw: p.qw,
-                floorLevel: self.localizedFloorLevel, floorId: self.localizedFloorId
+                x: p.x, y: p.y, z: p.z, qx: p.qx, qy: p.qy, qz: p.qz, qw: p.qw
             )
         }()
 

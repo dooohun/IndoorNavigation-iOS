@@ -440,8 +440,6 @@ struct SLAMPose: Codable {
     let qy: Double?
     let qz: Double?
     let qw: Double?
-    let floorLevel: Int?
-    let floorId: String?
 }
 
 extension SLAMPose {
