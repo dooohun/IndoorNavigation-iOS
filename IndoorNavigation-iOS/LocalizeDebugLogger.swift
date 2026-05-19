@@ -207,17 +207,28 @@ enum LocalizeDebugLogger {
 
     // MARK: - 헬퍼
 
+    /// 앱 세션당 1회만 기존 localize_debug 폴더를 통째 삭제 (요청: 매 실행마다 클린 상태로 시작).
+    private static var didClearLocalizeDebug = false
+
     private static func makeSessionDir(prefix: String = "") -> URL? {
         guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
             return nil
         }
+        let baseDir = docs.appendingPathComponent("localize_debug", isDirectory: true)
+
+        // 첫 호출 시 기존 데이터 일괄 제거 (없으면 try? 가 silently no-op).
+        if !didClearLocalizeDebug {
+            didClearLocalizeDebug = true
+            try? FileManager.default.removeItem(at: baseDir)
+        }
+
+        // 폴더명: KST(Asia/Seoul) 기준 "yyyy-MM-dd HH:mm:ss" 까지.
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        formatter.timeZone = TimeZone(identifier: "Asia/Seoul")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         let stamp = prefix + formatter.string(from: Date())
-        let dir = docs.appendingPathComponent("localize_debug", isDirectory: true)
-                       .appendingPathComponent(stamp, isDirectory: true)
+        let dir = baseDir.appendingPathComponent(stamp, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             return dir
