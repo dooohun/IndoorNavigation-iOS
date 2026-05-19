@@ -500,17 +500,8 @@ private final class FloorNavigationMapView: UIView {
             path.addLine(to: transform(point))
         }
 
-        context.saveGState()
-        if let currentWorldPoint {
-            let currentScreenPoint = transform(currentWorldPoint)
-            context.clip(to: CGRect(
-                x: bounds.minX,
-                y: bounds.minY,
-                width: bounds.width,
-                height: max(0, currentScreenPoint.y - bounds.minY + MapDesignTokens.Metric.routeClipOverlap)
-            ))
-        }
-
+        // heading-up 회전에서는 사용자 정면이 화면 위쪽이지만, 다른 방향을 바라봐도 전체 경로는 그대로 보여야 함.
+        // 과거 route-aligned 시절의 "사용자 뒤쪽(화면 아래) 잘라내기" clip 은 heading-up 과 호환 X — 제거.
         context.saveGState()
         context.setShadow(offset: CGSize(width: 0, height: 1), blur: 4, color: MapDesignTokens.Shadow.route.cgColor)
         MapDesignTokens.Accent.route.setStroke()
@@ -523,7 +514,6 @@ private final class FloorNavigationMapView: UIView {
         MapDesignTokens.Stroke.routeHalo.setStroke()
         path.lineWidth = 1.4
         path.stroke()
-        context.restoreGState()
     }
 
     private func drawMarkers(context: CGContext,
