@@ -234,7 +234,6 @@ struct PathfindingRequest: Codable {
     let destinationId: String
     let preference: RoutePreference?
     let verticalPreference: VerticalPreference?
-    let startScanId: String?
     let startAreaId: String?
 }
 
@@ -426,7 +425,6 @@ struct PoiDisplayPoint: Codable {
 struct SLAMLocalizeResponse: Codable {
     let pose: SLAMPose
     let confidence: Double
-    let mapId: String?
     let numMatches: Int?
     let matchedImageIndex: Int?
     let floorId: String?

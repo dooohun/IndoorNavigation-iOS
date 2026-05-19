@@ -119,7 +119,6 @@ class ARNavigationLogic {
     private var localizedPose: Pose?
     private var localizedFloorId: String?
     private var localizedFloorLevel: Int?
-    private var localizedScanId: String?  // V3 응답 mapId — B4 PathfindingRequest.startScanId 인계용
     private var localizedAreaId: String?  // V3 응답 areaId — pathfinding/map 호출에 동반.
     private var capturedImages: [UIImage] = []
     private var capturedARPoses: [simd_float4x4] = []
@@ -473,7 +472,6 @@ class ARNavigationLogic {
         allARPoints = []
         matchedARPose = nil
         localizedPose = nil
-        localizedScanId = nil
         localizedAreaId = nil
         destinationARPosition = nil
         lastStartSnapDistance = nil
@@ -734,7 +732,6 @@ class ARNavigationLogic {
         localizedPose = pose
         localizedFloorId = response.pose.floorId ?? self.floorId
         localizedFloorLevel = response.pose.floorLevel
-        localizedScanId = response.mapId
         localizedAreaId = response.areaId
 
         delegate?.showScanComplete()
@@ -751,8 +748,7 @@ class ARNavigationLogic {
         delegate?.setLoading(false)
         delegate?.updateStatus("\(destinationName) 방향으로 이동하세요.", color: .white)
         delegate?.setHUDVisible(true)
-        startV3Pathfinding(scanId: response.mapId,
-                           startFloorLevel: response.pose.floorLevel,
+        startV3Pathfinding(startFloorLevel: response.pose.floorLevel,
                            translation: translation,
                            areaId: response.areaId)
         // 주기 재측위 일시 비활성화 — 사용자 요청.
@@ -828,7 +824,6 @@ class ARNavigationLogic {
         )
         localizedFloorId = response.pose.floorId ?? self.floorId
         localizedFloorLevel = response.pose.floorLevel
-        localizedScanId = response.mapId
         localizedAreaId = response.areaId
 
         // 3) 스캔 완료 UI
@@ -1007,9 +1002,9 @@ class ARNavigationLogic {
 
     // NOTE(B4): floorTransitions[] 는 detectFloorTransition 이 step 변화로 자동 처리 — 별도 매핑 불요.
     // 키워드 미스매치 발견 시 detectFloorTransition 의 stairsKeywords/elevatorKeywords 보강.
-    private func startV3Pathfinding(scanId: String?, startFloorLevel: Int?, translation: simd_float3, areaId: String? = nil, retriedWithoutScanId: Bool = false) {
-        // 서버 PathfindingRequest: startScanId 우선, 없으면 startFloorLevel — 둘 다 nil 이면 422 START_NOT_SPECIFIED
-        guard scanId != nil || startFloorLevel != nil else {
+    private func startV3Pathfinding(startFloorLevel: Int?, translation: simd_float3, areaId: String? = nil) {
+        // 서버 PathfindingRequest: startFloorLevel 필요 — nil 이면 422 START_NOT_SPECIFIED
+        guard startFloorLevel != nil else {
             delegate?.setLoading(false)
             delegate?.showRouteCalculating(false)
             delegate?.showScanFailed(message: "측위 결과가 부족해요.\n다시 한번 스캔해 주세요.")
@@ -1025,7 +1020,6 @@ class ARNavigationLogic {
             destinationId: self.destinationId,
             preference: .shortest,
             verticalPreference: .elevator,
-            startScanId: scanId,
             startAreaId: areaId
         )
         let pathfindingTrial = trialNumber
@@ -1047,18 +1041,7 @@ class ARNavigationLogic {
                     // steps[].position 좌표를 lookup multi-query 로 사용 → 경로 전체 영역 keyframe pack 받음.
                     self.fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
                 case .failure(let err):
-                    // START_SCAN_NOT_FOUND / SNAP_DISTANCE_EXCEEDED 시 startScanId 빼고 좌표만으로 재시도
                     let msg = String(describing: err)
-                    if !retriedWithoutScanId, scanId != nil, startFloorLevel != nil,
-                       msg.contains("START_SCAN_NOT_FOUND") {
-                        print("[V3-PATH] startScanId inactive — retry without scanId")
-                        self.startV3Pathfinding(scanId: nil,
-                                                startFloorLevel: startFloorLevel,
-                                                translation: translation,
-                                                areaId: areaId,
-                                                retriedWithoutScanId: true)
-                        return
-                    }
                     // pathfinding 실패해도 사용자 좌표 1점으로 lookup fallback — 추적 측위는 가능하게
                     print("[V3-PATH] 실패 (\(msg)) — 사용자 좌표 단일 query 로 lookup fallback")
                     self.fetchBundleForPath(steps: [], fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
@@ -1420,7 +1403,7 @@ class ARNavigationLogic {
             buildingId: buildingId,
             images: images,
             depths: depthsForUpload,
-            mapId: localizedScanId,
+            mapId: nil,
             floorId: floorIdHint
         ) { [weak self] result in
             DispatchQueue.main.async {
@@ -1723,7 +1706,6 @@ class ARNavigationLogic {
             newMatchedARPose: newMatchedARPose,
             confidence: response.confidence,
             numMatches: response.numMatches,
-            mapId: response.mapId,
             floorLevel: response.floorLevel,
             floorId: response.floorId,
             blendAlpha: alpha,
@@ -1814,7 +1796,6 @@ class ARNavigationLogic {
             newMatchedARPose: newMatchedARPose,
             confidence: response.confidence,
             numMatches: response.numMatches,
-            mapId: response.mapId,
             floorLevel: response.floorLevel,
             floorId: response.floorId,
             blendAlpha: 0.0,
@@ -2206,7 +2187,6 @@ class ARNavigationLogic {
             matchedARPose: arPose,
             localizePose: response.pose,
             confidence: response.confidence,
-            mapId: response.mapId,
             numMatches: response.numMatches,
             floorId: response.floorId,
             floorLevel: response.floorLevel,

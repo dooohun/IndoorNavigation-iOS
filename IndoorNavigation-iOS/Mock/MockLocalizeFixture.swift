@@ -14,7 +14,7 @@ import simd
 enum MockLocalizeFixture {
 
     /// SLAMLocalizeResponse 리터럴. JSON 디코딩 경로 회피.
-    /// 필드 순서는 DTOs.swift 의 SLAMLocalizeResponse 선언 순서(pose, confidence, mapId,
+    /// 필드 순서는 DTOs.swift 의 SLAMLocalizeResponse 선언 순서(pose, confidence,
     /// numMatches, matchedImageIndex, floorId, floorLevel, areaId) 와 일치.
     static let response: SLAMLocalizeResponse = SLAMLocalizeResponse(
         pose: SLAMPose(
@@ -29,7 +29,6 @@ enum MockLocalizeFixture {
             floorId: "f3171970-af3b-48a0-a7c0-de05144a3749"
         ),
         confidence: 0.49016100178890876,
-        mapId: "e30f31ea-5bbe-42df-9031-fa371bb7a7b3",
         numMatches: 274,
         matchedImageIndex: 0,
         floorId: "f3171970-af3b-48a0-a7c0-de05144a3749",

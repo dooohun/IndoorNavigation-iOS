@@ -17,7 +17,6 @@ enum LocalizeDebugLogger {
         let matchedARPose: simd_float4x4
         let localizePose: SLAMPose
         let confidence: Double
-        let mapId: String?
         let numMatches: Int?
         let floorId: String?
         let floorLevel: Int?
@@ -56,7 +55,6 @@ enum LocalizeDebugLogger {
                 "floor_id": snapshot.localizePose.floorId as Any
             ],
             "confidence": snapshot.confidence,
-            "map_id": snapshot.mapId as Any,
             "num_matches": snapshot.numMatches as Any,
             "floor_id": snapshot.floorId as Any,
             "floor_level": snapshot.floorLevel as Any,
@@ -108,7 +106,6 @@ enum LocalizeDebugLogger {
         let newMatchedARPose: simd_float4x4     // 응답 후 적용된 matchedARPose
         let confidence: Double
         let numMatches: Int?
-        let mapId: String?
         let floorLevel: Int?
         let floorId: String?
         let blendAlpha: Float
@@ -147,7 +144,6 @@ enum LocalizeDebugLogger {
             "captured_image_count": snapshot.capturedImages.count,
             "confidence": snapshot.confidence,
             "num_matches": snapshot.numMatches as Any,
-            "map_id": snapshot.mapId as Any,
             "floor_id": snapshot.floorId as Any,
             "floor_level": snapshot.floorLevel as Any,
             "blend_alpha": snapshot.blendAlpha,
