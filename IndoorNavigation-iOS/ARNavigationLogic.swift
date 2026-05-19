@@ -212,7 +212,7 @@ class ARNavigationLogic {
     /// `startPeriodicRelocalize` 가 초기 측위 성공 후 타이머 시작 → cadence 마다 5장 캡처 → V3 호출.
     /// 응답 pose 는 기존 `localizedPose` 와 `blendAlpha=0.3` 으로 SLERP/lerp blend (서서히 보정).
     /// `matchedARPose` 는 좌표 변환식 정합성 위해 hard-set (blend X) — 캡처 시점의 AR frame 으로 교체.
-    private let periodicRelocalizeIntervalSec: TimeInterval = 10.0
+    private let periodicRelocalizeIntervalSec: TimeInterval = 2.0
     private let periodicRelocalizeImageCount: Int = 3
     private let periodicRelocalizeCaptureInterval: TimeInterval = 0.4
     private let periodicRelocalizeBlendAlpha: Float = 0.3
@@ -220,9 +220,7 @@ class ARNavigationLogic {
     /// 좌회전 후 첫 측위 같은 케이스 — blend 끌어당김으로 인한 wrong-jump 회피.
     private let periodicRelocalizeHardSetThresholdM: Float = 2.0
     /// 주기 V3 재측위 confidence 가드. 이 값 미만 응답은 wrong-match 위험으로 무시.
-    private let periodicRelocalizeMinConfidence: Double = 0.3
-    /// 주기 V3 재측위 매칭 점 수 가드. 이 값 미만이면 wrong-match 위험.
-    private let periodicRelocalizeMinMatches: Int = 30
+    private let periodicRelocalizeMinConfidence: Double = 0.5
     /// 직전 주기 측위 발사 시점 카메라 위치(XZ) 와의 최소 이동 거리. 정지 상태 V3 호출 회피.
     private static let periodicRelocalizeMinTravelM: Float = 2.0
     /// 캡처 시작 후 N장 도달까지 허용 timeout. limited tracking 무한 대기 → in-flight 락 영구 점유 방지.
@@ -1467,19 +1465,6 @@ class ARNavigationLogic {
                 prevLocalizedPose: prevLocalizedPoseSnapshot,
                 prevMatchedARPose: prevMatchedARPoseSnapshot,
                 reason: "confidence_below_threshold"
-            )
-            return
-        }
-
-        if let matches = response.numMatches, matches < periodicRelocalizeMinMatches {
-            print("[PeriodicV3] numMatches \(matches) < \(periodicRelocalizeMinMatches) — 결과 무시")
-            self.dumpPeriodicRelocalizeReject(
-                response: response,
-                capturedImages: capturedImages,
-                capturedPoses: capturedPoses,
-                prevLocalizedPose: prevLocalizedPoseSnapshot,
-                prevMatchedARPose: prevMatchedARPoseSnapshot,
-                reason: "num_matches_below_threshold"
             )
             return
         }
