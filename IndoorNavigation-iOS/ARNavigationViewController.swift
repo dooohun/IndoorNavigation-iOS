@@ -1008,13 +1008,18 @@ private final class FloorNavigationMapView: UIView {
     }
 
     private func resolvedMapBearingDegrees() -> Float? {
+        // Heading-up: 사용자 정면(이동 방향)이 항상 화면 위쪽이 되도록 카메라 heading 우선.
+        // heading 미가용 시에만 route → polygon 축으로 폴백.
+        if let heading = currentHeadingDegrees {
+            return heading
+        }
         guard let targetWorldPoint else { return nil }
         let routeBearing = currentRouteBearingDegrees(at: targetWorldPoint)
         if let polygonBearing = currentNavigationPolygonBearing(at: targetWorldPoint,
-                                                                referenceDegrees: routeBearing ?? currentHeadingDegrees) {
+                                                                referenceDegrees: routeBearing) {
             return polygonBearing
         }
-        return routeBearing ?? currentHeadingDegrees
+        return routeBearing
     }
 
     private func currentRouteBearingDegrees(at currentWorldPoint: CGPoint) -> Float? {
