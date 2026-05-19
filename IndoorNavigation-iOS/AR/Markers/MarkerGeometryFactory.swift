@@ -170,9 +170,10 @@ enum MarkerGeometryFactory {
         return cg
     }
 
-    // MARK: - 한글 라벨 텍스처 (Elevator/Stairs 중앙)
+    // MARK: - 아이콘 텍스처 (Elevator/Stairs 중앙)
 
-    /// "엘리베이터" — 한글 5자, initial fontSize 100pt. 폭 78% 초과 시 4pt 단위 축소 fitter (사양 §2-4).
+    /// 흰색 엘리베이터 SVG (Assets.xcassets/Icons/arElevator) → 512² 캔버스 중앙 50% 비율로 라스터화.
+    /// 다이아몬드 정면 데칼용. 흰색 white-on-blue 컨셉.
     static func makeElevatorTextTexture() -> CGImage? {
         textureCacheLock.lock()
         if let cached = cachedElevatorTexture {
@@ -181,7 +182,7 @@ enum MarkerGeometryFactory {
         }
         textureCacheLock.unlock()
 
-        let cg = makeKoreanLabelTexture(text: "엘리베이터", initialFontSize: 100)
+        let cg = makeIconTexture(imageName: "arElevator", sizeFrac: 0.50)
         if let cg = cg {
             textureCacheLock.lock()
             cachedElevatorTexture = cg
@@ -190,7 +191,7 @@ enum MarkerGeometryFactory {
         return cg
     }
 
-    /// "계단" — 한글 2자, initial fontSize 175pt (DistanceMarker "21m" 스케일 ≈ 34%, 사양 §2-4).
+    /// 흰색 계단 SVG (Assets.xcassets/Icons/arStairs) → 512² 캔버스 중앙 58% 비율로 라스터화.
     static func makeStairsTextTexture() -> CGImage? {
         textureCacheLock.lock()
         if let cached = cachedStairsTexture {
@@ -199,7 +200,7 @@ enum MarkerGeometryFactory {
         }
         textureCacheLock.unlock()
 
-        let cg = makeKoreanLabelTexture(text: "계단", initialFontSize: 175)
+        let cg = makeIconTexture(imageName: "arStairs", sizeFrac: 0.58)
         if let cg = cg {
             textureCacheLock.lock()
             cachedStairsTexture = cg
@@ -208,34 +209,16 @@ enum MarkerGeometryFactory {
         return cg
     }
 
-    /// 한글 라벨 공통 렌더러. 512² 캔버스, AppleSDGothicNeo-Bold → systemFont(.heavy) 폴백.
-    /// 너비 > 캔버스 폭 78% (= 399.4pt) 면 fontSize 를 4pt 단위로 축소 (사양 §2-4 fitter, 하한 24pt).
-    /// 그림자: y-offset 5, blur 14, rgba(0,30,90,0.35) — Next 텍스처 패턴.
-    private static func makeKoreanLabelTexture(text: String, initialFontSize: CGFloat) -> CGImage? {
-        let size = CGSize(width: 512, height: 512)
-        let maxWidth: CGFloat = size.width * 0.78  // 399.4
-
-        // 폰트 선택 헬퍼: AppleSDGothicNeo-Bold 우선, nil 시 systemFont(.heavy) 폴백.
-        func font(for pt: CGFloat) -> UIFont {
-            if let f = UIFont(name: "AppleSDGothicNeo-Bold", size: pt) {
-                return f
-            }
-            return UIFont.systemFont(ofSize: pt, weight: .heavy)
+    /// 공통 아이콘 라스터라이저. Assets.xcassets 의 SVG/PNG 를 UIImage 로 로드한 뒤
+    /// 512² 캔버스 중앙에 `sizeFrac` 비율로 그리고, white-on-transparent 컨셉에 맞는 그림자(rgba(0,30,90,0.35))를 입힘.
+    /// 비율은 short side 기준 — 비정사각 SVG 도 aspect 보존.
+    private static func makeIconTexture(imageName: String, sizeFrac: CGFloat) -> CGImage? {
+        guard let icon = UIImage(named: imageName) else {
+            print("[MarkerGeometry] icon \(imageName) load failed — fallback nil texture")
+            return nil
         }
-
-        // fitter: 측정 → 폭 초과 시 4pt 단위 축소 (하한 24pt)
-        var fontSize: CGFloat = initialFontSize
-        var fittedFont = font(for: fontSize)
-        let nsText = text as NSString
-        while fontSize > 24 {
-            let attrs: [NSAttributedString.Key: Any] = [.font: fittedFont]
-            let w = nsText.size(withAttributes: attrs).width
-            if w <= maxWidth { break }
-            fontSize -= 4
-            fittedFont = font(for: fontSize)
-        }
-
-        let renderer = UIGraphicsImageRenderer(size: size)
+        let canvasSize = CGSize(width: 512, height: 512)
+        let renderer = UIGraphicsImageRenderer(size: canvasSize)
         let img = renderer.image { ctx in
             let cg = ctx.cgContext
             cg.setShadow(
@@ -243,16 +226,22 @@ enum MarkerGeometryFactory {
                 blur: 14,
                 color: UIColor(red: 0, green: 30/255, blue: 90/255, alpha: 0.35).cgColor
             )
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: fittedFont,
-                .foregroundColor: UIColor.white
-            ]
-            let textSize = nsText.size(withAttributes: attrs)
-            let drawAt = CGPoint(
-                x: (size.width - textSize.width) / 2.0,
-                y: (size.height - textSize.height) / 2.0
+            // Aspect 보존 — 가로/세로 중 더 긴 쪽이 sizeFrac * 캔버스 크기 가 되도록 스케일.
+            let iconSize = icon.size
+            let aspect = iconSize.width / max(iconSize.height, 0.001)
+            let drawSize: CGSize
+            if aspect >= 1 {
+                let w = canvasSize.width * sizeFrac
+                drawSize = CGSize(width: w, height: w / aspect)
+            } else {
+                let h = canvasSize.height * sizeFrac
+                drawSize = CGSize(width: h * aspect, height: h)
+            }
+            let origin = CGPoint(
+                x: (canvasSize.width - drawSize.width) / 2,
+                y: (canvasSize.height - drawSize.height) / 2
             )
-            nsText.draw(at: drawAt, withAttributes: attrs)
+            icon.draw(in: CGRect(origin: origin, size: drawSize))
         }
         return img.cgImage
     }
