@@ -1,0 +1,23 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- 앱 primary blue 배경 (#0066FF — MapDesignTokens.Accent.route 와 동일) -->
+  <rect width="1024" height="1024" fill="#0066FF"/>
+
+  <!-- 단순화한 floor plan L-shape outline (실내 복도 상징) -->
+  <path d="M 220 220 L 720 220 L 720 460 L 580 460 L 580 720 L 220 720 Z"
+        fill="none"
+        stroke="#FFFFFF"
+        stroke-width="44"
+        stroke-linejoin="round"
+        stroke-linecap="round"/>
+
+  <!-- 네비게이션 화살표 (Apple Maps 스타일 puck) — L 꺾이는 지점 안쪽에 배치 -->
+  <g transform="translate(440, 500)">
+    <path d="M 0 -110 L 78 80 L 0 40 L -78 80 Z"
+          fill="#FFFFFF"
+          stroke="none"/>
+  </g>
+
+  <!-- 도착 지점 핀 (작은 흰 동그라미) — L 의 끝쪽에 배치 -->
+  <circle cx="660" cy="800" r="32" fill="#FFFFFF"/>
+  <circle cx="660" cy="800" r="14" fill="#0066FF"/>
+</svg>
