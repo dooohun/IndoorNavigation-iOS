@@ -1151,7 +1151,8 @@ class ARNavigationLogic {
         let nxtInstr = nxt.instruction ?? ""
         let combined = curInstr + " " + nxtInstr
 
-        let stairsKeywords = ["TAKE_STAIRS", "STAIRS", "계단"]
+        // "ST-A1", "ST-B2" 등 서버 계단 노드 식별자 prefix 매칭. "Start" 와 충돌 회피 위해 hyphen 포함.
+        let stairsKeywords = ["TAKE_STAIRS", "STAIRS", "계단", "ST-"]
         let elevatorKeywords = ["TAKE_ELEVATOR", "ELEVATOR", "엘리베이터"]
 
         let hasStairs = stairsKeywords.contains { combined.contains($0) }
