@@ -38,10 +38,18 @@ struct TurnArrowViewModel {
 
 // MARK: - Delegate
 
+/// 캡처/측위 진행 단계. nil 전달 시 진행 표시 hide.
+/// - capturing: 사진 캡처 중 (0 → 35% 자동 애니메이션)
+/// - localizing: 서버 V3 측위 요청 in-flight (35 → 95% 자동 애니메이션, 응답 시 100% snap)
+enum CaptureProgressPhase {
+    case capturing
+    case localizing
+}
+
 protocol ARNavigationLogicDelegate: AnyObject {
     func updateStatus(_ message: String, color: UIColor)
     func setLoading(_ loading: Bool)
-    func setCaptureProgress(text: String, isHidden: Bool)
+    func setCaptureProgress(phase: CaptureProgressPhase?)
     func setScanningOverlay(visible: Bool)
     func showScanComplete()
     func showScanFailed(message: String)
@@ -525,8 +533,8 @@ class ARNavigationLogic {
         delegate?.setLocateButtonVisible(false)
         delegate?.setLoading(true)
         delegate?.setScanningOverlay(visible: true)
-        delegate?.updateStatus("천천히 주변을 둘러보세요\n사진을 \(maxImages)장 촬영합니다.", color: .white)
-        delegate?.setCaptureProgress(text: "", isHidden: false)
+        delegate?.updateStatus("천천히 주변을 둘러보세요", color: .white)
+        delegate?.setCaptureProgress(phase: .capturing)
 
         captureTimer = Timer.scheduledTimer(withTimeInterval: captureInterval, repeats: true) { [weak self] _ in
             self?.captureOneFrame()
@@ -599,8 +607,8 @@ class ARNavigationLogic {
         lastCaptureTimestamp = frame.timestamp
 
         let count = capturedImages.count
-        delegate?.setCaptureProgress(text: "\(count)/\(maxImages)", isHidden: false)
-        delegate?.updateStatus("천천히 주변을 둘러보세요\n사진을 \(maxImages)장 촬영합니다.", color: .white)
+        // count 기반 progress 미사용 — VC 가 시간 기반 multi-phase 자동 애니메이션 담당.
+        delegate?.updateStatus("천천히 주변을 둘러보세요", color: .white)
 
         if count >= maxImages {
             stopCapture()
@@ -639,18 +647,22 @@ class ARNavigationLogic {
     func stopCapture() {
         captureTimer?.invalidate()
         captureTimer = nil
-        delegate?.setCaptureProgress(text: "", isHidden: true)
+        delegate?.setCaptureProgress(phase: nil)
     }
 
     /// V3 측위 흐름 — multipart 업로드 + SLAMLocalizeResponse 핸들링.
     private func sendToServer() {
         guard !capturedImages.isEmpty else {
             delegate?.setLoading(false)
+            delegate?.setCaptureProgress(phase: nil)
             delegate?.setScanningOverlay(visible: false)
             delegate?.showScanFailed(message: "캡처된 이미지가 없어요.\n다시 시도해 주세요.")
             delegate?.setLocateButtonVisible(true)
             return
         }
+
+        // 캡처 완료 → 서버 측위 phase 전환 (VC 가 progress bar 35→95% 자동 애니메이션)
+        delegate?.setCaptureProgress(phase: .localizing)
 
         // 신서버 floorId 는 uuid 문자열. 층 전환 복귀 시 직전 측위 결과 floorId 우선,
         // 그 외 케이스에서는 본 화면 진입 시 받은 floorId 사용. 둘 다 비어있으면 nil → 서버 ANY 매칭.
@@ -671,6 +683,7 @@ class ARNavigationLogic {
         ) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                self.delegate?.setCaptureProgress(phase: nil)
                 self.delegate?.setScanningOverlay(visible: false)
                 switch result {
                 case .success(let response):
@@ -1222,8 +1235,8 @@ class ARNavigationLogic {
         delegate?.setLocateButtonVisible(false)
         delegate?.setLoading(true)
         delegate?.setScanningOverlay(visible: true)
-        delegate?.updateStatus("천천히 주변을 둘러보세요\n사진을 \(maxImages)장 촬영합니다.", color: .white)
-        delegate?.setCaptureProgress(text: "", isHidden: false)
+        delegate?.updateStatus("천천히 주변을 둘러보세요", color: .white)
+        delegate?.setCaptureProgress(phase: .capturing)
 
         capturedImages = []
         capturedARPoses = []

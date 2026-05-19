@@ -1631,7 +1631,8 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var locateButton: UIButton!
     var closeButton: UIButton!
     var scanningOverlayView: UIView!
-    var captureCountLabel: UILabel!
+    var captureSpinner: UIActivityIndicatorView!
+    var captureStatusLabel: UILabel!
     var scanCompleteBadge: UIView!
     var scanFailedView: UIView!
     var scanFailedLabel: UILabel!
@@ -1782,7 +1783,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         sceneView = ARSCNView(frame: self.view.bounds)
         self.view.addSubview(sceneView)
         sceneView.delegate = self
-        sceneView.showsStatistics = true
+        sceneView.showsStatistics = false
         sceneView.autoenablesDefaultLighting = true
     }
 
@@ -2015,28 +2016,35 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         titleLabel.textAlignment = .center
         titleLabel.frame = CGRect(x: 20, y: bounds.midY - 20, width: bounds.width - 40, height: 30)
 
-        // 보조 안내 문구
+        // 보조 안내 문구 (정적)
         let subtitleLabel = UILabel()
-        subtitleLabel.text = "위치를 확인하고 있어요.\n스마트폰을 들고 천천히 움직여 보세요."
+        subtitleLabel.text = "스마트폰을 들고 천천히 움직여 보세요."
         subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.7)
         subtitleLabel.font = .systemFont(ofSize: 14, weight: .regular)
         subtitleLabel.textAlignment = .center
         subtitleLabel.numberOfLines = 0
-        subtitleLabel.frame = CGRect(x: 20, y: bounds.midY + 16, width: bounds.width - 40, height: 50)
+        subtitleLabel.frame = CGRect(x: 20, y: bounds.midY + 16, width: bounds.width - 40, height: 40)
 
-        // 캡처 진행 카운트 (subtitle 아래 16pt)
-        captureCountLabel = UILabel()
-        captureCountLabel.text = ""
-        captureCountLabel.textColor = UIColor.white.withAlphaComponent(0.9)
-        captureCountLabel.font = .systemFont(ofSize: 14, weight: .medium)
-        captureCountLabel.textAlignment = .center
-        captureCountLabel.isHidden = true
-        captureCountLabel.frame = CGRect(x: 20, y: bounds.midY + 82, width: bounds.width - 40, height: 20)
+        // 무한 회전 spinner — phase 가 nil 이 아닐 때 동작.
+        captureSpinner = UIActivityIndicatorView(style: .large)
+        captureSpinner.color = .white
+        captureSpinner.hidesWhenStopped = true
+        captureSpinner.frame = CGRect(x: bounds.midX - 18, y: bounds.midY + 70, width: 36, height: 36)
+
+        // phase 상태 라벨 — .localizing 시 "측위 중..." 표시. .capturing 시엔 빈 텍스트(스피너만).
+        captureStatusLabel = UILabel()
+        captureStatusLabel.text = ""
+        captureStatusLabel.textColor = UIColor.white.withAlphaComponent(0.9)
+        captureStatusLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        captureStatusLabel.textAlignment = .center
+        captureStatusLabel.isHidden = true
+        captureStatusLabel.frame = CGRect(x: 20, y: bounds.midY + 114, width: bounds.width - 40, height: 20)
 
         scanningOverlayView.addSubview(iconView)
         scanningOverlayView.addSubview(titleLabel)
         scanningOverlayView.addSubview(subtitleLabel)
-        scanningOverlayView.addSubview(captureCountLabel)
+        scanningOverlayView.addSubview(captureSpinner)
+        scanningOverlayView.addSubview(captureStatusLabel)
         self.view.addSubview(scanningOverlayView)
     }
 
@@ -2685,14 +2693,22 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
         locateButton.alpha = loading ? 0.5 : 1.0
     }
 
-    func setCaptureProgress(text: String, isHidden: Bool) {
-        if isHidden || text.isEmpty {
-            captureCountLabel.isHidden = true
-            captureCountLabel.text = ""
-        } else {
-            captureCountLabel.isHidden = false
-            captureCountLabel.text = "\(text) 촬영 중"
+    func setCaptureProgress(phase: CaptureProgressPhase?) {
+        guard let phase else {
+            captureSpinner.stopAnimating()
+            captureStatusLabel.isHidden = true
+            captureStatusLabel.text = ""
+            return
         }
+        let statusText: String = {
+            switch phase {
+            case .capturing: return ""        // 카메라 촬영 언급 X — spinner 만
+            case .localizing: return "측위 중..."
+            }
+        }()
+        captureSpinner.startAnimating()
+        captureStatusLabel.isHidden = statusText.isEmpty
+        captureStatusLabel.text = statusText
     }
 
     func setScanningOverlay(visible: Bool) {
