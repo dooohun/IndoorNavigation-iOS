@@ -1671,8 +1671,13 @@ class ARNavigationLogic {
             qz: Double(blendedQuat.imag.z),
             qw: Double(blendedQuat.real)
         )
-        // matchedARPose: blend X, hard-set 유지 (좌표 변환식 정합성)
-        self.matchedARPose = newMatchedARPose
+        // matchedARPose 도 같은 α 로 blend — localizedPose 만 blend 하고 matchedARPose 만 hard-set 하면
+        // CoordinateTransformer 가 가정하는 "같은 순간의 페어" 가 깨져 chevron/marker 가 일관 오프셋 만큼
+        // 어긋남. 두 값을 동일 α 로 lerp/slerp 해 변환식 consistency 유지.
+        // useHardSet (Δpose > threshold) 케이스는 appliedAlpha=1.0 → 자동으로 new 값 그대로.
+        self.matchedARPose = Self.blendMatrix(prev: prevMatchedARPoseSnapshot ?? newMatchedARPose,
+                                              new: newMatchedARPose,
+                                              alpha: appliedAlpha)
         // areaId: 응답에 있으면 갱신, 없으면 prev 유지 (서버 응답 누락 방어)
         self.localizedAreaId = response.areaId ?? self.localizedAreaId
 
@@ -2353,6 +2358,26 @@ class ARNavigationLogic {
     /// RTAB-Map 컨벤션: server.z 는 수직, 수평 평면은 server.x, server.y. 1m 미만 segment 는 noise → straight 로 분류 (도어웨이/클러스터 필터).
     /// i 부터 양방향 walk 으로 ≥1m 떨어진 의미 있는 step 의 position 을 inbound/outbound 로 사용.
     /// 서버가 코너에 노드 클러스터 박는 케이스 대응. cross > 0 → LEFT 가정.
+    /// 두 4x4 변환행렬을 `alpha` 비율로 보간. translation 은 lerp, rotation 은 slerp 후 재조립.
+    /// 주기 V3 재측위에서 localizedPose 와 matchedARPose 를 같은 α 로 blend 해 변환식 정합성 유지.
+    /// alpha=0 → prev 그대로, alpha=1 → new 그대로, 그 사이는 중간값.
+    private static func blendMatrix(prev: simd_float4x4, new: simd_float4x4, alpha: Float) -> simd_float4x4 {
+        let a = max(0, min(1, alpha))
+        // Translation: 4번째 열의 (x, y, z)
+        let prevTrans = simd_float3(prev.columns.3.x, prev.columns.3.y, prev.columns.3.z)
+        let newTrans = simd_float3(new.columns.3.x, new.columns.3.y, new.columns.3.z)
+        let blendedTrans = simd_mix(prevTrans, newTrans, simd_float3(repeating: a))
+
+        // Rotation: 3x3 부분을 쿼터니언으로 추출 → slerp → matrix 재구성
+        let prevQuat = simd_quatf(prev)
+        let newQuat = simd_quatf(new)
+        let blendedQuat = simd_slerp(prevQuat, newQuat, a)
+
+        var result = simd_float4x4(blendedQuat)
+        result.columns.3 = SIMD4<Float>(blendedTrans.x, blendedTrans.y, blendedTrans.z, 1)
+        return result
+    }
+
     private static func navigationActionKind(steps: [PathStep], at i: Int) -> NavigationActionKind {
         let lastIdx = steps.count - 1
         guard i >= 0, i <= lastIdx else { return .unknown }
