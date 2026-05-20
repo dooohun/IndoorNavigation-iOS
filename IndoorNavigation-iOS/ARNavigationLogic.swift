@@ -1051,7 +1051,11 @@ class ARNavigationLogic {
             delegate?.setLocateButtonVisible(true)
             return
         }
-        // 서버 spec: preference 는 항상 SHORTEST, vertical 분기는 verticalPreference 로만 (ELEVATOR/STAIR).
+        // 서버 spec:
+        //   preference: SHORTEST / ELEVATOR_FIRST / STAIRCASE_FIRST
+        //   verticalPreference: ELEVATOR / STAIRS
+        // 사용자 토글에 맞춰 preference 도 _FIRST 변형으로 강제 — 서버가 두 값 일관되게 받음.
+        let routePreference: RoutePreference = (self.verticalPreference == .stairs) ? .staircaseFirst : .elevatorFirst
         let req = PathfindingRequest(
             startFloorLevel: startFloorLevel,
             startX: Double(translation.x),
@@ -1059,7 +1063,7 @@ class ARNavigationLogic {
             startZ: Double(translation.z),
             destinationId: self.destinationId,
             destinationName: self.destinationName,
-            preference: .shortest,
+            preference: routePreference,
             verticalPreference: self.verticalPreference,
             startAreaId: areaId
         )
