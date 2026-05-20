@@ -231,7 +231,7 @@ fileprivate enum GeoJSONAnyValue: Codable {
 
 enum VerticalPreference: String, Codable {
     case elevator = "ELEVATOR"
-    case stairs = "STAIRS"
+    case stairs = "STAIR"
 }
 
 enum RoutePreference: String, Codable {

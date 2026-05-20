@@ -1051,10 +1051,7 @@ class ARNavigationLogic {
             delegate?.setLocateButtonVisible(true)
             return
         }
-        // 사용자가 계단/엘리베이터 선택 시 preference 도 일관되게 매핑 — verticalPreference 만으론
-        // 서버가 SHORTEST 를 우선시해 elevator 로 라우팅하는 케이스 회피.
-        // 엘리베이터 → SHORTEST (기본, 보통 elevator 가 최단), 계단 → STAIRCASE_FIRST (강제).
-        let routePreference: RoutePreference = (self.verticalPreference == .stairs) ? .staircaseFirst : .shortest
+        // 서버 spec: preference 는 항상 SHORTEST, vertical 분기는 verticalPreference 로만 (ELEVATOR/STAIR).
         let req = PathfindingRequest(
             startFloorLevel: startFloorLevel,
             startX: Double(translation.x),
@@ -1062,7 +1059,7 @@ class ARNavigationLogic {
             startZ: Double(translation.z),
             destinationId: self.destinationId,
             destinationName: self.destinationName,
-            preference: routePreference,
+            preference: .shortest,
             verticalPreference: self.verticalPreference,
             startAreaId: areaId
         )
