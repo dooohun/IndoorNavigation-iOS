@@ -89,7 +89,7 @@ enum MapDesignTokens {
         static let corridorWidthScreenRatio: CGFloat = 0.5
         /// 사용자가 조절할 수 있는 2D 지도 확대 배율 범위.
         static let mapZoomMinimum: Float = 0.7
-        static let mapZoomDefault: Float = 1.0
+        static let mapZoomDefault: Float = 1.6
         static let mapZoomMaximum: Float = 5.0
         /// localNavScale 상한 multiplier (floorFitScale 대비) — ADR §B
         static let scaleUpperBoundMultiplier: CGFloat = 3.5

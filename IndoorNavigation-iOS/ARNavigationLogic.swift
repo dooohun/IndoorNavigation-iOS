@@ -533,6 +533,15 @@ class ARNavigationLogic {
             return
         }
 
+        // 이미 측위 진행 중(=localizedPose 존재 + 활성 경로 보유)이면 hard reset 금지.
+        // 사용자가 locate 버튼을 재탭한 경우 path/marker/chevron/currentStepIndex 전부 유지하고
+        // 즉시 1회 주기 측위만 강제 트리거해서 ARKit world origin drift 를 보정한다.
+        // (resetForNewTrial → 서버 wrong-match → 새 19-step 경로 발급으로 인한 60m 오안내 방지)
+        if localizedPose != nil && !lastPathSteps.isEmpty {
+            forcePeriodicRelocalizeNow()
+            return
+        }
+
         #if DEBUG
         if Self.useMockLocalizeFixture {
             trialNumber += 1
@@ -1377,6 +1386,19 @@ class ARNavigationLogic {
 
     // MARK: - 주기 재측위
 
+    /// 사용자가 측위 진행 중 locate 버튼을 재탭했을 때 호출. 2m 이동 가드만 우회하고
+    /// 즉시 한 cadence 분량의 주기 측위를 발사. path/marker/state 는 그대로 유지되며
+    /// `runPeriodicRelocalizeTick()` 내부 blend 또는 hard-set 분기가 보정한다.
+    /// in-flight / 층 전환 / 도착 / AR 세션 미준비 가드는 tick 내부에서 그대로 적용됨.
+    private func forcePeriodicRelocalizeNow() {
+        print("[PeriodicV3] force tick — locate 버튼 재진입 (resetForNewTrial 우회)")
+        // 2m 이동 가드 우회: 캐시 nil → tick 내부 "첫 cadence (캐시 nil) 는 강제 통과" 분기 재사용.
+        lastPeriodicRelocalizeCameraPos = nil
+        // status 한 줄 토스트만 — 캡처 overlay / loading / progress phase 는 silent 유지.
+        delegate?.updateStatus("위치를 다시 확인 중...", color: .white)
+        runPeriodicRelocalizeTick()
+    }
+
     /// 초기 V3 측위 성공 직후 호출. cadence 마다 5장 캡처 → V3 호출 → blend.
     /// 층 전환 / 도착 / 화면 dismiss / 새 trial 시 정지.
     private func startPeriodicRelocalize() {
@@ -1685,9 +1707,14 @@ class ARNavigationLogic {
                      useHardSet ? "hard-set (큰 변화)" : "blended",
                      appliedAlpha, deltaTranslationM, response.confidence, response.numMatches ?? -1))
 
-        // 경로/마커 재렌더 (PnP 보정 패턴 따름) — 보정 모드: 진행 상태(currentStepIndex / turn arrow / marker) 유지
-        self.drawPathFromSteps(self.lastPathSteps, isRelocalizeRefresh: true)
-        self.refreshFloorNavigationMap(routeSteps: self.lastPathSteps, currentFrame: self.arSession?.currentFrame, isRelocalizeRefresh: true)
+        // 경로/마커 재렌더 (PnP 보정 패턴 따름) — 보정 모드: 진행 상태(currentStepIndex / turn arrow / marker) 유지.
+        // useHardSet (Δpose > threshold) 케이스는 새 pose 와 옛 lastPathSteps 의 step 좌표가 어긋나
+        // chevron 이 잘못된 위치에 잠깐 잔존 → skip. 직후 startV3Pathfinding 응답이 오면
+        // drawPathFromSteps(newSteps) 가 호출돼 올바른 위치로 갱신됨.
+        if !useHardSet {
+            self.drawPathFromSteps(self.lastPathSteps, isRelocalizeRefresh: true)
+            self.refreshFloorNavigationMap(routeSteps: self.lastPathSteps, currentFrame: self.arSession?.currentFrame, isRelocalizeRefresh: true)
+        }
 
         // 주기 pathfinding 재호출 — 보정된 pose 기준 새 경로 받아 lastPathSteps 갱신.
         // isRelocalizeRefresh=true 라 navigation 상태(currentStepIndex / arrival timer / UI) 는 유지됨.
@@ -2516,6 +2543,12 @@ class ARNavigationLogic {
         let markerY = floorY + 1.0
 
         // 타겟 step 선정: currentStepIndex 그대로 시작. straight/unknown 이면 lookahead.
+        // lookahead 는 turn 너머에 stairs/elevator/arrive 가 있을 때를 위해 turn 에 거리 가드(≤7m) 를 둔다.
+        //  - turn 이 7m 이내: 즉시 break (사용자가 곧 회전 → turn 마커 우선)
+        //  - turn 이 7m 초과: skip 하고 다음 step 으로 lookahead 계속 (PathChevron 이 원거리 회전 안내 담당.
+        //    turn 마커를 강제로 잡으면 후속 switch 의 d>7.0 가드에 걸려 stairs 까지 통째로 사라짐)
+        //  - stairs/elevator/arrive: 거리 무관 즉시 break (Phase4·Phase5 UX 상 항상 우선 표시)
+        //  - uturn: 거리 무관 즉시 break (현재 always-hidden 동작 보존 — 후속 switch 에서 빈 배열 반환)
         let lastIdx = lastPathSteps.count - 1
         var nextIdx = max(0, min(currentStepIndex, lastIdx))
         let initialKind = Self.navigationActionKind(steps: lastPathSteps, at: nextIdx)
@@ -2525,10 +2558,38 @@ class ARNavigationLogic {
                 lookahead: for i in (nextIdx + 1)...lastIdx {
                     let k = Self.navigationActionKind(steps: lastPathSteps, at: i)
                     switch k {
-                    case .turnLeft, .turnRight, .turnSlightLeft, .turnSlightRight, .uturn,
-                         .stairsUp, .stairsDown, .elevator, .arrive:
+                    case .stairsUp, .stairsDown, .elevator, .arrive:
+                        // 거리 무관 즉시 채택. stairs/elevator/arrive 는 항상 표시 우선순위 최상.
                         nextIdx = i
                         break lookahead
+
+                    case .uturn:
+                        // uturn 은 후속 switch 에서 hidden 처리(빈 배열). 거리 가드 의미 없음 — 기존 break 동작 유지.
+                        nextIdx = i
+                        break lookahead
+
+                    case .turnLeft, .turnRight, .turnSlightLeft, .turnSlightRight:
+                        // turn 거리 산출: step i 의 server 좌표 → AR world → cameraPos 와 XZ 거리.
+                        // ≤7m 면 곧 회전이므로 즉시 break. >7m 면 PathChevron 에 양보하고 lookahead 계속 진행해
+                        // 너머의 stairs/elevator/arrive 까지 발견되도록 한다.
+                        guard let p = lastPathSteps[i].position,
+                              let sx = p.x, let sy = p.y, let sz = p.z else {
+                            // 좌표 결손 시 거리 판단 불가 → 보수적으로 continue (skip).
+                            // 다음 step 이 stairs/arrive 라면 자연히 그쪽이 채택됨.
+                            continue
+                        }
+                        let sp = simd_float3(Float(sx), Float(sy), Float(sz))
+                        let ap = CoordinateTransformer.transform(serverPoint: sp, input: input)
+                        let tdx = cameraPos.x - ap.x
+                        let tdz = cameraPos.z - ap.z
+                        let td = sqrt(tdx * tdx + tdz * tdz)
+                        if td <= 7.0 {
+                            nextIdx = i
+                            break lookahead
+                        } else {
+                            continue
+                        }
+
                     case .straight, .unknown:
                         continue
                     }

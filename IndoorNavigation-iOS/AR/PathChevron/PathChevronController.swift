@@ -188,27 +188,28 @@ final class PathChevronController {
         clearAllNodesAndDistribution()
         distribution = newDistribution
 
-        // cameraPos 가 주어지면 카메라보다 뒤쪽 chevron 은 skip — nextSpawnIndex 를 카메라 이후로 설정.
-        // 판정: 각 chevron 의 진행 방향 단위벡터 d 와 (chevron - cam) 의 XZ dot 부호.
-        //       dot < 0 → chevron 이 카메라 뒤 (path 방향 기준).
-        // 모든 chevron 이 카메라 뒤로 판정될 경우(path 끝을 지나친 직후 통째 재생성 케이스) fallback —
-        // 큐가 비어버리지 않도록 마지막 chevron 1개는 살림. 도착 판정 전까지 시각적 연속성 유지.
+        // 카메라에 가장 가까운 chevron 을 "현재 진행 위치" 의 proxy 로 본다.
+        // distribution 은 path 를 따라 순서대로 sample 된 점들이므로, 가장 가까운 점의
+        // 다음 점부터 spawn 하면 사용자가 이미 지나친 chevron 을 자연스럽게 skip.
+        // 이전 방식(각 chevron 자기 yaw 로 dot 판정) 은 turn-back segment 에서
+        // path 방향이 사용자 진행 방향과 반대인 chevron 까지 "뒤" 로 잘못 분류되어
+        // lastBehind 가 마지막 인덱스까지 끌려가 단 1개만 spawn 되는 버그가 있었음.
         if let cam = cameraPos, !distribution.isEmpty {
-            var lastBehind: Int = -1
+            var nearestIdx = 0
+            var nearestDistSq = Float.greatestFiniteMagnitude
             for (idx, p) in distribution.enumerated() {
-                let dx = -sin(p.yaw)
-                let dz = -cos(p.yaw)
-                let fx = p.position.x - cam.x
-                let fz = p.position.z - cam.z
-                let dot = dx * fx + dz * fz
-                if dot < 0 { lastBehind = idx }
+                let dx = p.position.x - cam.x
+                let dz = p.position.z - cam.z
+                let dSq = dx * dx + dz * dz
+                if dSq < nearestDistSq {
+                    nearestDistSq = dSq
+                    nearestIdx = idx
+                }
             }
-            if lastBehind + 1 >= distribution.count {
-                // 모두 카메라 뒤 → 마지막 chevron 1개만이라도 표시
-                nextSpawnIndex = distribution.count - 1
-            } else {
-                nextSpawnIndex = lastBehind + 1
-            }
+            // nearest 의 다음 chevron 부터 spawn. 끝에 도달하면 마지막 1개라도 살림
+            // (도착 판정 전까지 시각적 연속성 유지) — 이후 spawnUntilFull 이 자연스럽게 처리.
+            let candidate = nearestIdx + 1
+            nextSpawnIndex = min(candidate, distribution.count - 1)
         }
 
         // 초기 spawn — 큐 가득 채우기
