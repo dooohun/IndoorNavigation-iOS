@@ -232,6 +232,7 @@ struct PathfindingRequest: Codable {
     let startY: Double
     let startZ: Double
     let destinationId: String
+    let destinationName: String
     let preference: RoutePreference?
     let verticalPreference: VerticalPreference?
     let startAreaId: String?

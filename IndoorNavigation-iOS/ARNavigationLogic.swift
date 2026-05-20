@@ -1036,6 +1036,7 @@ class ARNavigationLogic {
             startY: Double(translation.y),
             startZ: Double(translation.z),
             destinationId: self.destinationId,
+            destinationName: self.destinationName,
             preference: .shortest,
             verticalPreference: .elevator,
             startAreaId: areaId
