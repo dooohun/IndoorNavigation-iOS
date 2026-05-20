@@ -2439,8 +2439,9 @@ class ARNavigationLogic {
         let targetActionKind = Self.navigationActionKind(steps: lastPathSteps, at: nextIdx)
         let targetInstr = lastPathSteps[nextIdx].instruction ?? ""
         let upper = targetInstr.uppercased()
-        let hasStairsKw = upper.contains("STAIRS") || targetInstr.contains("계단")
-        let hasElevatorKw = upper.contains("ELEVATOR") || targetInstr.contains("엘리베이터")
+        // 서버 식별자 ("ST-A1", "EV-A1") 도 stairs/elevator 로 인식. "Start" 충돌 회피 위해 hyphen 포함.
+        let hasStairsKw = upper.contains("STAIRS") || targetInstr.contains("계단") || upper.contains("ST-")
+        let hasElevatorKw = upper.contains("ELEVATOR") || targetInstr.contains("엘리베이터") || upper.contains("EV-")
 
         let kind: MarkerKind
         switch targetActionKind {
