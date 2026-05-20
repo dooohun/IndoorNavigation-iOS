@@ -229,10 +229,12 @@ class ARNavigationLogic {
     private let periodicRelocalizeIntervalSec: TimeInterval = 2.0
     private let periodicRelocalizeImageCount: Int = 3
     private let periodicRelocalizeCaptureInterval: TimeInterval = 0.4
-    private let periodicRelocalizeBlendAlpha: Float = 0.3
+    /// 한 번 점프 크기 축소 — 1단계 quick win (0.3 → 0.18). 더 자주 blend 되더라도 한 번 변화량 작게.
+    private let periodicRelocalizeBlendAlpha: Float = 0.18
     /// 주기 V3 재측위 응답이 prev 와 이만큼(XYZ) 차이나면 blend 우회하고 hard-set. 큰 변화는 정확한 측위로 간주하고 즉시 반영.
     /// 좌회전 후 첫 측위 같은 케이스 — blend 끌어당김으로 인한 wrong-jump 회피.
-    private let periodicRelocalizeHardSetThresholdM: Float = 2.0
+    /// 1단계 quick win — 2.0 → 3.0 상향. hard-set(즉시 점프) 발동 빈도 감소.
+    private let periodicRelocalizeHardSetThresholdM: Float = 3.0
     /// 주기 V3 재측위 confidence 가드. 이 값 미만 응답은 wrong-match 위험으로 무시.
     private let periodicRelocalizeMinConfidence: Double = 0.5
     /// 직전 주기 측위 발사 시점 카메라 위치(XZ) 와의 최소 이동 거리. 정지 상태 V3 호출 회피.
@@ -1049,7 +1051,10 @@ class ARNavigationLogic {
             delegate?.setLocateButtonVisible(true)
             return
         }
-        // TODO(서버답): verticalPreference/preference 사용자 설정 분리 — 별도 트랙
+        // 사용자가 계단/엘리베이터 선택 시 preference 도 일관되게 매핑 — verticalPreference 만으론
+        // 서버가 SHORTEST 를 우선시해 elevator 로 라우팅하는 케이스 회피.
+        // 엘리베이터 → SHORTEST (기본, 보통 elevator 가 최단), 계단 → STAIRCASE_FIRST (강제).
+        let routePreference: RoutePreference = (self.verticalPreference == .stairs) ? .staircaseFirst : .shortest
         let req = PathfindingRequest(
             startFloorLevel: startFloorLevel,
             startX: Double(translation.x),
@@ -1057,7 +1062,7 @@ class ARNavigationLogic {
             startZ: Double(translation.z),
             destinationId: self.destinationId,
             destinationName: self.destinationName,
-            preference: .shortest,
+            preference: routePreference,
             verticalPreference: self.verticalPreference,
             startAreaId: areaId
         )
