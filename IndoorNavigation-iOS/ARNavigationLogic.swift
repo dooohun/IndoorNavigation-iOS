@@ -98,6 +98,9 @@ class ARNavigationLogic {
     let destinationName: String
     let destinationId: String
     let goal: Coordinate
+    /// 사용자가 시작 화면에서 선택한 현재 위치 층의 floorId. localize V3 의 첫 hint 로 사용.
+    /// nil ("모르겠어요") 이면 서버 ANY 매칭으로 폴백.
+    let userCurrentFloorId: String?
     let userCurrentFloorLevel: Int?
 
     init(buildingId: String,
@@ -105,12 +108,14 @@ class ARNavigationLogic {
          destinationName: String,
          destinationId: String,
          goal: Coordinate,
+         userCurrentFloorId: String? = nil,
          userCurrentFloorLevel: Int? = nil) {
         self.buildingId = buildingId
         self.floorId = floorId
         self.destinationName = destinationName
         self.destinationId = destinationId
         self.goal = goal
+        self.userCurrentFloorId = userCurrentFloorId
         self.userCurrentFloorLevel = userCurrentFloorLevel
     }
 
@@ -666,11 +671,12 @@ class ARNavigationLogic {
         delegate?.setCaptureProgress(phase: .localizing)
 
         // 신서버 floorId 는 uuid 문자열. localizedFloorId 가 있으면 최근 측위 floor 우선,
-        // 없으면 본 화면 진입 시 받은 self.floorId (destination POI 의 floor) 사용, 둘 다 nil 이면 서버 ANY 매칭.
-        // 층 전환 복귀 직후엔 restartFromFloorTransition 가 localizedFloorId 를 비워두므로 자연스럽게 self.floorId 폴백.
+        // 없으면 사용자가 시작 화면에서 선택한 현재 위치 층(userCurrentFloorId) 사용, 둘 다 nil 이면 서버 ANY 매칭.
+        // 과거엔 self.floorId(목적지 POI 의 floor)로 폴백 → 출발/목적지 다른 층일 때 서버가 목적지 층으로 잘못 매칭.
+        // 층 전환 복귀 직후엔 restartFromFloorTransition 가 localizedFloorId 를 비워두므로 자연스럽게 userCurrentFloorId 폴백.
         let floorIdHint: String? = {
             if let f = localizedFloorId, !f.isEmpty { return f }
-            return self.floorId.isEmpty ? nil : self.floorId
+            return (userCurrentFloorId?.isEmpty == false) ? userCurrentFloorId : nil
         }()
         let depthsForUpload: [Data]? = capturedDepths.isEmpty ? nil : capturedDepths
 
@@ -2665,6 +2671,14 @@ class ARNavigationLogic {
                stepFloor != curFloor {
                 currentStepIndex += 1
                 continue
+            }
+            // 층 전환 경계 halt — 다음 step 이 다른 floor 면 여기서 멈춤. detectFloorTransition 이
+            // 이 step 을 cur 로 받아 모달 트리거. cascade-advance 로 경계 지나치는 문제 방지.
+            if currentStepIndex + 1 < lastPathSteps.count {
+                let nxt = lastPathSteps[currentStepIndex + 1]
+                if let cf = target.floorLevel, let nf = nxt.floorLevel, cf != nf {
+                    break
+                }
             }
             guard let pos = target.position,
                   let sx = pos.x, let sy = pos.y, let sz = pos.z else {
