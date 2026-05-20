@@ -223,9 +223,9 @@ class ARNavigationLogic {
 
     // MARK: - 주기 재측위 (V3 only)
     /// LightGlue 기반 추적이 비활성된 상태에서 ARKit pose 누적 drift 를 보정하는 주기적 V3 측위.
-    /// `startPeriodicRelocalize` 가 초기 측위 성공 후 타이머 시작 → cadence 마다 5장 캡처 → V3 호출.
-    /// 응답 pose 는 기존 `localizedPose` 와 `blendAlpha=0.3` 으로 SLERP/lerp blend (서서히 보정).
-    /// `matchedARPose` 는 좌표 변환식 정합성 위해 hard-set (blend X) — 캡처 시점의 AR frame 으로 교체.
+    /// `startPeriodicRelocalize` 가 초기 측위 성공 후 타이머 시작 → cadence 마다 3장 캡처 → V3 호출.
+    /// 응답 pose 는 기존 `localizedPose` 와 `blendAlpha` 로 SLERP/lerp blend (서서히 보정).
+    /// `matchedARPose` 도 같은 alpha 로 blend 해 서버 pose 와 AR pose pair 의 정합성을 유지.
     private let periodicRelocalizeIntervalSec: TimeInterval = 2.0
     private let periodicRelocalizeImageCount: Int = 3
     private let periodicRelocalizeCaptureInterval: TimeInterval = 0.4
@@ -235,8 +235,15 @@ class ARNavigationLogic {
     /// 좌회전 후 첫 측위 같은 케이스 — blend 끌어당김으로 인한 wrong-jump 회피.
     /// 1단계 quick win — 2.0 → 3.0 상향. hard-set(즉시 점프) 발동 빈도 감소.
     private let periodicRelocalizeHardSetThresholdM: Float = 3.0
-    /// 주기 V3 재측위 confidence 가드. 이 값 미만 응답은 wrong-match 위험으로 무시.
-    private let periodicRelocalizeMinConfidence: Double = 0.5
+    /// 주기 V3 재측위 confidence 가드. 초기 측위와 같은 기준으로 wrong-match 위험 응답을 무시.
+    private let periodicRelocalizeMinConfidence: Double = 0.65
+    /// 주기 V3 재측위 feature match 수 가드. confidence 만으로는 pose jump 를 충분히 설명하지 못해 병행 검증.
+    private let periodicRelocalizeMinMatches: Int = 80
+    /// 이전 pose 대비 서버 회전 변화가 이 값보다 크면 wrong-match 가능성이 높아 무시.
+    private let periodicRelocalizeMaxRotationDeltaDeg: Float = 45.0
+    /// 서버 pose 이동량이 ARKit 캡처 pose 이동량보다 이 값 이상 더 크고 ratio 도 크면 무시.
+    private let periodicRelocalizeMaxServerARDistanceGapM: Float = 2.5
+    private let periodicRelocalizeMaxServerARDistanceRatio: Float = 2.5
     /// 직전 주기 측위 발사 시점 카메라 위치(XZ) 와의 최소 이동 거리. 정지 상태 V3 호출 회피.
     private static let periodicRelocalizeMinTravelM: Float = 2.0
     /// 캡처 시작 후 N장 도달까지 허용 timeout. limited tracking 무한 대기 → in-flight 락 영구 점유 방지.
@@ -725,8 +732,7 @@ class ARNavigationLogic {
 
     /// V3 측위 응답 핸들러 — showScanComplete + V3 pathfinding 시작.
     private func handleLocalizeV3Success(response: SLAMLocalizeResponse) {
-        // TODO(서버답): confidence 임계값 미정 → 0.3 잠정
-        guard response.confidence >= 0.3 else {
+        guard response.confidence >= 0.65 else {
             delegate?.setLoading(false)
             delegate?.showScanFailed(message: "위치 인식 신뢰도가 낮아요.\n다시 한번 스캔해 주세요.")
             delegate?.setLocateButtonVisible(true)
@@ -1560,10 +1566,10 @@ class ARNavigationLogic {
     }
 
     /// 주기 V3 측위 응답 핸들러. UI 토스트/HUD 변경 없이 silent blend.
-    /// - `localizedPose`: 큰 변화(>2m)는 hard-set, 그 외는 기존 ↔ 새 응답 사이 `blendAlpha=0.3` 으로 lerp (translation) + slerp (quaternion).
-    /// - `matchedARPose`: hard-set — 캡처 시점 ARFrame pose 로 교체 (변환식 정합성).
+    /// - `localizedPose`: 큰 변화는 hard-set, 그 외는 기존 ↔ 새 응답 사이 `blendAlpha` 로 lerp (translation) + slerp (quaternion).
+    /// - `matchedARPose`: `localizedPose` 와 같은 alpha 로 캡처 시점 ARFrame pose 를 향해 보정.
     /// - 다른 층 응답이면 무시 (가드).
-    /// - confidence ≥ 0.3, numMatches ≥ 30 — 미달 시 wrong-match 위험으로 무시.
+    /// - confidence / numMatches / 회전 변화 / ARKit 이동량 대비 서버 이동량 가드로 wrong-match 위험 응답 무시.
     /// - reject 케이스도 디버그 dump (사유 식별용) — `dumpPeriodicRelocalizeReject` 호출.
     private func handlePeriodicRelocalizeSuccess(response: SLAMLocalizeResponse, capturedPoses: [simd_float4x4], capturedImages: [UIImage]) {
         defer { self.isPeriodicRelocalizeInFlight = false }
@@ -1582,6 +1588,20 @@ class ARNavigationLogic {
                 prevLocalizedPose: prevLocalizedPoseSnapshot,
                 prevMatchedARPose: prevMatchedARPoseSnapshot,
                 reason: "confidence_below_threshold"
+            )
+            return
+        }
+
+        let numMatches = response.numMatches ?? 0
+        guard numMatches >= periodicRelocalizeMinMatches else {
+            print("[PeriodicV3] numMatches \(numMatches) < \(periodicRelocalizeMinMatches) — 결과 무시")
+            self.dumpPeriodicRelocalizeReject(
+                response: response,
+                capturedImages: capturedImages,
+                capturedPoses: capturedPoses,
+                prevLocalizedPose: prevLocalizedPoseSnapshot,
+                prevMatchedARPose: prevMatchedARPoseSnapshot,
+                reason: "num_matches_below_threshold"
             )
             return
         }
@@ -1669,6 +1689,48 @@ class ARNavigationLogic {
         let dyPre = newTranslation.y - prevTranslation.y
         let dzPre = newTranslation.z - prevTranslation.z
         let deltaTranslationM = sqrt(dxPre*dxPre + dyPre*dyPre + dzPre*dzPre)
+        let prevQuat = simd_quatf(ix: Float(pqx), iy: Float(pqy), iz: Float(pqz), r: Float(pqw))
+        let deltaRotationDeg = Self.rotationDeltaDegrees(from: prevQuat, to: quat)
+
+        guard deltaRotationDeg <= periodicRelocalizeMaxRotationDeltaDeg else {
+            print(String(format: "[PeriodicV3] rotation delta %.1f° > %.1f° — 결과 무시",
+                         deltaRotationDeg, periodicRelocalizeMaxRotationDeltaDeg))
+            self.dumpPeriodicRelocalizeReject(
+                response: response,
+                capturedImages: capturedImages,
+                capturedPoses: capturedPoses,
+                prevLocalizedPose: prevLocalizedPoseSnapshot,
+                prevMatchedARPose: prevMatchedARPoseSnapshot,
+                reason: "rotation_delta_above_threshold"
+            )
+            return
+        }
+
+        if let prevMatchedARPoseSnapshot {
+            let prevAR = simd_float3(prevMatchedARPoseSnapshot.columns.3.x,
+                                     prevMatchedARPoseSnapshot.columns.3.y,
+                                     prevMatchedARPoseSnapshot.columns.3.z)
+            let newAR = simd_float3(newMatchedARPose.columns.3.x,
+                                    newMatchedARPose.columns.3.y,
+                                    newMatchedARPose.columns.3.z)
+            let arDeltaM = simd_distance(prevAR, newAR)
+            let gap = deltaTranslationM - arDeltaM
+            let ratio = deltaTranslationM / max(arDeltaM, 0.25)
+            if gap > periodicRelocalizeMaxServerARDistanceGapM ||
+                ratio > periodicRelocalizeMaxServerARDistanceRatio {
+                print(String(format: "[PeriodicV3] server/AR delta mismatch — server=%.2fm ar=%.2fm gap=%.2fm ratio=%.2f. 결과 무시",
+                             deltaTranslationM, arDeltaM, gap, ratio))
+                self.dumpPeriodicRelocalizeReject(
+                    response: response,
+                    capturedImages: capturedImages,
+                    capturedPoses: capturedPoses,
+                    prevLocalizedPose: prevLocalizedPoseSnapshot,
+                    prevMatchedARPose: prevMatchedARPoseSnapshot,
+                    reason: "server_ar_delta_mismatch"
+                )
+                return
+            }
+        }
 
         let useHardSet = deltaTranslationM > periodicRelocalizeHardSetThresholdM
         let appliedAlpha: Float = useHardSet ? 1.0 : periodicRelocalizeBlendAlpha
@@ -1680,7 +1742,6 @@ class ARNavigationLogic {
             blendedQuat = quat
         } else {
             blendedTranslation = simd_mix(prevTranslation, newTranslation, simd_float3(repeating: appliedAlpha))
-            let prevQuat = simd_quatf(ix: Float(pqx), iy: Float(pqy), iz: Float(pqz), r: Float(pqw))
             blendedQuat = simd_slerp(prevQuat, quat, appliedAlpha)
         }
 
@@ -2403,6 +2464,13 @@ class ARNavigationLogic {
         var result = simd_float4x4(blendedQuat)
         result.columns.3 = SIMD4<Float>(blendedTrans.x, blendedTrans.y, blendedTrans.z, 1)
         return result
+    }
+
+    private static func rotationDeltaDegrees(from prev: simd_quatf, to new: simd_quatf) -> Float {
+        let diff = prev.inverse * new
+        let w = max(-1.0, min(1.0, diff.real))
+        let angleRad = 2.0 * acos(abs(w))
+        return Float(angleRad * 180.0 / .pi)
     }
 
     private static func navigationActionKind(steps: [PathStep], at i: Int) -> NavigationActionKind {

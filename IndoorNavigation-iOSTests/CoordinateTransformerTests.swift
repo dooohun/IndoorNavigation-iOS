@@ -46,6 +46,12 @@ struct CoordinateTransformerTests {
         )
     }
 
+    private func distanceXZ(_ a: simd_float3, _ b: simd_float3) -> Float {
+        let dx = a.x - b.x
+        let dz = a.z - b.z
+        return sqrt(dx * dx + dz * dz)
+    }
+
     // MARK: - 1) 앵커: 서버 카메라 위치 → ARKit 카메라 위치
     // W = arPose · rtabCameraToARKit · inv(T_W_from_C) 의 정의에서
     // serverPoint = serverPosition 을 넣으면 항상 arPose.translation 이 나와야 한다.
@@ -75,6 +81,71 @@ struct CoordinateTransformerTests {
                 "iter \(i): 앵커 오차 \(err)m, mapped=\(mapped), expected=\(arTrans)"
             )
         }
+    }
+
+    // MARK: - 1-1) 실제 측위 회귀: 서버 floor 평면이 ARKit XZ 평면으로 유지되어야 함
+    //
+    // 2026-05-20 실측 샘플. 이전 축 매핑(FRD: X forward, Y right, Z down)은 같은 floor의
+    // route distance 대부분을 ARKit Y로 흘려보내서, 클라이언트가 XZ 평면에서 거리/방향을
+    // 계산할 때 긴 직진 구간이 1/3 이하로 찌그러졌다.
+
+    @Test("실측 회귀: 서버 바닥 경로는 ARKit XZ 경로로 변환된다")
+    func measuredFloorRoute_mapsOntoARKitXZPlane() {
+        let measuredServerPosition = simd_float3(
+            -31.076979761953897,
+             66.471807597959923,
+              0.15973079236460053
+        )
+        let measuredServerQuaternion = simd_quatf(
+            ix:  0.97477218059683413,
+            iy:  0.1884797976355313,
+            iz: -0.11788526898719218,
+            r:   0.019940540955035557
+        )
+        let measuredARPose = simd_float4x4(rows: [
+            SIMD4<Float>( 0.078361093997955322,  0.78993082046508789,  0.60816812515258789,   5.038482666015625),
+            SIMD4<Float>(-0.9930260181427002,    0.0079481201246380806, 0.11762559413909912,  0.77319657802581787),
+            SIMD4<Float>( 0.088082313537597656, -0.61314409971237183,   0.78504484891891479, -3.3510541915893555),
+            SIMD4<Float>( 0,                     0,                     0,                    1)
+        ])
+        let route: [simd_float3] = [
+            simd_float3(-31.076980590820312, 66.471809387207031,  0.15973079204559326),
+            simd_float3(-31.071058048339502, 66.438476324978879, -1.5383087635040309),
+            simd_float3( -8.9838252007204336, 70.362885487514532, -1.5383087635040318),
+            simd_float3( -3.2030557481992332, 71.265078824775784, -1.5383087635040353),
+            simd_float3(  1.9953055606672798, 69.485990415363062, -1.5383087635040316),
+            simd_float3( 24.562022127902093,  74.146013251366242, -1.538308763504034),
+            simd_float3( 29.994483708794682,  48.77032717572795,  -1.5383087635040269),
+            simd_float3( 31.962362799525867,  39.102165773696996, -1.5383087635040249),
+            simd_float3( 35.108554896705847,  18.314724708395254, -1.5383087635040202),
+            simd_float3( 38.224329740572564,  18.898536189573782, -1.5383087635040202)
+        ]
+
+        let input = CoordinateTransformer.Input(
+            serverPosition: measuredServerPosition,
+            serverQuaternion: measuredServerQuaternion,
+            arCameraPose: measuredARPose
+        )
+        let arRoute = route.map { CoordinateTransformer.transform(serverPoint: $0, input: input) }
+        let arCameraPosition = simd_float3(
+            measuredARPose.columns.3.x,
+            measuredARPose.columns.3.y,
+            measuredARPose.columns.3.z
+        )
+
+        #expect(simd_distance(arRoute[0], arCameraPosition) < 0.001)
+        #expect(abs((arRoute[1].y - arCameraPosition.y) - (route[1].z - route[0].z)) < 0.05)
+
+        let serverLongStraightDistance =
+            simd_distance(route[5], route[6]) +
+            simd_distance(route[6], route[7]) +
+            simd_distance(route[7], route[8])
+        let arLongStraightXZDistance =
+            distanceXZ(arRoute[5], arRoute[6]) +
+            distanceXZ(arRoute[6], arRoute[7]) +
+            distanceXZ(arRoute[7], arRoute[8])
+
+        #expect(abs(arLongStraightXZDistance - serverLongStraightDistance) < 0.1)
     }
 
     // MARK: - 2) 거리 보존 (rigid transform)
