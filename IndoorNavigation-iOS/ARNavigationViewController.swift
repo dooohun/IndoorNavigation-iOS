@@ -2616,7 +2616,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
             pill.centerYAnchor.constraint(equalTo: floorTransitionOverlayView.centerYAnchor),
             pill.heightAnchor.constraint(equalToConstant: 44),
             pill.leadingAnchor.constraint(equalTo: iconView.leadingAnchor, constant: -16),
-            pill.trailingAnchor.constraint(equalTo: label.trailingAnchor, constant: 20),
+            pill.trailingAnchor.constraint(equalTo: floorTransitionLabel.trailingAnchor, constant: 20),
 
             iconView.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: 22),
