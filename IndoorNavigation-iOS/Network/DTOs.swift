@@ -150,12 +150,26 @@ struct FloorMapDestination: Codable {
 }
 
 /// `FloorMapResponse.connectors[]` — 층 내 수직 통로(엘리베이터/계단) 진입점 메타.
-/// 현재 클라는 미사용. stops 같은 free-form 필드는 생략.
+/// `stops[]` 는 같은 connector 가 연결하는 각 층의 floorId/level/areaId. 층 전환 후
+/// 다음 측위 hint(targetFloor 의 floorId) lookup 에 사용.
 struct FloorMapConnectorDetail: Codable {
     let connectorId: String?
     let type: String?
     let key: String?
     let name: String?
+    let routeNodeId: String?
+    let x: Double?
+    let y: Double?
+    let z: Double?
+    let stops: [FloorConnectorStop]?
+}
+
+/// Connector 의 각 층 stop. `floorLevel` 과 `floorId` 매핑 제공.
+struct FloorConnectorStop: Codable {
+    let floorId: String?
+    let floorLevel: Int?
+    let areaId: String?
+    let areaLabel: String?
     let routeNodeId: String?
     let x: Double?
     let y: Double?

@@ -1635,6 +1635,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var destinationName: String = ""
     var destinationId: String = ""
     var goal: Coordinate = Coordinate(x: 0, y: 0, z: 0)
+    var userCurrentFloorId: String? = nil
     var userCurrentFloorLevel: Int? = nil
 
     var sceneView: ARSCNView!
@@ -1724,6 +1725,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
             destinationName: destinationName,
             destinationId: destinationId,
             goal: goal,
+            userCurrentFloorId: userCurrentFloorId,
             userCurrentFloorLevel: userCurrentFloorLevel
         )
 

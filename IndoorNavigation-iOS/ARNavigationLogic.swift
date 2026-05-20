@@ -165,6 +165,9 @@ class ARNavigationLogic {
     private var hasActiveFloorTransition: Bool = false
     private var pendingRemainingSteps: [PathStep] = []
     private var pendingTargetFloor: Int? = nil
+    /// 층 전환 트리거 시 cached floor map 의 connectors[].stops[] 에서 lookup 한 target 층 floorId.
+    /// 다음 측위(restartFromFloorTransition 직후)의 floor hint 로 사용 — 옛 userCurrentFloorId 가 stale 인 문제 해결.
+    private var pendingTargetFloorId: String? = nil
     private var isFloorTransitionRestart: Bool = false
     /// 층 전환 모달 트리거 거리 (m). stairs/elevator 노드 step 위치와 카메라 사이 XZ 거리.
     /// 이 값 이내일 때만 detectFloorTransition 이 트리거. 너무 빡빡하면 빨리 걷는 사용자가 통과 가능, 너무 넓으면 일찍 뜸.
@@ -670,12 +673,14 @@ class ARNavigationLogic {
         // 캡처 완료 → 서버 측위 phase 전환 (VC 가 progress bar 35→95% 자동 애니메이션)
         delegate?.setCaptureProgress(phase: .localizing)
 
-        // 신서버 floorId 는 uuid 문자열. localizedFloorId 가 있으면 최근 측위 floor 우선,
-        // 없으면 사용자가 시작 화면에서 선택한 현재 위치 층(userCurrentFloorId) 사용, 둘 다 nil 이면 서버 ANY 매칭.
-        // 과거엔 self.floorId(목적지 POI 의 floor)로 폴백 → 출발/목적지 다른 층일 때 서버가 목적지 층으로 잘못 매칭.
-        // 층 전환 복귀 직후엔 restartFromFloorTransition 가 localizedFloorId 를 비워두므로 자연스럽게 userCurrentFloorId 폴백.
+        // 신서버 floorId 는 uuid 문자열. 우선순위:
+        //   1) localizedFloorId — 최근 측위 성공 결과 (정상 흐름)
+        //   2) pendingTargetFloorId — 층 전환 직후, connector 데이터에서 lookup 한 새 층 floorId (transition restart 케이스)
+        //   3) userCurrentFloorId — 앱 시작 시 사용자가 선택한 시작 층 (초기 측위 케이스)
+        //   4) nil — 서버 ANY 매칭
         let floorIdHint: String? = {
             if let f = localizedFloorId, !f.isEmpty { return f }
+            if let f = pendingTargetFloorId, !f.isEmpty { return f }
             return (userCurrentFloorId?.isEmpty == false) ? userCurrentFloorId : nil
         }()
         let depthsForUpload: [Data]? = capturedDepths.isEmpty ? nil : capturedDepths
@@ -752,6 +757,8 @@ class ARNavigationLogic {
         localizedFloorId = response.floorId ?? self.floorId
         localizedFloorLevel = response.floorLevel
         localizedAreaId = response.areaId
+        // 측위 성공 시 pendingTargetFloorId 클리어 — localizedFloorId 가 권위 source 가 됨.
+        pendingTargetFloorId = nil
 
         delegate?.showScanComplete()
 
@@ -843,6 +850,7 @@ class ARNavigationLogic {
         localizedFloorId = response.floorId ?? self.floorId
         localizedFloorLevel = response.floorLevel
         localizedAreaId = response.areaId
+        pendingTargetFloorId = nil
 
         // 3) 스캔 완료 UI
         delegate?.setScanningOverlay(visible: false)
@@ -1214,6 +1222,28 @@ class ARNavigationLogic {
         return (type, targetFloor)
     }
 
+    /// cached floor map 들의 connectors[].stops[] 에서 `transitionType` 과 `targetFloor` 에 매칭하는
+    /// floorId 를 lookup. 같은 connector 가 모든 stop 의 floorId 를 알려주므로, 어느 층의 floor map
+    /// 이라도 캐시돼있으면 다른 층 floorId 도 추출 가능.
+    /// - transitionType: "STAIRS" / "ELEVATOR" (내부 표기). 서버 type 은 "stairs"/"elevator" 소문자라 case-insensitive 비교.
+    private func lookupTargetFloorId(transitionType: String, targetFloor: Int?) -> String? {
+        guard let targetFloor else { return nil }
+        let typeLower = transitionType.lowercased()
+        for (_, map) in floorMapCache {
+            guard let connectors = map.connectors else { continue }
+            for connector in connectors {
+                guard let cType = connector.type?.lowercased(), cType == typeLower else { continue }
+                guard let stops = connector.stops else { continue }
+                for stop in stops {
+                    if stop.floorLevel == targetFloor, let fid = stop.floorId, !fid.isEmpty {
+                        return fid
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
     private func triggerFloorTransition(type: String, targetFloor: Int?, currentStepIdx: Int) {
         hasActiveFloorTransition = true
 
@@ -1234,6 +1264,12 @@ class ARNavigationLogic {
 
         pendingRemainingSteps = remaining
         pendingTargetFloor = targetFloor
+        pendingTargetFloorId = lookupTargetFloorId(transitionType: type, targetFloor: targetFloor)
+        if let f = pendingTargetFloorId {
+            print("[FloorTransition] pendingTargetFloorId 확정 = \(f) (type=\(type), targetFloor=\(targetFloor ?? -999))")
+        } else {
+            print("[FloorTransition] pendingTargetFloorId lookup 실패 — connector stops 에 매칭 없음 (type=\(type), targetFloor=\(targetFloor ?? -999))")
+        }
 
         arrivalCheckTimer?.invalidate()
         arrivalCheckTimer = nil
@@ -1461,9 +1497,12 @@ class ARNavigationLogic {
         let poses = periodicCapturedARPoses
         let depths = periodicCapturedDepths
         let depthsForUpload: [Data]? = depths.isEmpty ? nil : depths
+        // 자동 주기 재측위는 첫 측위 성공 후에만 발사되므로 localizedFloorId 가 항상 채워져 있어
+        // 폴백 분기 도달 X — 단, 일관성/방어를 위해 수동 측위와 동일 패턴 유지.
         let floorIdHint: String? = {
             if let f = localizedFloorId, !f.isEmpty { return f }
-            return self.floorId.isEmpty ? nil : self.floorId
+            if let f = pendingTargetFloorId, !f.isEmpty { return f }
+            return (userCurrentFloorId?.isEmpty == false) ? userCurrentFloorId : nil
         }()
         print("[PeriodicV3] V3 측위 호출 — images=\(images.count) depths=\(depths.count)")
 
