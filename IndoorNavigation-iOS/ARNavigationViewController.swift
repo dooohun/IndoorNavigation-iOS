@@ -1637,6 +1637,8 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var goal: Coordinate = Coordinate(x: 0, y: 0, z: 0)
     var userCurrentFloorId: String? = nil
     var userCurrentFloorLevel: Int? = nil
+    /// POI 선택 화면에서 받은 수직 이동 수단 우선순위. pathfinding 요청에 그대로 전달.
+    var verticalPreference: VerticalPreference = .elevator
 
     var sceneView: ARSCNView!
     var locateButton: UIButton!
@@ -1726,7 +1728,8 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
             destinationId: destinationId,
             goal: goal,
             userCurrentFloorId: userCurrentFloorId,
-            userCurrentFloorLevel: userCurrentFloorLevel
+            userCurrentFloorLevel: userCurrentFloorLevel,
+            verticalPreference: verticalPreference
         )
 
         setupARView()

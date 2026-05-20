@@ -102,6 +102,8 @@ class ARNavigationLogic {
     /// nil ("모르겠어요") 이면 서버 ANY 매칭으로 폴백.
     let userCurrentFloorId: String?
     let userCurrentFloorLevel: Int?
+    /// 수직 이동 수단 (엘리베이터 / 계단) 우선순위. POI 선택 시 사용자 토글로 결정 → pathfinding 요청에 그대로 전달.
+    let verticalPreference: VerticalPreference
 
     init(buildingId: String,
          floorId: String,
@@ -109,7 +111,8 @@ class ARNavigationLogic {
          destinationId: String,
          goal: Coordinate,
          userCurrentFloorId: String? = nil,
-         userCurrentFloorLevel: Int? = nil) {
+         userCurrentFloorLevel: Int? = nil,
+         verticalPreference: VerticalPreference = .elevator) {
         self.buildingId = buildingId
         self.floorId = floorId
         self.destinationName = destinationName
@@ -117,6 +120,7 @@ class ARNavigationLogic {
         self.goal = goal
         self.userCurrentFloorId = userCurrentFloorId
         self.userCurrentFloorLevel = userCurrentFloorLevel
+        self.verticalPreference = verticalPreference
     }
 
     // 다중 프레임 캡처
@@ -1054,7 +1058,7 @@ class ARNavigationLogic {
             destinationId: self.destinationId,
             destinationName: self.destinationName,
             preference: .shortest,
-            verticalPreference: .elevator,
+            verticalPreference: self.verticalPreference,
             startAreaId: areaId
         )
         let pathfindingTrial = trialNumber

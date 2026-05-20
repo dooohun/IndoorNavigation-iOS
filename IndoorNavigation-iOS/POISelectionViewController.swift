@@ -9,9 +9,14 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
     private let buildingNameLabel = UILabel()
     private let buildingInfoLabel = UILabel()
     private let searchBar = UISearchBar()
+    private let verticalPreferenceControl = UISegmentedControl(items: ["엘리베이터 우선", "계단 우선"])
     private let tableView = UITableView(frame: .zero, style: .insetGrouped)
     private let activityIndicator = UIActivityIndicatorView(style: .large)
     private let emptyLabel = UILabel()
+
+    /// 사용자 선택 수직 이동 수단 우선순위. 기본값 elevator (가장 일반적, 장애·노약자 접근성 우선).
+    /// AR 시작 시 ARNavigationViewController 로 전달되어 pathfinding 요청에 반영.
+    private var selectedVerticalPreference: VerticalPreference = .elevator
 
     private var allPOIs: [POIResponse] = []
     private var filteredPOIs: [POIResponse] = []
@@ -48,6 +53,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
 
         setupHeader()
         setupSearchBar()
+        setupVerticalPreferenceControl()
         setupTableView()
         setupActivityIndicator()
         setupEmptyLabel()
@@ -118,6 +124,23 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
         ])
     }
 
+    private func setupVerticalPreferenceControl() {
+        verticalPreferenceControl.selectedSegmentIndex = 0  // elevator (기본값)
+        verticalPreferenceControl.translatesAutoresizingMaskIntoConstraints = false
+        verticalPreferenceControl.addTarget(self, action: #selector(verticalPreferenceChanged), for: .valueChanged)
+        view.addSubview(verticalPreferenceControl)
+
+        NSLayoutConstraint.activate([
+            verticalPreferenceControl.topAnchor.constraint(equalTo: searchBar.bottomAnchor, constant: 4),
+            verticalPreferenceControl.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            verticalPreferenceControl.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+        ])
+    }
+
+    @objc private func verticalPreferenceChanged() {
+        selectedVerticalPreference = verticalPreferenceControl.selectedSegmentIndex == 0 ? .elevator : .stairs
+    }
+
     private func setupTableView() {
         tableView.translatesAutoresizingMaskIntoConstraints = false
         tableView.dataSource = self
@@ -127,7 +150,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
         view.addSubview(tableView)
 
         NSLayoutConstraint.activate([
-            tableView.topAnchor.constraint(equalTo: searchBar.bottomAnchor),
+            tableView.topAnchor.constraint(equalTo: verticalPreferenceControl.bottomAnchor, constant: 8),
             tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -309,6 +332,7 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
             arVC.goal = Coordinate(x: dp?.x ?? 0, y: dp?.y ?? 0, z: dp?.z ?? 0)
             arVC.userCurrentFloorId = self.userCurrentFloorId
             arVC.userCurrentFloorLevel = self.userCurrentFloorId.flatMap { self.floorIdToLevel[$0] }
+            arVC.verticalPreference = self.selectedVerticalPreference
             arVC.modalPresentationStyle = .fullScreen
             self.present(arVC, animated: true)
         })
