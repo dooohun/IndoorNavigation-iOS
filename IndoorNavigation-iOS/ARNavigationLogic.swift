@@ -161,7 +161,9 @@ class ARNavigationLogic {
     private var pendingRemainingSteps: [PathStep] = []
     private var pendingTargetFloor: Int? = nil
     private var isFloorTransitionRestart: Bool = false
-    private let floorTransitionTriggerDistance: Float = 1.0
+    /// 층 전환 모달 트리거 거리 (m). stairs/elevator 노드 step 위치와 카메라 사이 XZ 거리.
+    /// 이 값 이내일 때만 detectFloorTransition 이 트리거. 너무 빡빡하면 빨리 걷는 사용자가 통과 가능, 너무 넓으면 일찍 뜸.
+    private let floorTransitionTriggerDistance: Float = 2.0
 
     // 경로 시작점 진단
     private var lastStartSnapDistance: Double?
@@ -387,7 +389,8 @@ class ARNavigationLogic {
                                       frame.camera.transform.columns.3.z)
                 recomputeCurrentStepIndex(cameraPos: cam)
                 // Floor-transition 자동 트리거: currentStepIndex 가 floor 변경 직전 step 도달 시 모달 표시
-                if !hasActiveFloorTransition, let info = detectFloorTransition(currentStepIdx: currentStepIndex) {
+                if !hasActiveFloorTransition,
+                   let info = detectFloorTransition(currentStepIdx: currentStepIndex, cameraPos: cam) {
                     triggerFloorTransition(type: info.type, targetFloor: info.targetFloor, currentStepIdx: currentStepIndex)
                 }
                 if let vm = makeNavigationStepViewModel(cameraPos: cam) {
@@ -1133,32 +1136,62 @@ class ARNavigationLogic {
 
     // MARK: - 층 이동 인터렉션
 
-    /// 현재 step → 다음 step 사이에 층 이동(계단/엘리베이터)이 발생하는지 감지.
-    /// floorLevel 변화 또는 instruction 키워드 매칭. 둘 중 하나만 만족해도 트리거.
-    private func detectFloorTransition(currentStepIdx: Int) -> (type: String, targetFloor: Int?)? {
-        guard currentStepIdx + 1 < lastPathSteps.count else { return nil }
+    /// 현재 step (또는 다음 step) 이 층 이동 노드(계단/엘리베이터)인지 감지.
+    /// - 매칭 기준: floorLevel 변화 OR instruction 키워드 (TAKE_STAIRS / STAIRS / 계단 / ST- / TAKE_ELEVATOR / ELEVATOR / 엘리베이터 / EV-)
+    /// - `cameraPos` 가 주어지면 trigger step (= stairs/elevator 노드) 까지 AR 거리가 `floorTransitionTriggerDistance` 이내일 때만 트리거.
+    /// - currentStepIdx 가 마지막 step 인 경우(advance 가 stairs step 까지 cascade) 도 cur 자체로 트리거 가능.
+    private func detectFloorTransition(currentStepIdx: Int, cameraPos: simd_float3? = nil) -> (type: String, targetFloor: Int?)? {
+        guard currentStepIdx >= 0, currentStepIdx < lastPathSteps.count else { return nil }
         let cur = lastPathSteps[currentStepIdx]
-        let nxt = lastPathSteps[currentStepIdx + 1]
+        let nxt: PathStep? = (currentStepIdx + 1 < lastPathSteps.count) ? lastPathSteps[currentStepIdx + 1] : nil
 
-        // 조건 1: floorLevel 변화
-        let floorChanged: Bool = {
-            if let cf = cur.floorLevel, let nf = nxt.floorLevel, cf != nf { return true }
-            return false
-        }()
-
-        // 조건 2: instruction 키워드 매칭 (현재 또는 다음 step)
         let curInstr = cur.instruction ?? ""
-        let nxtInstr = nxt.instruction ?? ""
+        let nxtInstr = nxt?.instruction ?? ""
         let combined = curInstr + " " + nxtInstr
 
         // "ST-A1", "ST-B2" 등 서버 계단 노드 식별자 prefix 매칭. "Start" 와 충돌 회피 위해 hyphen 포함.
         let stairsKeywords = ["TAKE_STAIRS", "STAIRS", "계단", "ST-"]
-        let elevatorKeywords = ["TAKE_ELEVATOR", "ELEVATOR", "엘리베이터"]
+        let elevatorKeywords = ["TAKE_ELEVATOR", "ELEVATOR", "엘리베이터", "EV-"]
 
         let hasStairs = stairsKeywords.contains { combined.contains($0) }
         let hasElevator = elevatorKeywords.contains { combined.contains($0) }
 
+        // floorLevel 변화 — cur ↔ nxt 또는 cur ↔ localizedFloorLevel.
+        let floorChanged: Bool = {
+            if let cf = cur.floorLevel, let nf = nxt?.floorLevel, cf != nf { return true }
+            if let cf = cur.floorLevel, let lf = localizedFloorLevel, cf != lf { return true }
+            return false
+        }()
+
         guard floorChanged || hasStairs || hasElevator else { return nil }
+
+        // trigger step 선정 — cur 자체가 stairs/elevator 키워드 갖고 있으면 cur, 아니면 nxt (있을 때).
+        // cur 이 키워드 갖고 있고 nxt 도 갖고 있으면 cur 우선 (advance 가 cascade 한 경우엔 cur 이 stairs).
+        let curHasKw = stairsKeywords.contains { curInstr.contains($0) } || elevatorKeywords.contains { curInstr.contains($0) }
+        let triggerStep: PathStep = curHasKw ? cur : (nxt ?? cur)
+
+        // 거리 가드 — cameraPos 가 있으면 triggerStep 까지 AR 거리 측정.
+        // floorTransitionTriggerDistance 초과면 트리거 보류 (사용자가 실제 근접할 때까지 대기).
+        if let cameraPos,
+           let arPose = matchedARPose,
+           let pose = localizedPose,
+           let tPos = triggerStep.position,
+           let tx = tPos.x, let ty = tPos.y, let tz = tPos.z {
+            let serverPos = simd_float3(Float(pose.x ?? 0), Float(pose.y ?? 0), Float(pose.z ?? 0))
+            let quat = simd_quatf(
+                ix: Float(pose.qx ?? 0), iy: Float(pose.qy ?? 0),
+                iz: Float(pose.qz ?? 0), r: Float(pose.qw ?? 1)
+            )
+            let input = CoordinateTransformer.Input(serverPosition: serverPos, serverQuaternion: quat, arCameraPose: arPose)
+            let tAR = CoordinateTransformer.transform(
+                serverPoint: simd_float3(Float(tx), Float(ty), Float(tz)),
+                input: input
+            )
+            let dx = cameraPos.x - tAR.x
+            let dz = cameraPos.z - tAR.z
+            let d = sqrt(dx * dx + dz * dz)
+            guard d <= floorTransitionTriggerDistance else { return nil }
+        }
 
         // type 우선순위: instruction 키워드 매칭 결과로 결정. 없으면 기본 STAIRS.
         let type: String
@@ -1170,7 +1203,9 @@ class ARNavigationLogic {
             type = "STAIRS"
         }
 
-        return (type, nxt.floorLevel)
+        // targetFloor: nxt 있으면 nxt 의 floor, 없으면 cur 의 floor (stairs/elevator step 자체가 새 층 노드일 수 있음).
+        let targetFloor = nxt?.floorLevel ?? cur.floorLevel
+        return (type, targetFloor)
     }
 
     private func triggerFloorTransition(type: String, targetFloor: Int?, currentStepIdx: Int) {
