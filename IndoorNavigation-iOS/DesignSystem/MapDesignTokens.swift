@@ -100,7 +100,9 @@ enum MapDesignTokens {
         /// corridor polygon 전환 시 지도 회전 보간 시정수 τ (s)
         static let mapBearingSmoothingTau: CFTimeInterval = 0.32
         /// AR pose → 2D 표시 위치 보간 시정수 τ (s)
-        static let mapPositionSmoothingTau: CFTimeInterval = 0.16
+        /// 1단계 quick win — 0.16 → 0.22 상향. 재측위 점프 시 마커가 더 부드럽게 슬라이드.
+        /// 정상 ARKit 이동(매 프레임 미세 변화)에는 큰 지연 영향 없음.
+        static let mapPositionSmoothingTau: CFTimeInterval = 0.22
         /// 현재 위치 바로 아래 route stroke가 마커 밑에서 끊기지 않도록 남기는 clip 여유.
         static let routeClipOverlap: CGFloat = 2.0
         /// 하단 2D 지도 sheet 상단 radius — Frame/Xlarge.Radius.

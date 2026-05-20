@@ -51,9 +51,11 @@ final class PathChevronController {
     private static let pulseOffset: Double = 0.5
     /// setRoute 재호출 시 기존 chevron 노드를 재사용 가능한 분포 변동 최대치 (m, XZ).
     /// 각 distribution point 가 이 거리 이하로 이동한 경우만 재사용 → 보간 트윈 적용. 그 이상이면 통째 재생성.
-    private static let chevronReuseMaxDeltaM: Float = 1.0
+    /// 재측위 점프가 1m 를 흔히 넘어 통째 재생성 빈발 → 2m 로 상향하여 재사용 분기 적극 진입.
+    private static let chevronReuseMaxDeltaM: Float = 2.0
     /// 재사용 분기 진입 시 노드 position/yaw 트윈 duration (s). easeInEaseOut.
-    private static let chevronReuseAnimationDuration: TimeInterval = 0.5
+    /// 임계 상향으로 트윈 이동량이 커질 수 있어 0.8s 로 늘려 슬라이드 자연스러움 유지.
+    private static let chevronReuseAnimationDuration: TimeInterval = 0.8
 
     // MARK: - 분포 단위
 
@@ -189,17 +191,23 @@ final class PathChevronController {
         // cameraPos 가 주어지면 카메라보다 뒤쪽 chevron 은 skip — nextSpawnIndex 를 카메라 이후로 설정.
         // 판정: 각 chevron 의 진행 방향 단위벡터 d 와 (chevron - cam) 의 XZ dot 부호.
         //       dot < 0 → chevron 이 카메라 뒤 (path 방향 기준).
-        if let cam = cameraPos {
+        // 모든 chevron 이 카메라 뒤로 판정될 경우(path 끝을 지나친 직후 통째 재생성 케이스) fallback —
+        // 큐가 비어버리지 않도록 마지막 chevron 1개는 살림. 도착 판정 전까지 시각적 연속성 유지.
+        if let cam = cameraPos, !distribution.isEmpty {
+            var lastBehind: Int = -1
             for (idx, p) in distribution.enumerated() {
-                // chevron yaw 로부터 진행 방향 dir 복원 (yaw = atan2(-dx, -dz) → dx=-sin(yaw), dz=-cos(yaw))
                 let dx = -sin(p.yaw)
                 let dz = -cos(p.yaw)
                 let fx = p.position.x - cam.x
                 let fz = p.position.z - cam.z
                 let dot = dx * fx + dz * fz
-                if dot < 0 {
-                    nextSpawnIndex = idx + 1
-                }
+                if dot < 0 { lastBehind = idx }
+            }
+            if lastBehind + 1 >= distribution.count {
+                // 모두 카메라 뒤 → 마지막 chevron 1개만이라도 표시
+                nextSpawnIndex = distribution.count - 1
+            } else {
+                nextSpawnIndex = lastBehind + 1
             }
         }
 
@@ -283,6 +291,7 @@ final class PathChevronController {
     }
 
     /// 모든 chevron 제거 + 상태 리셋. 새 trial 진입 시 호출.
+    /// isHiddenState 도 false 로 리셋 — clear 는 "처음 상태로" 복귀 의미라 hidden 잔존하면 후속 spawn 노드가 안 보이는 버그.
     func clear() {
         for e in entries {
             e.node.removeFromParentNode()
@@ -290,6 +299,7 @@ final class PathChevronController {
         entries.removeAll()
         distribution.removeAll()
         nextSpawnIndex = 0
+        isHiddenState = false
         stopAnimationIfIdle()
     }
 
