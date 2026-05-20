@@ -662,12 +662,11 @@ class ARNavigationLogic {
         // 캡처 완료 → 서버 측위 phase 전환 (VC 가 progress bar 35→95% 자동 애니메이션)
         delegate?.setCaptureProgress(phase: .localizing)
 
-        // 신서버 floorId 는 uuid 문자열. 층 전환 복귀 시 직전 측위 결과 floorId 우선,
-        // 그 외 케이스에서는 본 화면 진입 시 받은 floorId 사용. 둘 다 비어있으면 nil → 서버 ANY 매칭.
+        // 신서버 floorId 는 uuid 문자열. localizedFloorId 가 있으면 최근 측위 floor 우선,
+        // 없으면 본 화면 진입 시 받은 self.floorId (destination POI 의 floor) 사용, 둘 다 nil 이면 서버 ANY 매칭.
+        // 층 전환 복귀 직후엔 restartFromFloorTransition 가 localizedFloorId 를 비워두므로 자연스럽게 self.floorId 폴백.
         let floorIdHint: String? = {
-            if isFloorTransitionRestart, let f = localizedFloorId, !f.isEmpty {
-                return f
-            }
+            if let f = localizedFloorId, !f.isEmpty { return f }
             return self.floorId.isEmpty ? nil : self.floorId
         }()
         let depthsForUpload: [Data]? = capturedDepths.isEmpty ? nil : capturedDepths
@@ -1218,6 +1217,10 @@ class ARNavigationLogic {
         destinationPinNode = nil
         matchedARPose = nil
         localizedPose = nil
+        // 옛 층 정보는 새 측위 전에 비워야 floorIdHint 가 옛 층(2층)을 새 층(3층) 측위에 끌고 들어가지 않음.
+        localizedFloorId = nil
+        localizedFloorLevel = nil
+        localizedAreaId = nil
         destinationARPosition = nil
         hasNotifiedArrival = false
         lastStartSnapDistance = nil
