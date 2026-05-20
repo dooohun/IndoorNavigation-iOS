@@ -1698,6 +1698,8 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
 
     var floorTransitionOverlayView: UIView!
     var floorTransitionRestartButton: UIButton!
+    /// 층 전환 모달 pill 안의 안내 라벨. showFloorTransition 에서 "목적지 NF" 등으로 갱신.
+    var floorTransitionLabel: UILabel!
 
     // Phase 5: 방향 안내 UI
     private var headingOverlayView: HeadingAlignmentOverlayView!
@@ -2579,15 +2581,15 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         iconView.translatesAutoresizingMaskIntoConstraints = false
         pill.addSubview(iconView)
 
-        // pill 안 안내 텍스트
-        let label = UILabel()
-        label.text = "도착층으로 이동"
-        label.textColor = .darkText
-        label.font = .systemFont(ofSize: 16, weight: .semibold)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.setContentHuggingPriority(.required, for: .horizontal)
-        label.setContentCompressionResistancePriority(.required, for: .horizontal)
-        pill.addSubview(label)
+        // pill 안 안내 텍스트 — showFloorTransition 에서 "목적지 NF" 등으로 동적 갱신.
+        floorTransitionLabel = UILabel()
+        floorTransitionLabel.text = "도착층으로 이동"
+        floorTransitionLabel.textColor = .darkText
+        floorTransitionLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        floorTransitionLabel.translatesAutoresizingMaskIntoConstraints = false
+        floorTransitionLabel.setContentHuggingPriority(.required, for: .horizontal)
+        floorTransitionLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        pill.addSubview(floorTransitionLabel)
 
         // "이동 완료" 버튼 (파란 capsule, iOS 15+ Configuration)
         var buttonConfig = UIButton.Configuration.filled()
@@ -2620,8 +2622,8 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
             iconView.widthAnchor.constraint(equalToConstant: 22),
             iconView.heightAnchor.constraint(equalToConstant: 22),
 
-            label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
-            label.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+            floorTransitionLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
+            floorTransitionLabel.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
 
             // 이동 완료 버튼 — pill 아래 16pt 간격
             floorTransitionRestartButton.centerXAnchor.constraint(equalTo: floorTransitionOverlayView.centerXAnchor),
@@ -3089,8 +3091,13 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
     }
 
     func showFloorTransition(transitionType: String, targetFloor: Int?, currentFloor: Int?) {
-        // UI는 정적(아이콘/텍스트 변경 없음). transitionType/targetFloor 는 향후 확장용으로 시그니처 보존.
-        _ = (transitionType, targetFloor, currentFloor)
+        // 라벨에 "목적지 NF" / "목적지 BN" 형태로 동적 표시. 층 정보 누락 시 폴백 문구.
+        if let floor = targetFloor {
+            floorTransitionLabel.text = "목적지 \(Self.formatFloorLabel(floor))"
+        } else {
+            floorTransitionLabel.text = "도착층으로 이동"
+        }
+        _ = (transitionType, currentFloor)
 
         floorTransitionOverlayView.alpha = 0
         floorTransitionOverlayView.isHidden = false
@@ -3098,6 +3105,12 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
         UIView.animate(withDuration: 0.3) {
             self.floorTransitionOverlayView.alpha = 1
         }
+    }
+
+    /// 층 번호 → 표기 문자열. 양수면 "NF" (1F, 2F, 3F...), 음수면 "BN" (B1, B2 — 지하).
+    private static func formatFloorLabel(_ level: Int) -> String {
+        if level < 0 { return "B\(abs(level))" }
+        return "\(level)F"
     }
 
     func hideFloorTransition() {
