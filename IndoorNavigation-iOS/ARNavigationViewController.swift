@@ -577,14 +577,24 @@ private final class FloorNavigationMapView: UIView {
 
     private func markerKind(for node: FloorMapNode) -> MapMarkerKind? {
         let type = node.type.lowercased()
-        let connectorType = node.connector?.type.lowercased()
 
         if type == "poi_attach" || type == "corridor" || type == "junction" || type == "endpoint" {
             return nil
         }
+        // category 우선 — 서버가 poi 노드에 elevator/stairs/escalator 카테고리 부여 (예: type="poi", category="stairs").
+        if let cat = node.category?.lowercased() {
+            switch cat {
+            case "elevator": return .elevator
+            case "stairs": return .stairs
+            case "escalator": return .escalator
+            default: break
+            }
+        }
         if type == "poi" {
             return .poi
         }
+        // 폴백 — category 누락 시 type/connector 매칭.
+        let connectorType = node.connector?.type.lowercased()
         if type.contains("elevator") || connectorType == "elevator" {
             return .elevator
         }
