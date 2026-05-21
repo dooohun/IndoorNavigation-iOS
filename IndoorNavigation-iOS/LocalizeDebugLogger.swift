@@ -22,6 +22,16 @@ enum LocalizeDebugLogger {
         let floorLevel: Int?
         let steps: [PathStepResponse]
         let transformedSteps: [(stepNumber: Int, ar: simd_float3)]
+        /// 캡처 시점 ARKit 카메라 forward (= -matchedARPose.col2). ARKit world.
+        let arCameraForwardAtCapture: simd_float3?
+        /// 응답 도착 시점 현재 카메라 XYZ. ARKit world.
+        let arCameraPosCurrent: simd_float3?
+        /// 응답 도착 시점 현재 카메라 forward. ARKit world.
+        let arCameraForwardCurrent: simd_float3?
+        /// 서버 응답 quaternion 에서 추출한 카메라 forward = q.act((1,0,0)). server world.
+        let serverPoseForwardInServerWorld: simd_float3?
+        /// matchedARPose ↔ 현재 arPose 회전 각도(°). 캡처~응답 latency 동안 사용자가 회전한 양.
+        let captureToCurrentARRotationDeg: Float?
     }
 
     @discardableResult
@@ -74,7 +84,12 @@ enum LocalizeDebugLogger {
                     "step_number": t.stepNumber,
                     "ar": ["x": t.ar.x, "y": t.ar.y, "z": t.ar.z]
                 ]
-            }
+            },
+            "ar_camera_forward_at_capture": vec3ToDict(snapshot.arCameraForwardAtCapture) as Any,
+            "ar_camera_pos_current": vec3ToDict(snapshot.arCameraPosCurrent) as Any,
+            "ar_camera_forward_current": vec3ToDict(snapshot.arCameraForwardCurrent) as Any,
+            "server_pose_forward_in_server_world": vec3ToDict(snapshot.serverPoseForwardInServerWorld) as Any,
+            "capture_to_current_ar_rotation_deg": snapshot.captureToCurrentARRotationDeg as Any
         ]
 
         let url = dir.appendingPathComponent("meta.json")
@@ -110,6 +125,16 @@ enum LocalizeDebugLogger {
         let deltaTranslationM: Float            // |new - prev|
         let deltaRotationDeg: Float             // quaternion angle diff (deg)
         let arCameraPosAtCapture: simd_float3?  // 캡처 시점 AR 카메라 XYZ
+        /// 캡처 시점 ARKit 카메라 forward (= -newMatchedARPose.col2). ARKit world frame.
+        let arCameraForwardAtCapture: simd_float3?
+        /// 응답 도착 시점 (현재) frame.camera.transform 의 카메라 XYZ. ARKit world.
+        let arCameraPosCurrent: simd_float3?
+        /// 응답 도착 시점 ARKit 카메라 forward. ARKit world.
+        let arCameraForwardCurrent: simd_float3?
+        /// 서버 응답 quaternion 에서 추출한 카메라 forward = q.act((1,0,0)). server world frame.
+        let serverPoseForwardInServerWorld: simd_float3?
+        /// matchedARPose 와 현재 arPose 사이의 회전 각도(°). 캡처~응답 사이 사용자가 회전한 양.
+        let captureToCurrentARRotationDeg: Float?
         let steps: [PathStep]                   // lastPathSteps 그대로
         let transformedStepsByPrev: [(stepNumber: Int, ar: simd_float3)]
         let transformedStepsByNew: [(stepNumber: Int, ar: simd_float3)]
@@ -147,9 +172,12 @@ enum LocalizeDebugLogger {
             "blend_alpha": snapshot.blendAlpha,
             "delta_translation_m": snapshot.deltaTranslationM,
             "delta_rotation_deg": snapshot.deltaRotationDeg,
-            "ar_camera_pos_at_capture": snapshot.arCameraPosAtCapture.map {
-                ["x": $0.x, "y": $0.y, "z": $0.z]
-            } as Any,
+            "ar_camera_pos_at_capture": vec3ToDict(snapshot.arCameraPosAtCapture) as Any,
+            "ar_camera_forward_at_capture": vec3ToDict(snapshot.arCameraForwardAtCapture) as Any,
+            "ar_camera_pos_current": vec3ToDict(snapshot.arCameraPosCurrent) as Any,
+            "ar_camera_forward_current": vec3ToDict(snapshot.arCameraForwardCurrent) as Any,
+            "server_pose_forward_in_server_world": vec3ToDict(snapshot.serverPoseForwardInServerWorld) as Any,
+            "capture_to_current_ar_rotation_deg": snapshot.captureToCurrentARRotationDeg as Any,
             "captured_ar_poses_4x4": snapshot.capturedARPoses.map { matrixToArray($0) },
             "prev_localized_pose": slamPoseToDict(snapshot.prevLocalizedPose) as Any,
             "new_server_pose": slamPoseToDict(snapshot.newServerPose) as Any,
@@ -190,6 +218,11 @@ enum LocalizeDebugLogger {
             print("[PeriodicDebug] meta.json 쓰기 실패: \(error)")
             return nil
         }
+    }
+
+    private static func vec3ToDict(_ v: simd_float3?) -> [String: Any]? {
+        guard let v else { return nil }
+        return ["x": v.x, "y": v.y, "z": v.z]
     }
 
     private static func slamPoseToDict(_ pose: SLAMPose?) -> [String: Any]? {
