@@ -250,13 +250,13 @@ class ARNavigationLogic {
     private let periodicRelocalizeHardSetThresholdM: Float = 5.0
     /// 주기 V3 재측위 confidence 가드. 초기 측위와 같은 기준으로 wrong-match 위험 응답을 무시.
     private let periodicRelocalizeMinConfidence: Double = 0.50
-    /// 주기 V3 재측위 feature match 수 가드. confidence 만으로는 pose jump 를 충분히 설명하지 못해 병행 검증.
-    private let periodicRelocalizeMinMatches: Int = 80
-    /// 이전 pose 대비 서버 회전 변화가 이 값보다 크면 wrong-match 가능성이 높아 무시.
+    /// 주기 V3 재측위 feature match 수 가드. confidence 가 매칭 품질을 이미 반영하므로
+    /// 절대값은 노이즈성 floor 만 차단하는 수준으로 낮춤 (이전 80 → 30).
+    /// 빌딩 부위마다 SuperPoint 검출 수가 달라 80 은 정상 응답도 자주 떨어트림.
+    private let periodicRelocalizeMinMatches: Int = 30
+    /// propagated prev quat 대비 응답 quat 회전 변화 가드. propagated 기준이라 정상이면 거의 0,
+    /// drift+noise 합쳐도 한 자릿수 도 수준. 45° 는 명백한 wrong-match 만 컷.
     private let periodicRelocalizeMaxRotationDeltaDeg: Float = 45.0
-    /// 서버 pose 이동량이 ARKit 캡처 pose 이동량보다 이 값 이상 더 크고 ratio 도 크면 무시.
-    private let periodicRelocalizeMaxServerARDistanceGapM: Float = 2.5
-    private let periodicRelocalizeMaxServerARDistanceRatio: Float = 2.5
     /// (server pose, ARKit pose) 페어로 정의되는 server-world → ARKit-world 회전이 이전 페어 대비 이 값보다 크게
     /// 흔들리면 wrong-match 로 간주. 실측 케이스(15:41:12)에서 약 18° 회전 드리프트가 path 우측 밀림의 직접 원인.
     private let periodicRelocalizeMaxTransformRotationDeltaDeg: Float = 10.0
@@ -2262,17 +2262,34 @@ class ARNavigationLogic {
 
         let prevTranslation = simd_float3(Float(px), Float(py), Float(pz))
         let newTranslation = translation
-
-        // 큰 변화 감지 — blend 우회 판정용 (blend 적용 전 미리 산출)
-        let dxPre = newTranslation.x - prevTranslation.x
-        let dyPre = newTranslation.y - prevTranslation.y
-        let dzPre = newTranslation.z - prevTranslation.z
-        let deltaTranslationM = sqrt(dxPre*dxPre + dyPre*dyPre + dzPre*dzPre)
         let prevQuat = simd_quatf(ix: Float(pqx), iy: Float(pqy), iz: Float(pqz), r: Float(pqw))
-        let deltaRotationDeg = Self.rotationDeltaDegrees(from: prevQuat, to: quat)
+
+        // 비교 baseline 을 stale prev 가 아니라 "ARKit motion 으로 propagate 된 prev" 로 잡는다.
+        // stale prev 와 비교하면 사용자 walked distance 가 그대로 deltaTranslation 에 들어가
+        // 정상 응답도 server/AR delta mismatch 또는 hard-set 으로 빠짐. propagated baseline 이면
+        // delta = 순수 (drift + 측위 noise + wrong-match) 라 가드가 본래 목적대로 작동.
+        // prevMatchedARPoseSnapshot 이 nil 인 경우 (첫 호출 등) propagation 생략 → prev 그대로 사용.
+        let propagated: (pos: simd_float3, quat: simd_quatf) = {
+            guard let prevMatchedAR = prevMatchedARPoseSnapshot else {
+                return (prevTranslation, prevQuat)
+            }
+            return Self.propagateServerPose(
+                prevPos: prevTranslation,
+                prevQuat: prevQuat,
+                prevMatchedAR: prevMatchedAR,
+                targetMatchedAR: newMatchedARPose
+            )
+        }()
+
+        // deltaTranslationM / deltaRotationDeg 는 propagated 기준 — drift+noise+wrong-match 신호만 추출.
+        let dxPre = newTranslation.x - propagated.pos.x
+        let dyPre = newTranslation.y - propagated.pos.y
+        let dzPre = newTranslation.z - propagated.pos.z
+        let deltaTranslationM = sqrt(dxPre*dxPre + dyPre*dyPre + dzPre*dzPre)
+        let deltaRotationDeg = Self.rotationDeltaDegrees(from: propagated.quat, to: quat)
 
         guard deltaRotationDeg <= periodicRelocalizeMaxRotationDeltaDeg else {
-            print(String(format: "[PeriodicV3] rotation delta %.1f° > %.1f° — 결과 무시",
+            print(String(format: "[PeriodicV3] rotation delta %.1f° > %.1f° (propagated 기준) — 결과 무시",
                          deltaRotationDeg, periodicRelocalizeMaxRotationDeltaDeg))
             self.dumpPeriodicRelocalizeReject(
                 response: response,
@@ -2285,32 +2302,8 @@ class ARNavigationLogic {
             return
         }
 
-        if let prevMatchedARPoseSnapshot {
-            let prevAR = simd_float3(prevMatchedARPoseSnapshot.columns.3.x,
-                                     prevMatchedARPoseSnapshot.columns.3.y,
-                                     prevMatchedARPoseSnapshot.columns.3.z)
-            let newAR = simd_float3(newMatchedARPose.columns.3.x,
-                                    newMatchedARPose.columns.3.y,
-                                    newMatchedARPose.columns.3.z)
-            let arDeltaM = simd_distance(prevAR, newAR)
-            let gap = abs(deltaTranslationM - arDeltaM)
-            let denom = max(min(deltaTranslationM, arDeltaM), 0.25)
-            let ratio = max(deltaTranslationM, arDeltaM) / denom
-            if gap > periodicRelocalizeMaxServerARDistanceGapM ||
-                ratio > periodicRelocalizeMaxServerARDistanceRatio {
-                print(String(format: "[PeriodicV3] server/AR delta mismatch — server=%.2fm ar=%.2fm |gap|=%.2fm ratio=%.2f. 결과 무시",
-                             deltaTranslationM, arDeltaM, gap, ratio))
-                self.dumpPeriodicRelocalizeReject(
-                    response: response,
-                    capturedImages: capturedImages,
-                    capturedPoses: capturedPoses,
-                    prevLocalizedPose: prevLocalizedPoseSnapshot,
-                    prevMatchedARPose: prevMatchedARPoseSnapshot,
-                    reason: "server_ar_delta_mismatch"
-                )
-                return
-            }
-        }
+        // server/AR delta mismatch 가드는 propagated baseline 도입으로 redundant.
+        // (propagation 이 AR motion 을 이미 흡수했으므로 deltaTranslationM 자체가 server↔AR 일관성 신호)
 
         // T_AW_from_SW 회전 일관성 가드.
         // (matchedAR · M · T_SC.inverse) 의 회전이 이전 페어 대비 크게 흔들리면 wrong-match.
@@ -3171,6 +3164,44 @@ class ARNavigationLogic {
         let w = max(-1.0, min(1.0, diff.real))
         let angleRad = 2.0 * acos(abs(w))
         return Float(angleRad * 180.0 / .pi)
+    }
+
+    /// prev pose 를 newMatchedARPose 시점으로 ARKit motion 만큼 propagate.
+    /// 변환식 (bridgePosePair 와 동일 conjugation):
+    ///   T_AW←SW       = prevMatchedAR · M · T_SC_prev⁻¹
+    ///   ΔT_AR         = targetMatchedAR · prevMatchedAR⁻¹
+    ///   ΔT_SW         = T_AW←SW⁻¹ · ΔT_AR · T_AW←SW
+    ///   T_SC_target   = ΔT_SW · T_SC_prev
+    /// 결과는 "AR drift 가 없다면 새 capture 시점에 서버가 보고했어야 할 pose".
+    /// 주기 reloc 가드 비교 baseline 으로 사용 — stale prev 와 비교하면 사용자 walked
+    /// distance 가 그대로 deltaTranslation 에 섞여 가드가 의미를 잃음. propagated 와 비교해야
+    /// 순수 drift/wrong-match 신호만 측정된다.
+    private static func propagateServerPose(
+        prevPos: simd_float3,
+        prevQuat: simd_quatf,
+        prevMatchedAR: simd_float4x4,
+        targetMatchedAR: simd_float4x4
+    ) -> (pos: simd_float3, quat: simd_quatf) {
+        var T_SC_prev = simd_float4x4(prevQuat)
+        T_SC_prev.columns.3 = simd_float4(prevPos.x, prevPos.y, prevPos.z, 1)
+
+        let T_AW_from_SW = prevMatchedAR
+            * CoordinateTransformer.rtabCameraToARKit
+            * T_SC_prev.inverse
+
+        let deltaAR = targetMatchedAR * prevMatchedAR.inverse
+        let deltaSW = T_AW_from_SW.inverse * deltaAR * T_AW_from_SW
+
+        let T_SC_target = deltaSW * T_SC_prev
+        let pos = simd_float3(T_SC_target.columns.3.x,
+                              T_SC_target.columns.3.y,
+                              T_SC_target.columns.3.z)
+        let R = simd_float3x3(
+            simd_float3(T_SC_target.columns.0.x, T_SC_target.columns.0.y, T_SC_target.columns.0.z),
+            simd_float3(T_SC_target.columns.1.x, T_SC_target.columns.1.y, T_SC_target.columns.1.z),
+            simd_float3(T_SC_target.columns.2.x, T_SC_target.columns.2.y, T_SC_target.columns.2.z)
+        )
+        return (pos, simd_quatf(R))
     }
 
     /// (server pose, AR camera pose) 페어로 정의되는 server-world → ARKit-world 변환의 회전 성분만 추출.
