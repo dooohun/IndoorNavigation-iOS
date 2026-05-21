@@ -179,6 +179,11 @@ class ARNavigationLogic {
 
     // 층 이동 인터렉션
     private var hasActiveFloorTransition: Bool = false
+    /// triggerFloorTransition 마지막 발화 시각 (CACurrentMediaTime). 동일 step 도달 시 1Hz tick 마다
+    /// 재트리거되는 것을 막는 안전망. 사용자가 모달을 닫고 restart 흐름에 진입할 때까지의 짧은 구간에
+    /// detectFloorTransition 이 계속 조건 만족할 수 있어 cooldown 으로 방어.
+    private var lastFloorTransitionTriggerAt: TimeInterval = 0
+    private let floorTransitionRetriggerCooldownSec: TimeInterval = 5.0
     private var pendingRemainingSteps: [PathStep] = []
     private var pendingTargetFloor: Int? = nil
     /// 층 전환 트리거 시 cached floor map 의 connectors[].stops[] 에서 lookup 한 target 층 floorId.
@@ -189,6 +194,13 @@ class ARNavigationLogic {
     /// 출발지 확인 모달/RouteOverview 게이트를 건너뛰고 즉시 안내 진입하기 위한 1회성 플래그.
     /// startV3Pathfinding success case 에서 소비. failure / resetForNewTrial 에서도 클리어.
     private var pendingFloorTransitionRestart: Bool = false
+    /// 사용자가 "안내 시작" 을 한 번이라도 누른 적이 있는지. true 가 되면 이후 모든 측위(restart / 사용자 재측위 등)
+    /// 에서 출발지 확인 모달 + RouteOverview 게이트를 우회하고 즉시 안내 진입. cancelStartConfirmation /
+    /// cancelRouteOverview 에서만 false 로 복귀 (사용자가 명시적으로 첫 측위로 되돌리는 경우).
+    private var hasShownInitialNavigation: Bool = false
+    /// pathfinding 응답의 raw steps (다층 전체). detectFloorTransition 이 prefix 끝의 transition step
+    /// 에서 다음 층(targetFloor) 을 raw 에서 lookup 할 때 사용. resetForNewTrial 에서 클리어.
+    private var pendingRawSteps: [PathStep] = []
     /// 층 전환 모달 트리거 거리 (m). stairs/elevator 노드 step 위치와 카메라 사이 XZ 거리.
     /// 이 값 이내일 때만 detectFloorTransition 이 트리거. 너무 빡빡하면 빨리 걷는 사용자가 통과 가능, 너무 넓으면 일찍 뜸.
     /// arrivalThreshold(2.0m) 와 경합해 모달이 안 뜨는 문제 방지 위해 3.0m 로 상향.
@@ -442,7 +454,10 @@ class ARNavigationLogic {
                                       frame.camera.transform.columns.3.z)
                 recomputeCurrentStepIndex(cameraPos: cam)
                 // Floor-transition 자동 트리거: currentStepIndex 가 floor 변경 직전 step 도달 시 모달 표시
+                // cooldown 으로 매 tick 반복 트리거 방어 (안전망).
+                let nowMt = CACurrentMediaTime()
                 if !hasActiveFloorTransition,
+                   nowMt - lastFloorTransitionTriggerAt >= floorTransitionRetriggerCooldownSec,
                    let info = detectFloorTransition(currentStepIdx: currentStepIndex, cameraPos: cam) {
                     triggerFloorTransition(type: info.type, targetFloor: info.targetFloor, currentStepIdx: currentStepIndex)
                 }
@@ -569,8 +584,10 @@ class ARNavigationLogic {
         isAwaitingStartConfirmation = false
         pendingPostConfirmRender = nil
         pendingOverviewSteps = []
+        pendingRawSteps = []
         // 층 전환 재시작 1회성 플래그도 리셋 — 새 trial 은 일반 흐름이라 도착 층 즉시 안내 게이트 우회 X.
         pendingFloorTransitionRestart = false
+        // hasShownInitialNavigation 는 명시적 cancel 외엔 유지 — trial 갱신만으로 모달이 다시 뜨지 않게.
     }
 
     func startLocalizationFlow() {
@@ -586,6 +603,10 @@ class ARNavigationLogic {
         // 즉시 1회 주기 측위만 강제 트리거해서 ARKit world origin drift 를 보정한다.
         // (resetForNewTrial → 서버 wrong-match → 새 19-step 경로 발급으로 인한 60m 오안내 방지)
         if localizedPose != nil && !lastPathSteps.isEmpty {
+            // 사용자 수동 측위 트리거 — 다른 층으로 이동했을 가능성 있어 옛 floorId hint 금지.
+            // localizedFloorId 비워두면 floorIdHint 우선순위가 자연스럽게 nil(ANY 매칭) 또는
+            // pendingTargetFloorId 로 떨어진다. drift 보정 케이스도 ANY 매칭이 같은 층 잡으므로 무해.
+            localizedFloorId = nil
             forcePeriodicRelocalizeNow()
             return
         }
@@ -744,6 +765,9 @@ class ARNavigationLogic {
         let floorIdHint: String? = {
             if let f = localizedFloorId, !f.isEmpty { return f }
             if let f = pendingTargetFloorId, !f.isEmpty { return f }
+            // 층 전환 후 lookup 실패한 경우엔 옛 시작층(userCurrentFloorId) hint 금지 — wrong-match 방지.
+            // 차라리 nil 로 두고 서버 ANY 매칭에 위임한다.
+            if pendingFloorTransitionRestart { return nil }
             return (userCurrentFloorId?.isEmpty == false) ? userCurrentFloorId : nil
         }()
         let depthsForUpload: [Data]? = capturedDepths.isEmpty ? nil : capturedDepths
@@ -1232,16 +1256,11 @@ class ARNavigationLogic {
                         return
                     }
 
-                    // 층 전환 후 재측위 + pathfinding 응답이 도착 층 단일 층이면 모달/RouteOverview 게이트 우회.
-                    // 사용자가 이미 출발지 확인을 통과한 상태라, 새 층에서도 즉시 안내 재개해야 자연스러움.
-                    // 조건: pendingFloorTransitionRestart 플래그 ON + prefix 비어있지 않음
-                    //       + 모든 step 의 floorLevel 이 startFloorLevel 와 일치 (= 추가 층 전환 없음).
-                    let isDestinationFloorRestart =
-                        self.pendingFloorTransitionRestart &&
-                        !prefixed.isEmpty &&
-                        (steps.last?.floorLevel == startFloorLevel) &&
-                        (steps.allSatisfy { $0.floorLevel == startFloorLevel })
-                    if isDestinationFloorRestart {
+                    // 출발지 확인 모달 + RouteOverview 는 "오직 첫 localize" 에만 노출.
+                    // 한 번 "안내 시작" 을 통과한 후엔 (layer transition restart / 사용자 재측위 등) 모달 우회.
+                    // raw steps 보관 — detectFloorTransition 의 prefix 끝 transition 케이스에서 다음 층 lookup.
+                    self.pendingRawSteps = steps
+                    if self.hasShownInitialNavigation {
                         self.pendingFloorTransitionRestart = false
                         self.drawPathFromSteps(prefixed, isRelocalizeRefresh: false)
                         self.refreshFloorNavigationMap(routeSteps: prefixed,
@@ -1407,6 +1426,7 @@ class ARNavigationLogic {
     func startNavigation() {
         guard isAwaitingStartConfirmation else { return }
         isAwaitingStartConfirmation = false
+        hasShownInitialNavigation = true
         let work = pendingPostConfirmRender
         pendingPostConfirmRender = nil
         pendingOverviewSteps = []
@@ -1419,6 +1439,7 @@ class ARNavigationLogic {
     func cancelRouteOverview() {
         guard isAwaitingStartConfirmation else { return }
         isAwaitingStartConfirmation = false
+        hasShownInitialNavigation = false
         pendingPostConfirmRender = nil
         pendingOverviewSteps = []
         trialNumber += 1
@@ -1437,6 +1458,7 @@ class ARNavigationLogic {
     func cancelStartConfirmation() {
         guard isAwaitingStartConfirmation else { return }
         isAwaitingStartConfirmation = false
+        hasShownInitialNavigation = false
         pendingPostConfirmRender = nil
         pendingOverviewSteps = []
         trialNumber += 1
@@ -1844,6 +1866,31 @@ class ARNavigationLogic {
 
     // MARK: - 층 이동 인터렉션
 
+    /// pendingRawSteps 에서 cur step 다음 step 의 floorLevel 을 찾는다. nodeId 우선 매칭, 좌표 1m 폴백.
+    /// prefix 끝의 transition step 이라 nxt 가 nil 일 때 호출. raw 가 비어있거나 매칭 실패면 nil.
+    private func lookupNextFloorFromRaw(after cur: PathStep) -> Int? {
+        guard !pendingRawSteps.isEmpty else { return nil }
+        // nodeId 매칭
+        if let nodeId = cur.nodeId,
+           let idx = pendingRawSteps.firstIndex(where: { $0.nodeId == nodeId }),
+           idx + 1 < pendingRawSteps.count {
+            return pendingRawSteps[idx + 1].floorLevel
+        }
+        // 좌표 1m 폴백
+        if let cx = cur.position?.x, let cy = cur.position?.y {
+            for (idx, s) in pendingRawSteps.enumerated() {
+                if let sx = s.position?.x, let sy = s.position?.y {
+                    let dx = sx - cx, dy = sy - cy
+                    if sqrt(dx * dx + dy * dy) < 1.0,
+                       idx + 1 < pendingRawSteps.count {
+                        return pendingRawSteps[idx + 1].floorLevel
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
     /// 현재 step (또는 다음 step) 이 층 이동 노드(계단/엘리베이터)인지 감지.
     /// - 매칭 기준: floorLevel 변화 OR instruction 키워드 (TAKE_STAIRS / STAIRS / 계단 / ST- / TAKE_ELEVATOR / ELEVATOR / 엘리베이터 / EV-)
     /// - `cameraPos` 가 주어지면 trigger step (= stairs/elevator 노드) 까지 AR 거리가 `floorTransitionTriggerDistance` 이내일 때만 트리거.
@@ -1912,9 +1959,11 @@ class ARNavigationLogic {
             type = "STAIRS"
         }
 
-        // targetFloor: nxt 있으면 nxt 의 floor, 없으면 cur 의 floor (stairs/elevator step 자체가 새 층 노드일 수 있음).
-        let targetFloor = nxt?.floorLevel ?? cur.floorLevel
-        return (type, targetFloor)
+        // targetFloor: nxt 있으면 nxt 의 floor. 없으면(prefix 끝이 transition step) raw 응답에서
+        // 동일 nodeId 또는 좌표 매칭으로 다음 step floor 찾기 — 그래야 "현재 층" 이 잘못 노출되지 않음.
+        // raw 도 못 찾으면 마지막 fallback 으로 cur.floorLevel.
+        let nxtFloor: Int? = nxt?.floorLevel ?? lookupNextFloorFromRaw(after: cur) ?? cur.floorLevel
+        return (type, nxtFloor)
     }
 
     /// cached floor map 들의 connectors[].stops[] 에서 `transitionType` 과 `targetFloor` 에 매칭하는
@@ -1941,20 +1990,17 @@ class ARNavigationLogic {
 
     private func triggerFloorTransition(type: String, targetFloor: Int?, currentStepIdx: Int) {
         hasActiveFloorTransition = true
+        lastFloorTransitionTriggerAt = CACurrentMediaTime()
 
-        // 잔여 steps 추출
+        // 잔여 steps 추출. prefix 끝(예: keyframe prefix drop 으로 transition step 이 마지막)에
+        // transition step 이 있는 경우 remaining 이 비어있을 수 있으나, 이는 도착이 아닌 정상 층 이동.
+        // restartFromFloorTransition 의 새 측위 + pathfinding 이 새 prefix 를 채워주므로 폴백 불필요.
+        // remaining.isEmpty 폴백을 두면 매 1Hz tick 마다 showArrivalNotification() 이 반복 호출돼 깜빡임 발생.
         let remaining: [PathStep]
         if currentStepIdx + 1 < lastPathSteps.count {
             remaining = Array(lastPathSteps[(currentStepIdx + 1)...])
         } else {
             remaining = []
-        }
-
-        // 잔여 step이 비어있으면 도착 처리로 폴백
-        if remaining.isEmpty {
-            hasActiveFloorTransition = false
-            delegate?.showArrivalNotification()
-            return
         }
 
         pendingRemainingSteps = remaining
@@ -2215,6 +2261,9 @@ class ARNavigationLogic {
         let floorIdHint: String? = {
             if let f = localizedFloorId, !f.isEmpty { return f }
             if let f = pendingTargetFloorId, !f.isEmpty { return f }
+            // 층 전환 후 lookup 실패한 경우엔 옛 시작층(userCurrentFloorId) hint 금지 — wrong-match 방지.
+            // 차라리 nil 로 두고 서버 ANY 매칭에 위임한다.
+            if pendingFloorTransitionRestart { return nil }
             return (userCurrentFloorId?.isEmpty == false) ? userCurrentFloorId : nil
         }()
         print("[PeriodicV3] V3 측위 호출 — images=\(images.count) depths=\(depths.count)")
@@ -3091,6 +3140,17 @@ class ARNavigationLogic {
         delegate?.updateTurnArrow(nil)
         // Marker 는 비우지 않음 — 1Hz tick 간격(최대 1초) 동안 마커가 사라지며 깜빡이는 문제 방지.
         // 다음 tick 의 makeActiveMarkerList 호출이 자연스럽게 새 목록으로 교체한다.
+        // 추가: 첫 마커 즉시 발신 — 1Hz tick 공백 동안 마커 부재 회피.
+        // ARMarkerController.update 의 sameKindFamily idempotent 처리로 다음 tick 중복 호출 안전.
+        if let frame = arSession?.currentFrame {
+            let cam = simd_float3(
+                frame.camera.transform.columns.3.x,
+                frame.camera.transform.columns.3.y,
+                frame.camera.transform.columns.3.z
+            )
+            let markers = makeActiveMarkerList(cameraPos: cam)
+            delegate?.updateMarkers(markers)
+        }
     }
 
     /// V3 측위 + pathfinding 후 디버깅 데이터 일괄 dump.
@@ -3378,6 +3438,25 @@ class ARNavigationLogic {
         return .uturn
     }
 
+    /// step i 에서의 진입→진출 각도 (signed degrees). turn 마커 표시 가드용 raw 값.
+    /// 시그니처는 navigationActionKind 와 같은 좌표 입력. 첫·마지막 step 은 nil.
+    private static func navigationTurnAngleDegrees(steps: [PathStep], at i: Int) -> Double? {
+        guard i > 0, i < steps.count - 1 else { return nil }
+        guard let p = steps[i - 1].position, let c = steps[i].position, let n = steps[i + 1].position,
+              let px = p.x, let py = p.y,
+              let cx = c.x, let cy = c.y,
+              let nx = n.x, let ny = n.y else { return nil }
+        let ix = cx - px, iy = cy - py
+        let ox = nx - cx, oy = ny - cy
+        let cross = ix * oy - iy * ox
+        let dot = ix * ox + iy * oy
+        return atan2(cross, dot) * 180.0 / .pi
+    }
+
+    /// AR Next 마커가 turn 으로 표시할 각도 범위 (절대값, degrees). 90° 근처의 명확한 좌/우회전만 통과.
+    /// 30°·60° 같은 애매한 각도는 마커 미표시 — 사용자 명시 요구.
+    private static let nextTurnMarkerAngleRange: ClosedRange<Double> = 85.0...95.0
+
     /// 5m 이내 turn step 진입 시 AR 공간에 띄울 3D 화살표 vm.
     /// `currentStepIndex` 부터 마지막 step 까지 첫 turn(좌/우/살짝좌/살짝우/유턴) 을 검색,
     /// 카메라 ↔ turn step XZ 거리 ≤ 5m 일 때만 vm 생성. 그 외엔 nil 반환.
@@ -3494,6 +3573,15 @@ class ARNavigationLogic {
                         // turn 거리 산출: step i 의 server 좌표 → AR world → cameraPos 와 XZ 거리.
                         // ≤7m 면 곧 회전이므로 즉시 break. >7m 면 PathChevron 에 양보하고 lookahead 계속 진행해
                         // 너머의 stairs/elevator/arrive 까지 발견되도록 한다.
+                        // 각도 가드 — 85~95° 명확한 회전만 turn 마커로 채택. 30°·60° 같은 애매한 회전은 skip.
+                        if let angleDeg = Self.navigationTurnAngleDegrees(steps: lastPathSteps, at: i) {
+                            let absA = abs(angleDeg)
+                            if !Self.nextTurnMarkerAngleRange.contains(absA) {
+                                continue
+                            }
+                        } else {
+                            continue
+                        }
                         guard let p = lastPathSteps[i].position,
                               let sx = p.x, let sy = p.y, let sz = p.z else {
                             // 좌표 결손 시 거리 판단 불가 → 보수적으로 continue (skip).
@@ -3556,9 +3644,22 @@ class ARNavigationLogic {
         case .turnLeft, .turnSlightLeft:
             // ≤7m 일 때만 화살표 마커 발신. PathChevron 시스템이 원거리 안내 담당이라 distance 강등 폐기.
             if d > 7.0 { return [] }
+            // 각도 가드 — 85~95° 명확한 좌회전만 표시. 30°·60° 같은 애매한 각도는 마커 미표시.
+            if let angleDeg = Self.navigationTurnAngleDegrees(steps: lastPathSteps, at: nextIdx) {
+                let absA = abs(angleDeg)
+                if !Self.nextTurnMarkerAngleRange.contains(absA) { return [] }
+            } else {
+                return []
+            }
             kind = .nextTurn(direction: .left)
         case .turnRight, .turnSlightRight:
             if d > 7.0 { return [] }
+            if let angleDeg = Self.navigationTurnAngleDegrees(steps: lastPathSteps, at: nextIdx) {
+                let absA = abs(angleDeg)
+                if !Self.nextTurnMarkerAngleRange.contains(absA) { return [] }
+            } else {
+                return []
+            }
             kind = .nextTurn(direction: .right)
         case .uturn:
             return []  // hidden
