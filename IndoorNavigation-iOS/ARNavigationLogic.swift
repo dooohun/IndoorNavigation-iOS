@@ -1116,6 +1116,40 @@ class ARNavigationLogic {
 
     // MARK: - 경로 탐색
 
+    /// pathfinding 응답 steps 를 현재 측위 층의 prefix 까지만 잘라 반환.
+    /// 층 전환 step 이후의 다른 층 좌표가 그대로 들어와 RouteOverview 거리 점프 / AR 렌더링 비정상
+    /// 노드 위치를 유발하는 문제 방지. 잘려나간 후속 step 은 triggerFloorTransition 에서 재측위 후
+    /// pendingRemainingSteps 로 다시 흐른다.
+    /// - 정책:
+    ///   1) floor == nil OR steps.isEmpty → 필터 미적용, 원본 반환.
+    ///   2) step.floorLevel == nil 인 step → 직전 floor 와 같다고 가정하고 append 계속.
+    ///   3) step.floorLevel != floor 이고 result 비어있지 않음 → break (prefix 종료).
+    ///   4) 첫 step 부터 floor 가 다르면 비정상 → 경고 로그 + 빈 배열 반환.
+    private func currentFloorPrefix(_ steps: [PathStep], floor: Int?) -> [PathStep] {
+        guard let floor, !steps.isEmpty else { return steps }
+        var result: [PathStep] = []
+        for step in steps {
+            if let sf = step.floorLevel {
+                if sf == floor {
+                    result.append(step)
+                } else {
+                    if result.isEmpty {
+                        print("[V3-PATH] currentFloorPrefix: 첫 step 부터 floor 불일치 (step.floor=\(sf), localFloor=\(floor)) — 빈 배열 반환")
+                        return []
+                    }
+                    break
+                }
+            } else {
+                // floorLevel 미상 → 직전 floor 와 같다고 가정.
+                result.append(step)
+            }
+        }
+        if result.count != steps.count {
+            print("[V3-PATH] currentFloorPrefix: \(steps.count) → \(result.count) (floor=\(floor))")
+        }
+        return result
+    }
+
     // NOTE(B4): floorTransitions[] 는 detectFloorTransition 이 step 변화로 자동 처리 — 별도 매핑 불요.
     // 키워드 미스매치 발견 시 detectFloorTransition 의 stairsKeywords/elevatorKeywords 보강.
     private func startV3Pathfinding(startFloorLevel: Int?,
@@ -1162,32 +1196,36 @@ class ARNavigationLogic {
                 switch result {
                 case .success(let resp):
                     let steps = resp.toPathSteps()
+                    // 현재 측위 층의 prefix 까지만 사용 — 층 전환 후 다른 층 좌표가 들어와 거리 점프/
+                    // 비정상 노드 위치 유발하는 버그 방지. 잘려나간 후속 step 은 floor transition 모달
+                    // 이후 재측위 시 새 pathfinding 으로 다시 흐른다.
+                    let prefixed = self.currentFloorPrefix(steps, floor: startFloorLevel)
                     self.lastStartSnapDistance = nil
-                    print("[V3-PATH] steps=\(steps.count), totalDistance=\(resp.totalDistance)m, floorTransitions=\(resp.floorTransitions?.count ?? 0)")
+                    print("[V3-PATH] steps raw=\(steps.count) prefixed=\(prefixed.count), totalDistance=\(resp.totalDistance)m, floorTransitions=\(resp.floorTransitions?.count ?? 0)")
 
                     if isRelocalizeRefresh {
                         // 주기 재측위 / PnP 보정 경로 — 기존 흐름 그대로 (이미 확인된 사용자라 게이트 우회).
-                        self.drawPathFromSteps(steps, isRelocalizeRefresh: true)
-                        self.refreshFloorNavigationMap(routeSteps: steps,
+                        self.drawPathFromSteps(prefixed, isRelocalizeRefresh: true)
+                        self.refreshFloorNavigationMap(routeSteps: prefixed,
                                                        currentFrame: self.arSession?.currentFrame,
                                                        isRelocalizeRefresh: true)
                         // steps[].position 좌표를 lookup multi-query 로 사용 → 경로 전체 영역 keyframe pack 받음.
-                        self.fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
+                        self.fetchBundleForPath(steps: prefixed, fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
                         return
                     }
 
                     // 초기 측위 + 첫 pathfinding 응답 — 게이트.
                     // 실제 렌더링/HUD/주기 측위 시작은 사용자가 출발지 확인 모달에서 "확인" 을 눌러야 일어남.
-                    self.pendingOverviewSteps = steps
+                    self.pendingOverviewSteps = prefixed
                     self.isAwaitingStartConfirmation = true
                     self.pendingPostConfirmRender = { [weak self] in
                         guard let self else { return }
-                        self.drawPathFromSteps(steps, isRelocalizeRefresh: false)
-                        self.refreshFloorNavigationMap(routeSteps: steps,
+                        self.drawPathFromSteps(prefixed, isRelocalizeRefresh: false)
+                        self.refreshFloorNavigationMap(routeSteps: prefixed,
                                                        currentFrame: self.arSession?.currentFrame,
                                                        isRelocalizeRefresh: false)
                         self.dumpLocalizeDebug(rawSteps: resp.steps)
-                        self.fetchBundleForPath(steps: steps,
+                        self.fetchBundleForPath(steps: prefixed,
                                                 fallbackTranslation: translation,
                                                 fallbackFloorLevel: startFloorLevel)
                         self.delegate?.setHUDVisible(true)
@@ -1202,7 +1240,7 @@ class ARNavigationLogic {
 
                     // map cache 가 채워진 직후 nearestPOIName 결정 가능 → 모달 표시.
                     self.refreshFloorNavigationMap(
-                        routeSteps: steps,
+                        routeSteps: prefixed,
                         currentFrame: self.arSession?.currentFrame,
                         isRelocalizeRefresh: false,
                         onMapReady: { [weak self] in
@@ -1413,14 +1451,27 @@ class ARNavigationLogic {
         }
 
         // destination
-        let destFloor: Int? = steps.last?.floorLevel
-        items.append(RouteOverviewItem(
-            kind: .destination,
-            action: .unknown,
-            instruction: destinationName,
-            distanceMeters: 0,
-            floorLevel: destFloor
-        ))
+        // prefix 가 잘린 결과로 마지막 step 이 층 전환 노드(계단/엘리베이터)인 경우 destination row 생략.
+        // 실제 destination 은 transition 이후 재측위에서 새 prefix 의 마지막 step 으로 다시 잡힌다.
+        // 판정 기준: 마지막 step instruction 에 STAIRS / ELEVATOR / 계단 / 엘리베이터 / ST- / EV- / STAIRCASE 키워드 포함.
+        let isTransitionTail: Bool = {
+            guard let lastInstr = steps.last?.instruction, !lastInstr.isEmpty else { return false }
+            let upper = lastInstr.uppercased()
+            let transitionKeywords = ["TAKE_STAIRS", "STAIRS", "STAIRCASE", "ST-",
+                                      "TAKE_ELEVATOR", "ELEVATOR", "EV-",
+                                      "계단", "엘리베이터"]
+            return transitionKeywords.contains { upper.contains($0) || lastInstr.contains($0) }
+        }()
+        if !isTransitionTail {
+            let destFloor: Int? = steps.last?.floorLevel
+            items.append(RouteOverviewItem(
+                kind: .destination,
+                action: .unknown,
+                instruction: destinationName,
+                distanceMeters: 0,
+                floorLevel: destFloor
+            ))
+        }
 
         return items
     }
@@ -1716,7 +1767,8 @@ class ARNavigationLogic {
         let combined = curInstr + " " + nxtInstr
 
         // "ST-A1", "ST-B2" 등 서버 계단 노드 식별자 prefix 매칭. "Start" 와 충돌 회피 위해 hyphen 포함.
-        let stairsKeywords = ["TAKE_STAIRS", "STAIRS", "계단", "ST-"]
+        // "STAIRCASE:A" 형태도 매칭 (서버 instruction 의 노드명 변형).
+        let stairsKeywords = ["TAKE_STAIRS", "STAIRCASE", "STAIRS", "계단", "ST-"]
         let elevatorKeywords = ["TAKE_ELEVATOR", "ELEVATOR", "엘리베이터", "EV-"]
 
         let hasStairs = stairsKeywords.contains { combined.contains($0) }
