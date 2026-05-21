@@ -71,6 +71,11 @@ protocol ARNavigationLogicDelegate: AnyObject {
     func showStartConfirmation(nearPoiName: String?)
     /// 사용자가 확인/취소를 눌렀거나 새 trial 진입으로 모달이 더 이상 유효하지 않을 때 닫기.
     func dismissStartConfirmation()
+    /// 출발지 확인 → "전체 경로 안내" 화면 표시. 사용자가 "안내 시작" 누르면 logic.startNavigation 호출.
+    /// items 는 [origin, step…, destination] 형태로 이미 구성됨.
+    func showRouteOverview(items: [RouteOverviewItem], totalDistanceMeters: Double, destinationName: String)
+    /// startNavigation / cancelRouteOverview 호출 시 화면 dismiss.
+    func dismissRouteOverview()
     /// 취소 → 새 trial 진입 직전에 locateButton 라벨을 초기 상태("주변 스캔") 로 복원.
     func resetLocateButtonLabel()
 }
@@ -332,6 +337,9 @@ class ARNavigationLogic {
     private var isAwaitingStartConfirmation: Bool = false
     /// 확인 누를 때 실행할 렌더링/HUD/주기 측위 시작 클로저. 취소 시 nil 로 폐기.
     private var pendingPostConfirmRender: (() -> Void)?
+    /// 출발지 확인 후 "전체 경로 안내" 화면 구성에 사용할 pathfinding steps.
+    /// pathfinding 응답에서 채우고 startNavigation/cancelRouteOverview 호출 시 비움.
+    private var pendingOverviewSteps: [PathStep] = []
 
     // MARK: - 외부 노출
 
@@ -555,6 +563,7 @@ class ARNavigationLogic {
         // 출발지 확인 모달 게이트도 함께 리셋 — 새 trial 진입 시 이전 pending 렌더링/대기 상태 폐기.
         isAwaitingStartConfirmation = false
         pendingPostConfirmRender = nil
+        pendingOverviewSteps = []
     }
 
     func startLocalizationFlow() {
@@ -1169,6 +1178,7 @@ class ARNavigationLogic {
 
                     // 초기 측위 + 첫 pathfinding 응답 — 게이트.
                     // 실제 렌더링/HUD/주기 측위 시작은 사용자가 출발지 확인 모달에서 "확인" 을 눌러야 일어남.
+                    self.pendingOverviewSteps = steps
                     self.isAwaitingStartConfirmation = true
                     self.pendingPostConfirmRender = { [weak self] in
                         guard let self else { return }
@@ -1290,13 +1300,46 @@ class ARNavigationLogic {
         return nil
     }
 
-    /// 출발지 확인 모달의 "확인" 버튼 콜백. 게이트 해제 후 보류된 렌더링/HUD/주기 측위 시작.
+    /// 출발지 확인 모달의 "확인" 버튼 콜백. 모달 dismiss + 전체 경로 안내 화면 표시.
+    /// 게이트(isAwaitingStartConfirmation) 는 startNavigation 호출 전까지 true 로 유지 — 더블탭 재진입 차단 보존.
+    /// 실제 렌더링은 pendingPostConfirmRender 에 그대로 보존, startNavigation 에서 실행.
     func confirmStartLocation() {
+        guard isAwaitingStartConfirmation else { return }
+        // 게이트는 풀지 않음. pendingPostConfirmRender 도 보존.
+        delegate?.dismissStartConfirmation()
+        let items = makeRouteOverviewItems(steps: pendingOverviewSteps)
+        let total = computeTotalDistanceMeters(steps: pendingOverviewSteps)
+        delegate?.showRouteOverview(items: items, totalDistanceMeters: total, destinationName: destinationName)
+    }
+
+    /// "전체 경로 안내" 화면의 "안내 시작" 버튼 콜백. 보류된 렌더링/HUD/주기 측위 시작.
+    func startNavigation() {
         guard isAwaitingStartConfirmation else { return }
         isAwaitingStartConfirmation = false
         let work = pendingPostConfirmRender
         pendingPostConfirmRender = nil
+        pendingOverviewSteps = []
+        delegate?.dismissRouteOverview()
         work?()
+    }
+
+    /// "전체 경로 안내" 화면의 닫기/취소 콜백. 게이트 해제 + 새 trial 진입 준비 + 사용자에게 재 스캔 안내.
+    /// cancelStartConfirmation 과 동일한 UI 복귀 흐름이지만 dismissRouteOverview 를 호출.
+    func cancelRouteOverview() {
+        guard isAwaitingStartConfirmation else { return }
+        isAwaitingStartConfirmation = false
+        pendingPostConfirmRender = nil
+        pendingOverviewSteps = []
+        trialNumber += 1
+        resetForNewTrial()
+        delegate?.dismissRouteOverview()
+        delegate?.setHUDVisible(false)
+        delegate?.hideFloorNavigationMap()
+        delegate?.setLoading(false)
+        delegate?.showRouteCalculating(false)
+        delegate?.updateStatus("다시 한번 주변을 스캔해 주세요", color: .white)
+        delegate?.resetLocateButtonLabel()
+        delegate?.setLocateButtonVisible(true)
     }
 
     /// 출발지 확인 모달의 "취소" 버튼 콜백. 게이트 해제 + 새 trial 진입 준비 + 사용자에게 재 스캔 안내.
@@ -1304,6 +1347,7 @@ class ARNavigationLogic {
         guard isAwaitingStartConfirmation else { return }
         isAwaitingStartConfirmation = false
         pendingPostConfirmRender = nil
+        pendingOverviewSteps = []
         trialNumber += 1
         resetForNewTrial()
         delegate?.dismissStartConfirmation()
@@ -1314,6 +1358,99 @@ class ARNavigationLogic {
         delegate?.updateStatus("다시 한번 주변을 스캔해 주세요", color: .white)
         delegate?.resetLocateButtonLabel()
         delegate?.setLocateButtonVisible(true)
+    }
+
+    // MARK: - RouteOverview 헬퍼
+
+    /// pathfinding steps 를 RouteOverviewItem 배열로 변환. [origin] + step rows + [destination].
+    /// - origin: 첫 step 의 floorLevel 사용.
+    /// - 각 step row: navigationActionKind 재사용. instruction 빈 경우 action 기반 한국어 fallback.
+    /// - distanceMeters: 직전 valid position 으로부터의 XY 유클리드 거리(Z 무시).
+    /// - destination: 마지막 valid position 까지의 거리(없으면 0).
+    /// - steps.isEmpty → [origin, destination] 2행만 fallback.
+    private func makeRouteOverviewItems(steps: [PathStep]) -> [RouteOverviewItem] {
+        var items: [RouteOverviewItem] = []
+
+        // origin
+        let originFloor: Int? = steps.first?.floorLevel
+        items.append(RouteOverviewItem(
+            kind: .origin,
+            action: .unknown,
+            instruction: "현재 위치",
+            distanceMeters: 0,
+            floorLevel: originFloor
+        ))
+
+        // step rows
+        var prevPos: (Double, Double)? = nil
+        for (i, s) in steps.enumerated() {
+            let action = Self.navigationActionKind(steps: steps, at: i)
+            // 거리: 직전 valid position 에서 현재 step 의 (x, y) 까지.
+            var dist: Double = 0
+            if let sx = s.position?.x, let sy = s.position?.y {
+                if let (px, py) = prevPos {
+                    let dx = sx - px
+                    let dy = sy - py
+                    dist = sqrt(dx * dx + dy * dy)
+                }
+                prevPos = (sx, sy)
+            }
+            // instruction 은 항상 action 기반 한국어(서버 영문 무시) — UX 일관성 보장.
+            let instr: String = Self.fallbackInstructionText(for: action)
+            items.append(RouteOverviewItem(
+                kind: .step,
+                action: action,
+                instruction: instr,
+                distanceMeters: dist,
+                floorLevel: s.floorLevel
+            ))
+        }
+
+        // destination
+        let destFloor: Int? = steps.last?.floorLevel
+        items.append(RouteOverviewItem(
+            kind: .destination,
+            action: .unknown,
+            instruction: destinationName,
+            distanceMeters: 0,
+            floorLevel: destFloor
+        ))
+
+        return items
+    }
+
+    /// steps[i-1].position ↔ steps[i].position XY 유클리드 거리 합(Z 무시). 좌표 nil step 은 skip하고 직전 valid 유지.
+    private func computeTotalDistanceMeters(steps: [PathStep]) -> Double {
+        var total: Double = 0
+        var prevPos: (Double, Double)? = nil
+        for s in steps {
+            guard let sx = s.position?.x, let sy = s.position?.y else { continue }
+            if let (px, py) = prevPos {
+                let dx = sx - px
+                let dy = sy - py
+                total += sqrt(dx * dx + dy * dy)
+            }
+            prevPos = (sx, sy)
+        }
+        return total
+    }
+
+    /// NavigationActionKind → 한국어 표시 문구. RouteOverview 에서도 동일 매핑 사용.
+    /// RouteOverviewStepCell.koreanInstruction(for:) 과 1:1 동기화 유지할 것.
+    private static func fallbackInstructionText(for action: NavigationActionKind) -> String {
+        switch action {
+        case .straight: return "직진"
+        case .turnLeft: return "좌회전"
+        case .turnRight: return "우회전"
+        case .turnSlightLeft: return "좌측 방향"
+        case .turnSlightRight: return "우측 방향"
+        case .uturn: return "유턴"
+        case .stairsUp: return "계단으로 위층 이동"
+        case .stairsDown: return "계단으로 아래층 이동"
+        case .elevator: return "엘리베이터 이용"
+        case .arrive: return "목적지 도착"
+        case .unknown: return "이동"
+        }
     }
 
     // MARK: - AR 경로 렌더링 (PathChevron 시스템 — drawPathFromSteps 가 직접 PathChevronController 호출)

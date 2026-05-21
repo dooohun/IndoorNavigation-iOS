@@ -1656,6 +1656,10 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     private var startConfirmBadge: UIView!
     private var startConfirmLabel: UILabel!
 
+    // 전체 경로 안내 화면 — 출발지 확인 → "안내 시작" 사이에 표시. weak 로 보유.
+    // showRouteOverview 에서 present 후 보관, dismissRouteOverview 에서 nil-out.
+    private weak var presentedRouteOverviewVC: RouteOverviewViewController?
+
     var hudContainerView: UIView!
     // Phase 6: 기존 HUD 멤버는 신규 카드 UX 흐름에서 미사용 — 옵셔널화로 nil 안전
     var destinationPillView: UIView?
@@ -3307,6 +3311,42 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
                 self.startConfirmBadge.isHidden = true
                 self.startConfirmBadge.alpha = 1
             })
+        }
+    }
+
+    func showRouteOverview(items: [RouteOverviewItem], totalDistanceMeters: Double, destinationName: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            // 모달 표시 직전에 같이 떠 있을 수 있는 loading/route calculating 정리.
+            self.setLoading(false)
+            self.showRouteCalculating(false)
+
+            let vc = RouteOverviewViewController(
+                items: items,
+                totalDistanceMeters: totalDistanceMeters,
+                destinationName: destinationName
+            )
+            vc.modalPresentationStyle = .overFullScreen
+            vc.modalTransitionStyle = .crossDissolve
+            vc.isModalInPresentation = true
+            vc.onStartNavigation = { [weak self] in
+                self?.dismiss(animated: true) { self?.logic.startNavigation() }
+            }
+            vc.onCancel = { [weak self] in
+                self?.dismiss(animated: true) { self?.logic.cancelRouteOverview() }
+            }
+            self.present(vc, animated: true)
+            self.presentedRouteOverviewVC = vc
+        }
+    }
+
+    func dismissRouteOverview() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if let vc = self.presentedRouteOverviewVC, vc.presentingViewController != nil {
+                vc.dismiss(animated: true)
+            }
+            self.presentedRouteOverviewVC = nil
         }
     }
 
