@@ -236,7 +236,7 @@ class ARNavigationLogic {
     /// 1단계 quick win — 2.0 → 3.0 상향. hard-set(즉시 점프) 발동 빈도 감소.
     private let periodicRelocalizeHardSetThresholdM: Float = 3.0
     /// 주기 V3 재측위 confidence 가드. 초기 측위와 같은 기준으로 wrong-match 위험 응답을 무시.
-    private let periodicRelocalizeMinConfidence: Double = 0.65
+    private let periodicRelocalizeMinConfidence: Double = 0.50
     /// 주기 V3 재측위 feature match 수 가드. confidence 만으로는 pose jump 를 충분히 설명하지 못해 병행 검증.
     private let periodicRelocalizeMinMatches: Int = 80
     /// 이전 pose 대비 서버 회전 변화가 이 값보다 크면 wrong-match 가능성이 높아 무시.
@@ -732,7 +732,7 @@ class ARNavigationLogic {
 
     /// V3 측위 응답 핸들러 — showScanComplete + V3 pathfinding 시작.
     private func handleLocalizeV3Success(response: SLAMLocalizeResponse) {
-        guard response.confidence >= 0.65 else {
+        guard response.confidence >= 0.50 else {
             delegate?.setLoading(false)
             delegate?.showScanFailed(message: "위치 인식 신뢰도가 낮아요.\n다시 한번 스캔해 주세요.")
             delegate?.setLocateButtonVisible(true)
@@ -983,46 +983,14 @@ class ARNavigationLogic {
     }
 
     private func currentFloorNavigationPose(frame: ARFrame?) -> (position: Position, headingDegrees: Float?)? {
-        guard let pose = localizedPose,
-              let x = pose.x,
-              let y = pose.y,
-              let z = pose.z,
-              let qx = pose.qx,
-              let qy = pose.qy,
-              let qz = pose.qz,
-              let qw = pose.qw else { return nil }
-
-        let serverPosition = simd_float3(Float(x), Float(y), Float(z))
-        let serverQuaternion = simd_quatf(ix: Float(qx), iy: Float(qy), iz: Float(qz), r: Float(qw))
-
-        guard let frame, let matchedARPose else {
-            return (
-                Position(x: x, y: y, z: z),
-                serverHeadingDegrees(from: serverQuaternion)
-            )
-        }
-
-        let input = CoordinateTransformer.Input(
-            serverPosition: serverPosition,
-            serverQuaternion: serverQuaternion,
-            arCameraPose: matchedARPose
-        )
-        let cameraTransform = frame.camera.transform
-        let arCameraPosition = simd_float3(
-            cameraTransform.columns.3.x,
-            cameraTransform.columns.3.y,
-            cameraTransform.columns.3.z
-        )
-        let forwardAR4 = cameraTransform * simd_float4(0, 0, -1, 1)
-        let arForwardPoint = simd_float3(forwardAR4.x, forwardAR4.y, forwardAR4.z)
-
-        let currentServer = arWorldPointToServer(arCameraPosition, input: input)
-        let forwardServer = arWorldPointToServer(arForwardPoint, input: input)
-        let heading = Float(atan2(forwardServer.y - currentServer.y,
-                                  forwardServer.x - currentServer.x) * 180 / .pi)
-
+        // 매칭 시점 페어를 현재 카메라 시점으로 전진 — 전진된 server camera pose 가 곧 "지금 사용자 위치/방향".
+        // frame == nil 일 땐 bridgePosePair 가 matched 페어 그대로 반환하므로 fallback 동작 보존.
+        guard let bridge = bridgePosePair(currentFrame: frame) else { return nil }
+        let heading = serverHeadingDegrees(from: bridge.serverQuat)
         return (
-            Position(x: Double(currentServer.x), y: Double(currentServer.y), z: Double(currentServer.z)),
+            Position(x: Double(bridge.serverPos.x),
+                     y: Double(bridge.serverPos.y),
+                     z: Double(bridge.serverPos.z)),
             heading
         )
     }
@@ -1043,6 +1011,71 @@ class ARNavigationLogic {
     private func serverHeadingDegrees(from quaternion: simd_quatf) -> Float {
         let forward = quaternion.act(simd_float3(1, 0, 0))
         return Float(atan2(forward.y, forward.x) * 180 / .pi)
+    }
+
+    /// matchedARPose (캡처 시점 ARKit pose) ↔ currentFrame.camera.transform (렌더 시점 ARKit pose) 의
+    /// motion delta 만큼 서버 pose 를 server world frame 에서 전진시켜 새 bridge 페어를 반환.
+    ///
+    ///   ΔT_AR    = currentAR · matchedAR⁻¹                       (ARKit world 내 모션)
+    ///   T_AW←SW  = matchedAR · M · T_SC_match⁻¹                  (server world → ARKit world bridge)
+    ///   ΔT_SW    = T_AW←SW⁻¹ · ΔT_AR · T_AW←SW                   (conjugation: ARKit world → server world)
+    ///   T_SC_now = ΔT_SW · T_SC_match                            (서버 pose 같은 모션 전진)
+    ///
+    /// `currentFrame == nil` 또는 matched 데이터 누락 시 매칭 시점 페어 그대로 반환.
+    /// ARKit 가 drift 없는 한 결과는 (T_SC_match, matchedARPose) 와 변환식 상 등가지만, drift 가 있으면
+    /// "현재 카메라 시점" 기준으로 그만큼을 흡수해 chevron / 2D heading 이 같이 따라간다.
+    private func bridgePosePair(currentFrame: ARFrame?)
+        -> (serverPos: simd_float3, serverQuat: simd_quatf, arCameraPose: simd_float4x4)?
+    {
+        guard let pose = localizedPose,
+              let px = pose.x, let py = pose.y, let pz = pose.z,
+              let qx = pose.qx, let qy = pose.qy, let qz = pose.qz, let qw = pose.qw,
+              let matchedAR = matchedARPose else { return nil }
+
+        let matchedPos = simd_float3(Float(px), Float(py), Float(pz))
+        let matchedQuat = simd_quatf(ix: Float(qx), iy: Float(qy), iz: Float(qz), r: Float(qw))
+
+        guard let frame = currentFrame else {
+            return (matchedPos, matchedQuat, matchedAR)
+        }
+        let currentAR = frame.camera.transform
+
+        // T_SC_match : server world ← server camera (matched 시점)
+        var T_SC_match = simd_float4x4(matchedQuat)
+        T_SC_match.columns.3 = simd_float4(matchedPos.x, matchedPos.y, matchedPos.z, 1)
+
+        // T_AW_from_SW : server world → ARKit world (matched 시점 페어로 정의)
+        let T_AW_from_SW = matchedAR
+            * CoordinateTransformer.rtabCameraToARKit
+            * T_SC_match.inverse
+
+        // 모션을 server world frame 으로 conjugation
+        let deltaAR = currentAR * matchedAR.inverse
+        let deltaSW = T_AW_from_SW.inverse * deltaAR * T_AW_from_SW
+
+        // 전진된 server camera pose
+        let T_SC_now = deltaSW * T_SC_match
+        let newPos = simd_float3(T_SC_now.columns.3.x, T_SC_now.columns.3.y, T_SC_now.columns.3.z)
+        let R_now = simd_float3x3(
+            simd_float3(T_SC_now.columns.0.x, T_SC_now.columns.0.y, T_SC_now.columns.0.z),
+            simd_float3(T_SC_now.columns.1.x, T_SC_now.columns.1.y, T_SC_now.columns.1.z),
+            simd_float3(T_SC_now.columns.2.x, T_SC_now.columns.2.y, T_SC_now.columns.2.z)
+        )
+        let newQuat = simd_quatf(R_now)
+
+        // diagnostic: 페어 propagation 후 server heading / position 변화량 로깅
+        let matchedHeading = serverHeadingDegrees(from: matchedQuat)
+        let propagatedHeading = serverHeadingDegrees(from: newQuat)
+        var yawDelta = propagatedHeading - matchedHeading
+        while yawDelta > 180 { yawDelta -= 360 }
+        while yawDelta < -180 { yawDelta += 360 }
+        let posDelta = simd_distance(matchedPos, newPos)
+        if abs(yawDelta) >= 0.5 || posDelta >= 0.05 {
+            print(String(format: "[BridgePair] match→now yawΔ=%.2f° posΔ=%.2fm",
+                         yawDelta, posDelta))
+        }
+
+        return (newPos, newQuat, currentAR)
     }
 
     // MARK: - 경로 탐색
@@ -1897,6 +1930,12 @@ class ARNavigationLogic {
             return simd_float3(m.columns.3.x, m.columns.3.y, m.columns.3.z)
         }()
 
+        let cameraComparison = Self.makeCameraForwardComparison(
+            matchedARPose: newMatchedARPose,
+            currentARPose: arSession?.currentFrame?.camera.transform,
+            serverPoseQuat: response.pose.rotationQuaternion
+        )
+
         let snapshot = LocalizeDebugLogger.PeriodicSnapshot(
             capturedImages: capturedImages,
             capturedARPoses: capturedPoses,
@@ -1914,6 +1953,11 @@ class ARNavigationLogic {
             deltaTranslationM: deltaT,
             deltaRotationDeg: deltaRotDeg,
             arCameraPosAtCapture: arCamPos,
+            arCameraForwardAtCapture: cameraComparison.forwardAtCapture,
+            arCameraPosCurrent: cameraComparison.posCurrent,
+            arCameraForwardCurrent: cameraComparison.forwardCurrent,
+            serverPoseForwardInServerWorld: cameraComparison.serverForwardInServerWorld,
+            captureToCurrentARRotationDeg: cameraComparison.captureToCurrentRotDeg,
             steps: self.lastPathSteps,
             transformedStepsByPrev: transformedByPrev,
             transformedStepsByNew: transformedByNew,
@@ -1986,6 +2030,17 @@ class ARNavigationLogic {
             return simd_float3(m.columns.3.x, m.columns.3.y, m.columns.3.z)
         }()
 
+        // reject 케이스에서 capturedPoses 가 비면 newMatchedARPose 는 identity placeholder.
+        // 그 경우 forward / rotation 비교는 무의미하므로 nil 로 넘김.
+        let matchedARPoseForComparison: simd_float4x4? =
+            capturedPoses.indices.contains(arPoseIndex) ? capturedPoses[arPoseIndex] : nil
+
+        let cameraComparison = Self.makeCameraForwardComparison(
+            matchedARPose: matchedARPoseForComparison,
+            currentARPose: arSession?.currentFrame?.camera.transform,
+            serverPoseQuat: response.pose.rotationQuaternion
+        )
+
         let snapshot = LocalizeDebugLogger.PeriodicSnapshot(
             capturedImages: capturedImages,
             capturedARPoses: capturedPoses,
@@ -2003,6 +2058,11 @@ class ARNavigationLogic {
             deltaTranslationM: deltaT,
             deltaRotationDeg: deltaRotDeg,
             arCameraPosAtCapture: arCamPos,
+            arCameraForwardAtCapture: cameraComparison.forwardAtCapture,
+            arCameraPosCurrent: cameraComparison.posCurrent,
+            arCameraForwardCurrent: cameraComparison.forwardCurrent,
+            serverPoseForwardInServerWorld: cameraComparison.serverForwardInServerWorld,
+            captureToCurrentARRotationDeg: cameraComparison.captureToCurrentRotDeg,
             steps: self.lastPathSteps,
             transformedStepsByPrev: transformedByPrev,
             transformedStepsByNew: transformedByNew,
@@ -2286,17 +2346,16 @@ class ARNavigationLogic {
         pathNodes.forEach { $0.removeFromParentNode() }
         pathNodes.removeAll()
 
-        guard let arPose = matchedARPose, let pose = localizedPose else { return }
-
-        let serverPos = simd_float3(Float(pose.x ?? 0), Float(pose.y ?? 0), Float(pose.z ?? 0))
-        let quat = simd_quatf(
-            ix: Float(pose.qx ?? 0), iy: Float(pose.qy ?? 0),
-            iz: Float(pose.qz ?? 0), r: Float(pose.qw ?? 1)
-        )
+        // matched 시점 페어 대신 현재 카메라 시점으로 전진된 페어 사용 — chevron / destination 위치를
+        // "지금" ARKit world 기준으로 anchor. matchedARPose / localizedPose 만 있을 때 (currentFrame nil)
+        // 는 매칭 시점 페어 그대로 fallback.
+        guard let bridge = bridgePosePair(currentFrame: arSession?.currentFrame) else { return }
         let input = CoordinateTransformer.Input(
-            serverPosition: serverPos, serverQuaternion: quat, arCameraPose: arPose
+            serverPosition: bridge.serverPos,
+            serverQuaternion: bridge.serverQuat,
+            arCameraPose: bridge.arCameraPose
         )
-        let floorY = arPose.columns.3.y - 1.7
+        let floorY = bridge.arCameraPose.columns.3.y - 1.7
 
         // 현재 측위된 floor 의 step 만 필터해서 chevron 분포. 층 전환 step 은 별도 모달이 담당.
         let curFloor = localizedFloorLevel
@@ -2382,6 +2441,12 @@ class ARNavigationLogic {
             return (s.stepNumber, ar)
         }
 
+        let cameraComparison = Self.makeCameraForwardComparison(
+            matchedARPose: arPose,
+            currentARPose: arSession?.currentFrame?.camera.transform,
+            serverPoseQuat: quat
+        )
+
         let snapshot = LocalizeDebugLogger.Snapshot(
             matchedImageIndex: lastMatchedImageIndex,
             matchedImage: lastMatchedImage,
@@ -2392,7 +2457,12 @@ class ARNavigationLogic {
             floorId: response.floorId,
             floorLevel: response.floorLevel,
             steps: rawSteps,
-            transformedSteps: transformed
+            transformedSteps: transformed,
+            arCameraForwardAtCapture: cameraComparison.forwardAtCapture,
+            arCameraPosCurrent: cameraComparison.posCurrent,
+            arCameraForwardCurrent: cameraComparison.forwardCurrent,
+            serverPoseForwardInServerWorld: cameraComparison.serverForwardInServerWorld,
+            captureToCurrentARRotationDeg: cameraComparison.captureToCurrentRotDeg
         )
         LocalizeDebugLogger.dump(snapshot)
     }
@@ -2449,6 +2519,55 @@ class ARNavigationLogic {
     /// 두 4x4 변환행렬을 `alpha` 비율로 보간. translation 은 lerp, rotation 은 slerp 후 재조립.
     /// 주기 V3 재측위에서 localizedPose 와 matchedARPose 를 같은 α 로 blend 해 변환식 정합성 유지.
     /// alpha=0 → prev 그대로, alpha=1 → new 그대로, 그 사이는 중간값.
+    /// dump 비교용 카메라 forward 페어. 모두 같은 시점의 단위 벡터.
+    /// - `forwardAtCapture` / `posCurrent` / `forwardCurrent` : ARKit world frame
+    /// - `serverForwardInServerWorld` : server world frame (서버 q.act((1,0,0)))
+    /// - `captureToCurrentRotDeg` : matchedARPose ↔ currentARPose quaternion 각도차 (°)
+    private struct CameraForwardComparison {
+        let forwardAtCapture: simd_float3?
+        let posCurrent: simd_float3?
+        let forwardCurrent: simd_float3?
+        let serverForwardInServerWorld: simd_float3?
+        let captureToCurrentRotDeg: Float?
+    }
+
+    /// 캡처 시점(matched) AR pose, 응답 도착 시점(current) AR pose, 서버 응답 quat 셋을 받아
+    /// dump 에 들어갈 forward / pos / 회전 비교값을 일괄 계산. 입력 중 nil 인 항목은 결과도 nil.
+    private static func makeCameraForwardComparison(
+        matchedARPose: simd_float4x4?,
+        currentARPose: simd_float4x4?,
+        serverPoseQuat: simd_quatf?
+    ) -> CameraForwardComparison {
+        func cameraForward(_ m: simd_float4x4) -> simd_float3 {
+            let f = m * simd_float4(0, 0, -1, 0)
+            return simd_float3(f.x, f.y, f.z)
+        }
+
+        let fwdAtCapture = matchedARPose.map { cameraForward($0) }
+        let posCurrent: simd_float3? = currentARPose.map {
+            simd_float3($0.columns.3.x, $0.columns.3.y, $0.columns.3.z)
+        }
+        let fwdCurrent = currentARPose.map { cameraForward($0) }
+        let serverFwd = serverPoseQuat.map { $0.act(simd_float3(1, 0, 0)) }
+
+        let captureToCurrentDeg: Float? = {
+            guard let m = matchedARPose, let c = currentARPose else { return nil }
+            let qM = simd_quatf(m)
+            let qC = simd_quatf(c)
+            let diff = qM.inverse * qC
+            let w = max(-1.0, min(1.0, diff.real))
+            return Float(2.0 * acos(abs(w)) * 180.0 / .pi)
+        }()
+
+        return CameraForwardComparison(
+            forwardAtCapture: fwdAtCapture,
+            posCurrent: posCurrent,
+            forwardCurrent: fwdCurrent,
+            serverForwardInServerWorld: serverFwd,
+            captureToCurrentRotDeg: captureToCurrentDeg
+        )
+    }
+
     private static func blendMatrix(prev: simd_float4x4, new: simd_float4x4, alpha: Float) -> simd_float4x4 {
         let a = max(0, min(1, alpha))
         // Translation: 4번째 열의 (x, y, z)
