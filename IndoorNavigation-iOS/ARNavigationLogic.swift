@@ -185,9 +185,14 @@ class ARNavigationLogic {
     /// 다음 측위(restartFromFloorTransition 직후)의 floor hint 로 사용 — 옛 userCurrentFloorId 가 stale 인 문제 해결.
     private var pendingTargetFloorId: String? = nil
     private var isFloorTransitionRestart: Bool = false
+    /// 층 전환 재시작 직후의 V3 측위 + pathfinding 응답이 도착 층(=startFloorLevel) 단일 층이면
+    /// 출발지 확인 모달/RouteOverview 게이트를 건너뛰고 즉시 안내 진입하기 위한 1회성 플래그.
+    /// startV3Pathfinding success case 에서 소비. failure / resetForNewTrial 에서도 클리어.
+    private var pendingFloorTransitionRestart: Bool = false
     /// 층 전환 모달 트리거 거리 (m). stairs/elevator 노드 step 위치와 카메라 사이 XZ 거리.
     /// 이 값 이내일 때만 detectFloorTransition 이 트리거. 너무 빡빡하면 빨리 걷는 사용자가 통과 가능, 너무 넓으면 일찍 뜸.
-    private let floorTransitionTriggerDistance: Float = 2.0
+    /// arrivalThreshold(2.0m) 와 경합해 모달이 안 뜨는 문제 방지 위해 3.0m 로 상향.
+    private let floorTransitionTriggerDistance: Float = 3.0
 
     // 경로 시작점 진단
     private var lastStartSnapDistance: Double?
@@ -564,6 +569,8 @@ class ARNavigationLogic {
         isAwaitingStartConfirmation = false
         pendingPostConfirmRender = nil
         pendingOverviewSteps = []
+        // 층 전환 재시작 1회성 플래그도 리셋 — 새 trial 은 일반 흐름이라 도착 층 즉시 안내 게이트 우회 X.
+        pendingFloorTransitionRestart = false
     }
 
     func startLocalizationFlow() {
@@ -941,10 +948,16 @@ class ARNavigationLogic {
 
         let cachedFloorLevel = floorMapCache[cacheKey]?.floorLevel ?? localizedFloorLevel
         let destinationPoint: CGPoint? = {
+            // 현재 층의 마지막 step 이 transition (계단/엘리베이터) 이면 destinationPin 미표시 —
+            // 2D 미니맵의 0.2m 가드가 같은 좌표의 계단/엘리베이터 노드 마커를 가리는 문제 방지.
             if let lvl = cachedFloorLevel,
-               let pos = routeSteps.last(where: { $0.floorLevel == lvl })?.position,
-               let x = pos.x, let y = pos.y {
-                return CGPoint(x: x, y: y)
+               let lastIdxOnFloor = routeSteps.lastIndex(where: { $0.floorLevel == lvl }) {
+                let lastOnFloor = routeSteps[lastIdxOnFloor]
+                let lastAction = Self.navigationActionKind(steps: routeSteps, at: lastIdxOnFloor)
+                if isTransitionStep(lastOnFloor, action: lastAction) { return nil }
+                if let pos = lastOnFloor.position, let x = pos.x, let y = pos.y {
+                    return CGPoint(x: x, y: y)
+                }
             }
             guard let pos = routeSteps.last?.position, let x = pos.x, let y = pos.y else { return nil }
             return CGPoint(x: x, y: y)
@@ -990,11 +1003,16 @@ class ARNavigationLogic {
                     }
                     let currentPose = self.currentFloorNavigationPose(frame: self.arSession?.currentFrame)
                     let destinationPoint: CGPoint? = {
-                        guard let pos = routeSteps.last(where: { $0.floorLevel == map.floorLevel })?.position,
-                              let x = pos.x, let y = pos.y else {
-                            guard let pos = routeSteps.last?.position, let x = pos.x, let y = pos.y else { return nil }
-                            return CGPoint(x: x, y: y)
+                        // 현재 층 마지막 step 이 transition 이면 destinationPin 미표시 (2D 마커 가림 방지).
+                        if let lastIdxOnFloor = routeSteps.lastIndex(where: { $0.floorLevel == map.floorLevel }) {
+                            let lastOnFloor = routeSteps[lastIdxOnFloor]
+                            let lastAction = Self.navigationActionKind(steps: routeSteps, at: lastIdxOnFloor)
+                            if self.isTransitionStep(lastOnFloor, action: lastAction) { return nil }
+                            if let pos = lastOnFloor.position, let x = pos.x, let y = pos.y {
+                                return CGPoint(x: x, y: y)
+                            }
                         }
+                        guard let pos = routeSteps.last?.position, let x = pos.x, let y = pos.y else { return nil }
                         return CGPoint(x: x, y: y)
                     }()
                     // 출발지 확인 모달 대기 중엔 2D 미니맵 노출 지연.
@@ -1214,9 +1232,42 @@ class ARNavigationLogic {
                         return
                     }
 
+                    // 층 전환 후 재측위 + pathfinding 응답이 도착 층 단일 층이면 모달/RouteOverview 게이트 우회.
+                    // 사용자가 이미 출발지 확인을 통과한 상태라, 새 층에서도 즉시 안내 재개해야 자연스러움.
+                    // 조건: pendingFloorTransitionRestart 플래그 ON + prefix 비어있지 않음
+                    //       + 모든 step 의 floorLevel 이 startFloorLevel 와 일치 (= 추가 층 전환 없음).
+                    let isDestinationFloorRestart =
+                        self.pendingFloorTransitionRestart &&
+                        !prefixed.isEmpty &&
+                        (steps.last?.floorLevel == startFloorLevel) &&
+                        (steps.allSatisfy { $0.floorLevel == startFloorLevel })
+                    if isDestinationFloorRestart {
+                        self.pendingFloorTransitionRestart = false
+                        self.drawPathFromSteps(prefixed, isRelocalizeRefresh: false)
+                        self.refreshFloorNavigationMap(routeSteps: prefixed,
+                                                       currentFrame: self.arSession?.currentFrame,
+                                                       isRelocalizeRefresh: false)
+                        self.dumpLocalizeDebug(rawSteps: resp.steps)
+                        self.fetchBundleForPath(steps: prefixed,
+                                                fallbackTranslation: translation,
+                                                fallbackFloorLevel: startFloorLevel)
+                        self.delegate?.setHUDVisible(true)
+                        self.delegate?.updateStatus("\(self.destinationName) 방향으로 이동하세요.", color: .white)
+                        if let mPose = self.matchedARPose {
+                            let c = mPose.columns.3
+                            self.lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
+                        }
+                        self.startPeriodicRelocalize()
+                        self.startWallCenteringIfNeeded()
+                        return
+                    }
+                    // 일반 흐름 진입 — stale 플래그 클리어 (예: 층 전환 후 응답에 추가 층 전환 step 포함된 케이스).
+                    self.pendingFloorTransitionRestart = false
+
                     // 초기 측위 + 첫 pathfinding 응답 — 게이트.
                     // 실제 렌더링/HUD/주기 측위 시작은 사용자가 출발지 확인 모달에서 "확인" 을 눌러야 일어남.
-                    self.pendingOverviewSteps = prefixed
+                    // RouteOverview 는 다층 전체(raw)를 보여줘야 함 — prefix 자르면 단일 층만 노출됨.
+                    self.pendingOverviewSteps = steps
                     self.isAwaitingStartConfirmation = true
                     self.pendingPostConfirmRender = { [weak self] in
                         guard let self else { return }
@@ -1253,6 +1304,8 @@ class ARNavigationLogic {
                     let msg = String(describing: err)
                     // pathfinding 실패해도 사용자 좌표 1점으로 lookup fallback — 추적 측위는 가능하게
                     print("[V3-PATH] 실패 (\(msg)) — 사용자 좌표 단일 query 로 lookup fallback")
+                    // stale 플래그 클리어 — 다음 trial 일반 흐름.
+                    self.pendingFloorTransitionRestart = false
                     self.fetchBundleForPath(steps: [], fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
                 }
             }
@@ -1400,11 +1453,30 @@ class ARNavigationLogic {
 
     // MARK: - RouteOverview 헬퍼
 
+    /// 주어진 step 이 층 이동(계단/엘리베이터) step 인지 판정.
+    /// - instruction 키워드(STAIRS/STAIRCASE/ELEVATOR/ST-/EV-/계단/엘리베이터) 매칭 OR
+    /// - navigationActionKind 가 stairsUp/stairsDown/elevator
+    /// 둘 중 하나라도 만족하면 true.
+    private func isTransitionStep(_ step: PathStep, action: NavigationActionKind) -> Bool {
+        switch action {
+        case .stairsUp, .stairsDown, .elevator: return true
+        default: break
+        }
+        guard let instr = step.instruction, !instr.isEmpty else { return false }
+        let upper = instr.uppercased()
+        let keywords = ["TAKE_STAIRS", "STAIRS", "STAIRCASE", "ST-",
+                        "TAKE_ELEVATOR", "ELEVATOR", "EV-",
+                        "계단", "엘리베이터"]
+        return keywords.contains { upper.contains($0) || instr.contains($0) }
+    }
+
     /// pathfinding steps 를 RouteOverviewItem 배열로 변환. [origin] + step rows + [destination].
     /// - origin: 첫 step 의 floorLevel 사용.
     /// - 각 step row: navigationActionKind 재사용. instruction 빈 경우 action 기반 한국어 fallback.
     /// - distanceMeters: 직전 valid position 으로부터의 XY 유클리드 거리(Z 무시).
-    /// - destination: 마지막 valid position 까지의 거리(없으면 0).
+    ///   단, 직전 step 과 floorLevel 이 다르면 (= 층 전환 경계) 거리 0 (UI 상 hidden).
+    /// - destination: 마지막 valid position 까지의 거리(없으면 0). raw 전체를 받기 때문에 마지막 step 은
+    ///   최종 목적지 floor 노드.
     /// - steps.isEmpty → [origin, destination] 2행만 fallback.
     private func makeRouteOverviewItems(steps: [PathStep]) -> [RouteOverviewItem] {
         var items: [RouteOverviewItem] = []
@@ -1421,26 +1493,47 @@ class ARNavigationLogic {
 
         // step rows
         var prevPos: (Double, Double)? = nil
+        var prevFloor: Int? = nil
         for (i, s) in steps.enumerated() {
             let action = Self.navigationActionKind(steps: steps, at: i)
             // 거리: 직전 valid position 에서 현재 step 의 (x, y) 까지.
+            // 단, 직전 step 과 floorLevel 이 다르면(= 층 경계) 거리 0 (UI 상 hidden).
             var dist: Double = 0
             if let sx = s.position?.x, let sy = s.position?.y {
                 if let (px, py) = prevPos {
-                    let dx = sx - px
-                    let dy = sy - py
-                    dist = sqrt(dx * dx + dy * dy)
+                    let isFloorBoundary: Bool = {
+                        if let pf = prevFloor, let sf = s.floorLevel, pf != sf { return true }
+                        return false
+                    }()
+                    if isFloorBoundary {
+                        dist = 0
+                    } else {
+                        let dx = sx - px
+                        let dy = sy - py
+                        dist = sqrt(dx * dx + dy * dy)
+                    }
                 }
                 prevPos = (sx, sy)
             }
+            if let sf = s.floorLevel { prevFloor = sf }
             // instruction: turn 은 인근 POI 결합, 계단은 노드명 결합, 나머지는 action fallback.
+            // 단, 직전 step 이 같은 transition (예: 계단 진입 → 계단 도착) 인 경우 두 번째 행은
+            // "{도착 층}층 도착" 같은 통합 문구로 자연스럽게 표시.
             let prev: PathStep? = (i > 0) ? steps[i - 1] : nil
-            let instr: String = contextualInstructionText(
-                for: action,
-                step: s,
-                previousStep: prev,
-                floorLevel: s.floorLevel ?? localizedFloorLevel
-            )
+            let instr: String = {
+                if let prev,
+                   isTransitionStep(prev, action: Self.navigationActionKind(steps: steps, at: i - 1)),
+                   isTransitionStep(s, action: action),
+                   let arrivedFloor = s.floorLevel {
+                    return "\(arrivedFloor)층 도착"
+                }
+                return contextualInstructionText(
+                    for: action,
+                    step: s,
+                    previousStep: prev,
+                    floorLevel: s.floorLevel ?? localizedFloorLevel
+                )
+            }()
             items.append(RouteOverviewItem(
                 kind: .step,
                 action: action,
@@ -1450,44 +1543,42 @@ class ARNavigationLogic {
             ))
         }
 
-        // destination
-        // prefix 가 잘린 결과로 마지막 step 이 층 전환 노드(계단/엘리베이터)인 경우 destination row 생략.
-        // 실제 destination 은 transition 이후 재측위에서 새 prefix 의 마지막 step 으로 다시 잡힌다.
-        // 판정 기준: 마지막 step instruction 에 STAIRS / ELEVATOR / 계단 / 엘리베이터 / ST- / EV- / STAIRCASE 키워드 포함.
-        let isTransitionTail: Bool = {
-            guard let lastInstr = steps.last?.instruction, !lastInstr.isEmpty else { return false }
-            let upper = lastInstr.uppercased()
-            let transitionKeywords = ["TAKE_STAIRS", "STAIRS", "STAIRCASE", "ST-",
-                                      "TAKE_ELEVATOR", "ELEVATOR", "EV-",
-                                      "계단", "엘리베이터"]
-            return transitionKeywords.contains { upper.contains($0) || lastInstr.contains($0) }
-        }()
-        if !isTransitionTail {
-            let destFloor: Int? = steps.last?.floorLevel
-            items.append(RouteOverviewItem(
-                kind: .destination,
-                action: .unknown,
-                instruction: destinationName,
-                distanceMeters: 0,
-                floorLevel: destFloor
-            ))
-        }
+        // destination — raw 전체를 받기 때문에 마지막 step 은 최종 목적지 floor 노드.
+        // (기존 isTransitionTail 가드는 prefix 가 잘려 transition step 이 tail 인 경우만 해당했고,
+        //  raw 입력으로는 항상 destination 행을 표시해야 한다.)
+        let destFloor: Int? = steps.last?.floorLevel
+        items.append(RouteOverviewItem(
+            kind: .destination,
+            action: .unknown,
+            instruction: destinationName,
+            distanceMeters: 0,
+            floorLevel: destFloor
+        ))
 
         return items
     }
 
     /// steps[i-1].position ↔ steps[i].position XY 유클리드 거리 합(Z 무시). 좌표 nil step 은 skip하고 직전 valid 유지.
+    /// 단, 직전 step 과 floorLevel 이 다르면(= 층 경계) 합산 제외 — 다층 raw 경로에서 가짜 거리 점프 방지.
     private func computeTotalDistanceMeters(steps: [PathStep]) -> Double {
         var total: Double = 0
         var prevPos: (Double, Double)? = nil
+        var prevFloor: Int? = nil
         for s in steps {
             guard let sx = s.position?.x, let sy = s.position?.y else { continue }
             if let (px, py) = prevPos {
-                let dx = sx - px
-                let dy = sy - py
-                total += sqrt(dx * dx + dy * dy)
+                let sameFloor: Bool = {
+                    if let pf = prevFloor, let sf = s.floorLevel { return pf == sf }
+                    return true   // 둘 중 하나라도 nil 이면 직전 floor 와 같다고 가정.
+                }()
+                if sameFloor {
+                    let dx = sx - px
+                    let dy = sy - py
+                    total += sqrt(dx * dx + dy * dy)
+                }
             }
             prevPos = (sx, sy)
+            if let sf = s.floorLevel { prevFloor = sf }
         }
         return total
     }
@@ -1892,6 +1983,10 @@ class ARNavigationLogic {
     func restartFromFloorTransition() {
         guard hasActiveFloorTransition else { return }
         delegate?.hideFloorTransition()
+        // 잔존 모달 안전 닫기 — 층 전환 직전 사용자가 출발지 확인/RouteOverview 를 다시 열어두는 흐름은
+        // 없지만, 외부 트리거(자동화/디버그) 로 띄워져 있을 경우 흐름 일관성 위해 명시적 dismiss.
+        delegate?.dismissStartConfirmation()
+        delegate?.dismissRouteOverview()
 
         // 기존 노드 정리
         pathChevronController.clear()
@@ -1914,6 +2009,7 @@ class ARNavigationLogic {
 
         hasActiveFloorTransition = false
         isFloorTransitionRestart = true
+        pendingFloorTransitionRestart = true
 
         // 재스캔 안내 UI 복귀 + 캡처 재시작
         delegate?.setLocateButtonVisible(false)
@@ -2960,12 +3056,21 @@ class ARNavigationLogic {
 
         // 도착 감지용 destination AR 좌표 갱신. 매 drawPathFromSteps 호출마다 최신 값으로 set
         // (재측위 시에도 갱신되어 transform drift 보정 반영). 마지막 PathStep.position 기준.
-        if let lastStep = steps.last, let p = lastStep.position,
-           let lx = p.x, let ly = p.y, let lz = p.z {
-            let serverDest = simd_float3(Float(lx), Float(ly), Float(lz))
-            let arDest = CoordinateTransformer.transform(serverPoint: serverDest, input: input)
-            destinationARPosition = simd_float3(arDest.x, floorY, arDest.z)
-            print("[Arrival] destinationARPosition = \(destinationARPosition!) (threshold=\(arrivalThreshold)m)")
+        // 단, 마지막 step 이 transition (계단/엘리베이터) 인 경우 도착 판정을 일시 정지해야 한다 —
+        // 그렇지 않으면 transition 근접 시 도착 모달이 층 이동 모달과 경합해 어느 한 쪽이 안 뜸.
+        if let lastStep = steps.last {
+            let lastAction = Self.navigationActionKind(steps: steps, at: steps.count - 1)
+            let lastIsTransition = isTransitionStep(lastStep, action: lastAction)
+            if lastIsTransition {
+                destinationARPosition = nil
+                print("[Arrival] destinationARPosition = nil (마지막 step 이 transition — 도착 판정 일시 정지)")
+            } else if let p = lastStep.position,
+                      let lx = p.x, let ly = p.y, let lz = p.z {
+                let serverDest = simd_float3(Float(lx), Float(ly), Float(lz))
+                let arDest = CoordinateTransformer.transform(serverPoint: serverDest, input: input)
+                destinationARPosition = simd_float3(arDest.x, floorY, arDest.z)
+                print("[Arrival] destinationARPosition = \(destinationARPosition!) (threshold=\(arrivalThreshold)m)")
+            }
         }
 
         if isRelocalizeRefresh {
@@ -2984,8 +3089,8 @@ class ARNavigationLogic {
         }
         // Phase 6: 새 경로 → turn arrow 정리. 다음 1Hz tick 에서 cameraPos 기반으로 재평가.
         delegate?.updateTurnArrow(nil)
-        // Marker 도 동반 정리 — 다음 1Hz tick 에 makeActiveMarkerList 가 새로 발신.
-        delegate?.updateMarkers([])
+        // Marker 는 비우지 않음 — 1Hz tick 간격(최대 1초) 동안 마커가 사라지며 깜빡이는 문제 방지.
+        // 다음 tick 의 makeActiveMarkerList 호출이 자연스럽게 새 목록으로 교체한다.
     }
 
     /// V3 측위 + pathfinding 후 디버깅 데이터 일괄 dump.
@@ -3433,7 +3538,8 @@ class ARNavigationLogic {
         let targetInstr = lastPathSteps[nextIdx].instruction ?? ""
         let upper = targetInstr.uppercased()
         // 서버 식별자 ("ST-A1", "EV-A1") 도 stairs/elevator 로 인식. "Start" 충돌 회피 위해 hyphen 포함.
-        let hasStairsKw = upper.contains("STAIRS") || targetInstr.contains("계단") || upper.contains("ST-")
+        // "STAIRCASE" 도 stairs 분류 — detectFloorTransition 의 stairsKeywords 와 정합.
+        let hasStairsKw = upper.contains("STAIRS") || upper.contains("STAIRCASE") || targetInstr.contains("계단") || upper.contains("ST-")
         let hasElevatorKw = upper.contains("ELEVATOR") || targetInstr.contains("엘리베이터") || upper.contains("EV-")
 
         let kind: MarkerKind

@@ -561,7 +561,7 @@ private final class FloorNavigationMapView: UIView {
     }
 
     private func mapMarkers(from map: FloorMapResponse) -> [MapMarker] {
-        map.nodes.compactMap { node in
+        var markers: [MapMarker] = map.nodes.compactMap { node in
             guard let kind = markerKind(for: node) else { return nil }
             // 목적지 핀과 겹치는 0.2m 이내 POI 노드는 별도 destinationPin 으로 그려지므로 제외.
             if let dest = destinationWorldPoint {
@@ -573,6 +573,36 @@ private final class FloorNavigationMapView: UIView {
                              worldPoint: CGPoint(x: node.x, y: node.y),
                              label: node.label)
         }
+
+        // 폴백 — 서버가 stairs/elevator/escalator 를 nodes[] 에 두지 않고 connectors[] 에만 두는 응답 형태 대비.
+        // 기존 nodes 마커와 0.5m 이내 중복은 dedupe, destinationPin 과 0.2m 이내도 제외 (기존 패턴 보존).
+        if let connectors = map.connectors {
+            for connector in connectors {
+                guard let x = connector.x, let y = connector.y else { continue }
+                let kind: MapMarkerKind
+                switch connector.type?.lowercased() {
+                case "elevator": kind = .elevator
+                case "escalator": kind = .escalator
+                case "stairs", "stair": kind = .stairs
+                default: continue
+                }
+                let pt = CGPoint(x: x, y: y)
+                if let dest = destinationWorldPoint {
+                    let dx = pt.x - dest.x
+                    let dy = pt.y - dest.y
+                    if hypot(dx, dy) < 0.2 { continue }
+                }
+                let isDup = markers.contains { existing in
+                    hypot(existing.worldPoint.x - pt.x, existing.worldPoint.y - pt.y) < 0.5
+                }
+                if isDup { continue }
+                markers.append(MapMarker(kind: kind,
+                                         worldPoint: pt,
+                                         label: connector.name))
+            }
+        }
+
+        return markers
     }
 
     private func markerKind(for node: FloorMapNode) -> MapMarkerKind? {
