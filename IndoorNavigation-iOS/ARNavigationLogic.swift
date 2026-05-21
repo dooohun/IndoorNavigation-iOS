@@ -66,6 +66,13 @@ protocol ARNavigationLogicDelegate: AnyObject {
     func showRouteCalculating(_ visible: Bool)
     func showFloorTransition(transitionType: String, targetFloor: Int?, currentFloor: Int?)
     func hideFloorTransition()
+    /// 초기 측위 + pathfinding 응답까지 도착했을 때 사용자에게 "현재 위치가 {POI}이(가) 맞나요?" 모달 표시.
+    /// nearPoiName 이 nil/빈 문자열이면 POI 토큰 없이 "현재 위치가 맞나요?" fallback.
+    func showStartConfirmation(nearPoiName: String?)
+    /// 사용자가 확인/취소를 눌렀거나 새 trial 진입으로 모달이 더 이상 유효하지 않을 때 닫기.
+    func dismissStartConfirmation()
+    /// 취소 → 새 trial 진입 직전에 locateButton 라벨을 초기 상태("주변 스캔") 로 복원.
+    func resetLocateButtonLabel()
 }
 
 // MARK: - Logic
@@ -233,8 +240,9 @@ class ARNavigationLogic {
     private let periodicRelocalizeBlendAlpha: Float = 0.18
     /// 주기 V3 재측위 응답이 prev 와 이만큼(XYZ) 차이나면 blend 우회하고 hard-set. 큰 변화는 정확한 측위로 간주하고 즉시 반영.
     /// 좌회전 후 첫 측위 같은 케이스 — blend 끌어당김으로 인한 wrong-jump 회피.
-    /// 1단계 quick win — 2.0 → 3.0 상향. hard-set(즉시 점프) 발동 빈도 감소.
-    private let periodicRelocalizeHardSetThresholdM: Float = 3.0
+    /// 2단계 quick win — 3.0 → 5.0 상향. 실측 케이스(2026-05-21 15:41:12)에서 Δ=6.75m + 회전 18° 드리프트가
+    /// 그대로 hard-set 되어 path 가 우측으로 밀림 → blend 적용 범위를 넓혀 노이즈 측위 영향 축소.
+    private let periodicRelocalizeHardSetThresholdM: Float = 5.0
     /// 주기 V3 재측위 confidence 가드. 초기 측위와 같은 기준으로 wrong-match 위험 응답을 무시.
     private let periodicRelocalizeMinConfidence: Double = 0.50
     /// 주기 V3 재측위 feature match 수 가드. confidence 만으로는 pose jump 를 충분히 설명하지 못해 병행 검증.
@@ -244,6 +252,9 @@ class ARNavigationLogic {
     /// 서버 pose 이동량이 ARKit 캡처 pose 이동량보다 이 값 이상 더 크고 ratio 도 크면 무시.
     private let periodicRelocalizeMaxServerARDistanceGapM: Float = 2.5
     private let periodicRelocalizeMaxServerARDistanceRatio: Float = 2.5
+    /// (server pose, ARKit pose) 페어로 정의되는 server-world → ARKit-world 회전이 이전 페어 대비 이 값보다 크게
+    /// 흔들리면 wrong-match 로 간주. 실측 케이스(15:41:12)에서 약 18° 회전 드리프트가 path 우측 밀림의 직접 원인.
+    private let periodicRelocalizeMaxTransformRotationDeltaDeg: Float = 10.0
     /// 직전 주기 측위 발사 시점 카메라 위치(XZ) 와의 최소 이동 거리. 정지 상태 V3 호출 회피.
     private static let periodicRelocalizeMinTravelM: Float = 2.0
     /// 캡처 시작 후 N장 도달까지 허용 timeout. limited tracking 무한 대기 → in-flight 락 영구 점유 방지.
@@ -313,6 +324,14 @@ class ARNavigationLogic {
     /// LightGlue 매칭 엔진 — 토글 ON 시에만 init. mlpackage 미배치/load 실패 시 nil → fallback.
     // 비활성: useLightGlueMatcher=false. 인스턴스화 회피로 mlpackage 로드 비용 절감.
     private lazy var lightGlueMatcher: LightGlueMatcherEngine? = { return nil }()
+
+    // MARK: - 출발지 확인 모달 게이트
+    /// 초기 측위 + pathfinding 응답까지 도달 후 사용자 확인 대기 중인지 여부.
+    /// true 동안: HUD/리본/쉐브론/미니맵 노출/주기 재측위/벽 보정 모두 보류.
+    /// confirmStartLocation 호출 시 false 로 풀리고 pendingPostConfirmRender 가 실행되어 실제 렌더링 시작.
+    private var isAwaitingStartConfirmation: Bool = false
+    /// 확인 누를 때 실행할 렌더링/HUD/주기 측위 시작 클로저. 취소 시 nil 로 폐기.
+    private var pendingPostConfirmRender: (() -> Void)?
 
     // MARK: - 외부 노출
 
@@ -532,6 +551,10 @@ class ARNavigationLogic {
 
         // GuidanceDirector 도 reset (Phase 5 dead path 지만 호출 부수효과 없게)
         guidanceDirector.reset()
+
+        // 출발지 확인 모달 게이트도 함께 리셋 — 새 trial 진입 시 이전 pending 렌더링/대기 상태 폐기.
+        isAwaitingStartConfirmation = false
+        pendingPostConfirmRender = nil
     }
 
     func startLocalizationFlow() {
@@ -539,6 +562,8 @@ class ARNavigationLogic {
             delegate?.updateStatus("AR 세션이 준비되지 않았습니다. 잠시 후 다시 시도하세요.", color: .systemYellow)
             return
         }
+        // 출발지 확인 모달이 떠 있는 동안엔 새 측위 트리거 차단 — 더블탭/외부 호출 중복 방지.
+        if isAwaitingStartConfirmation { return }
 
         // 이미 측위 진행 중(=localizedPose 존재 + 활성 경로 보유)이면 hard reset 금지.
         // 사용자가 locate 버튼을 재탭한 경우 path/marker/chevron/currentStepIndex 전부 유지하고
@@ -793,18 +818,11 @@ class ARNavigationLogic {
 
         delegate?.showRouteCalculating(false)
         delegate?.setLoading(false)
-        delegate?.updateStatus("\(destinationName) 방향으로 이동하세요.", color: .white)
-        delegate?.setHUDVisible(true)
+        // updateStatus / setHUDVisible / lastPeriodicRelocalizeCameraPos / startPeriodicRelocalize /
+        // startWallCenteringIfNeeded 은 출발지 확인 모달 "확인" 후 pendingPostConfirmRender 안에서 실행.
         startV3Pathfinding(startFloorLevel: response.floorLevel,
                            translation: translation,
                            areaId: response.areaId)
-        // 주기 V3 재측위 활성화 — 10s cadence + 2m 이동 가드 + blend.
-        if let mPose = self.matchedARPose {
-            let c = mPose.columns.3
-            lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
-        }
-        startPeriodicRelocalize()
-        startWallCenteringIfNeeded()
     }
 
     /// LiDAR 지원 단말에서 WallCenteringController 시작 (idempotent).
@@ -892,9 +910,14 @@ class ARNavigationLogic {
     #endif
 
     /// 2D floor map 갱신. 신규 경로 흐름에서는 configure (showFloorNavigationMap) 로 전체 재구성.
-    /// - Parameter isRelocalizeRefresh: 주기 재측위/PnP 보정 시 호출이면 true. 캐시된 map 이 있으면 configure 우회 →
-    ///   updateFloorNavigationPosition 만 호출해 위치/방향 보간 메커니즘을 활용 (시각적 점프 방지).
-    private func refreshFloorNavigationMap(routeSteps: [PathStep], currentFrame: ARFrame?, isRelocalizeRefresh: Bool = false) {
+    /// - Parameter isRelocalizeRefresh: 주기 재측위/PnP 보정 시 호출이면 true. 현재는 일반 경로(showFloorNavigationMap)
+    ///   와 동일 흐름 — routeSteps 갱신을 보장하기 위함. 위치/방향 시각적 보간은 delegate 측 책임.
+    /// - Parameter onMapReady: floorMapCache 적재(캐시 hit / fetch 성공 / fetch 실패) 가 끝나면 호출되는 콜백.
+    ///   출발지 확인 모달 표시 타이밍 게이트로 사용 — nearestPOIName 이 destinations 를 읽으려면 캐시가 채워져 있어야 함.
+    private func refreshFloorNavigationMap(routeSteps: [PathStep],
+                                           currentFrame: ARFrame?,
+                                           isRelocalizeRefresh: Bool = false,
+                                           onMapReady: (() -> Void)? = nil) {
         let resolvedFloorId = localizedFloorId ?? floorId
         guard !resolvedFloorId.isEmpty else { return }
 
@@ -904,14 +927,8 @@ class ARNavigationLogic {
 
         let currentPose = currentFloorNavigationPose(frame: currentFrame)
 
-        // 보정 모드 + map 캐시 hit: configure 우회 → updateCurrentPosition 만 호출해 보간 작동.
-        if isRelocalizeRefresh, floorMapCache[cacheKey] != nil {
-            delegate?.updateFloorNavigationPosition(
-                currentPose?.position,
-                headingDegrees: currentPose?.headingDegrees
-            )
-            return
-        }
+        // 보정 모드 + 캐시 hit 분기 제거: routeSteps 갱신 없이 position 만 업데이트되면 2D 경로가 stale.
+        // 캐시 hit 일반 분기(아래 showFloorNavigationMap)로 통일 — 시각적 점프 방지는 delegate 측 보간 책임.
 
         let cachedFloorLevel = floorMapCache[cacheKey]?.floorLevel ?? localizedFloorLevel
         let destinationPoint: CGPoint? = {
@@ -932,14 +949,18 @@ class ARNavigationLogic {
             if self.wallCenteringController == nil {
                 self.startWallCenteringIfNeeded()
             }
-            delegate?.showFloorNavigationMap(
-                cached,
-                routeSteps: routeSteps,
-                currentPosition: currentPose?.position,
-                currentHeadingDegrees: currentPose?.headingDegrees,
-                destinationName: self.destinationName,
-                destinationWorldPoint: destinationPoint
-            )
+            // 출발지 확인 모달 대기 중엔 2D 미니맵 노출 지연 — 사용자가 확인을 눌러야 보임.
+            if !isAwaitingStartConfirmation {
+                delegate?.showFloorNavigationMap(
+                    cached,
+                    routeSteps: routeSteps,
+                    currentPosition: currentPose?.position,
+                    currentHeadingDegrees: currentPose?.headingDegrees,
+                    destinationName: self.destinationName,
+                    destinationWorldPoint: destinationPoint
+                )
+            }
+            onMapReady?()
             return
         }
 
@@ -967,16 +988,22 @@ class ARNavigationLogic {
                         }
                         return CGPoint(x: x, y: y)
                     }()
-                    self.delegate?.showFloorNavigationMap(
-                        map,
-                        routeSteps: routeSteps,
-                        currentPosition: currentPose?.position,
-                        currentHeadingDegrees: currentPose?.headingDegrees,
-                        destinationName: self.destinationName,
-                        destinationWorldPoint: destinationPoint
-                    )
+                    // 출발지 확인 모달 대기 중엔 2D 미니맵 노출 지연.
+                    if !self.isAwaitingStartConfirmation {
+                        self.delegate?.showFloorNavigationMap(
+                            map,
+                            routeSteps: routeSteps,
+                            currentPosition: currentPose?.position,
+                            currentHeadingDegrees: currentPose?.headingDegrees,
+                            destinationName: self.destinationName,
+                            destinationWorldPoint: destinationPoint
+                        )
+                    }
+                    onMapReady?()
                 case .failure(let error):
                     print("[FloorMap] fetch failed floorId=\(resolvedFloorId) areaId=\(self.localizedAreaId ?? "nil"): \(error)")
+                    // 실패해도 모달은 fallback 텍스트로 띄울 수 있게 콜백 호출.
+                    onMapReady?()
                 }
             }
         }
@@ -1128,15 +1155,52 @@ class ARNavigationLogic {
                     let steps = resp.toPathSteps()
                     self.lastStartSnapDistance = nil
                     print("[V3-PATH] steps=\(steps.count), totalDistance=\(resp.totalDistance)m, floorTransitions=\(resp.floorTransitions?.count ?? 0)")
-                    self.drawPathFromSteps(steps, isRelocalizeRefresh: isRelocalizeRefresh)
-                    self.refreshFloorNavigationMap(routeSteps: steps,
-                                                   currentFrame: self.arSession?.currentFrame,
-                                                   isRelocalizeRefresh: isRelocalizeRefresh)
-                    if !isRelocalizeRefresh {
-                        self.dumpLocalizeDebug(rawSteps: resp.steps)
+
+                    if isRelocalizeRefresh {
+                        // 주기 재측위 / PnP 보정 경로 — 기존 흐름 그대로 (이미 확인된 사용자라 게이트 우회).
+                        self.drawPathFromSteps(steps, isRelocalizeRefresh: true)
+                        self.refreshFloorNavigationMap(routeSteps: steps,
+                                                       currentFrame: self.arSession?.currentFrame,
+                                                       isRelocalizeRefresh: true)
+                        // steps[].position 좌표를 lookup multi-query 로 사용 → 경로 전체 영역 keyframe pack 받음.
+                        self.fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
+                        return
                     }
-                    // steps[].position 좌표를 lookup multi-query 로 사용 → 경로 전체 영역 keyframe pack 받음.
-                    self.fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
+
+                    // 초기 측위 + 첫 pathfinding 응답 — 게이트.
+                    // 실제 렌더링/HUD/주기 측위 시작은 사용자가 출발지 확인 모달에서 "확인" 을 눌러야 일어남.
+                    self.isAwaitingStartConfirmation = true
+                    self.pendingPostConfirmRender = { [weak self] in
+                        guard let self else { return }
+                        self.drawPathFromSteps(steps, isRelocalizeRefresh: false)
+                        self.refreshFloorNavigationMap(routeSteps: steps,
+                                                       currentFrame: self.arSession?.currentFrame,
+                                                       isRelocalizeRefresh: false)
+                        self.dumpLocalizeDebug(rawSteps: resp.steps)
+                        self.fetchBundleForPath(steps: steps,
+                                                fallbackTranslation: translation,
+                                                fallbackFloorLevel: startFloorLevel)
+                        self.delegate?.setHUDVisible(true)
+                        self.delegate?.updateStatus("\(self.destinationName) 방향으로 이동하세요.", color: .white)
+                        if let mPose = self.matchedARPose {
+                            let c = mPose.columns.3
+                            self.lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
+                        }
+                        self.startPeriodicRelocalize()
+                        self.startWallCenteringIfNeeded()
+                    }
+
+                    // map cache 가 채워진 직후 nearestPOIName 결정 가능 → 모달 표시.
+                    self.refreshFloorNavigationMap(
+                        routeSteps: steps,
+                        currentFrame: self.arSession?.currentFrame,
+                        isRelocalizeRefresh: false,
+                        onMapReady: { [weak self] in
+                            guard let self, self.isAwaitingStartConfirmation else { return }
+                            let name = self.nearestPOIName()
+                            self.delegate?.showStartConfirmation(nearPoiName: name)
+                        }
+                    )
                 case .failure(let err):
                     let msg = String(describing: err)
                     // pathfinding 실패해도 사용자 좌표 1점으로 lookup fallback — 추적 측위는 가능하게
@@ -1187,6 +1251,69 @@ class ARNavigationLogic {
         print("[NetworkBundle] lookup 호출 SKIP (queries=\(queryPoints.count))")
         self.delegate?.showRouteCalculating(false)
         self.delegate?.setLoading(false)
+    }
+
+    // MARK: - 출발지 확인 모달 API
+
+    /// 현재 측위 좌표(localizedPose.x/y) 와 cache 된 floor map 의 destinations[] XY 거리가 가장 가까운 POI 이름.
+    /// destinations 가 없거나 좌표 결정 불가하면 nil. caller 측에서 nil/빈 문자열 fallback → "현재 위치가 맞나요?" 처리.
+    private func nearestPOIName() -> String? {
+        guard let pose = localizedPose, let pX = pose.x, let pY = pose.y else { return nil }
+        let resolvedFloorId = localizedFloorId ?? floorId
+        let resolvedAreaId = localizedAreaId ?? ""
+        let cacheKey = "\(resolvedFloorId)#\(resolvedAreaId)"
+        guard let map = floorMapCache[cacheKey],
+              let destinations = map.destinations,
+              !destinations.isEmpty else {
+            return nil
+        }
+
+        var bestName: String?
+        var bestDist = Double.greatestFiniteMagnitude
+        for dest in destinations {
+            guard let dx = dest.x, let dy = dest.y else { continue }
+            let ddx = dx - pX
+            let ddy = dy - pY
+            let d = sqrt(ddx * ddx + ddy * ddy)
+            if d < bestDist {
+                bestDist = d
+                if let n = dest.name, !n.isEmpty {
+                    bestName = n
+                } else if let l = dest.label, !l.isEmpty {
+                    bestName = l
+                } else {
+                    bestName = nil
+                }
+            }
+        }
+        if let n = bestName, !n.isEmpty { return n }
+        return nil
+    }
+
+    /// 출발지 확인 모달의 "확인" 버튼 콜백. 게이트 해제 후 보류된 렌더링/HUD/주기 측위 시작.
+    func confirmStartLocation() {
+        guard isAwaitingStartConfirmation else { return }
+        isAwaitingStartConfirmation = false
+        let work = pendingPostConfirmRender
+        pendingPostConfirmRender = nil
+        work?()
+    }
+
+    /// 출발지 확인 모달의 "취소" 버튼 콜백. 게이트 해제 + 새 trial 진입 준비 + 사용자에게 재 스캔 안내.
+    func cancelStartConfirmation() {
+        guard isAwaitingStartConfirmation else { return }
+        isAwaitingStartConfirmation = false
+        pendingPostConfirmRender = nil
+        trialNumber += 1
+        resetForNewTrial()
+        delegate?.dismissStartConfirmation()
+        delegate?.setHUDVisible(false)
+        delegate?.hideFloorNavigationMap()
+        delegate?.setLoading(false)
+        delegate?.showRouteCalculating(false)
+        delegate?.updateStatus("다시 한번 주변을 스캔해 주세요", color: .white)
+        delegate?.resetLocateButtonLabel()
+        delegate?.setLocateButtonVisible(true)
     }
 
     // MARK: - AR 경로 렌더링 (PathChevron 시스템 — drawPathFromSteps 가 직접 PathChevronController 호출)
@@ -1747,11 +1874,12 @@ class ARNavigationLogic {
                                     newMatchedARPose.columns.3.y,
                                     newMatchedARPose.columns.3.z)
             let arDeltaM = simd_distance(prevAR, newAR)
-            let gap = deltaTranslationM - arDeltaM
-            let ratio = deltaTranslationM / max(arDeltaM, 0.25)
+            let gap = abs(deltaTranslationM - arDeltaM)
+            let denom = max(min(deltaTranslationM, arDeltaM), 0.25)
+            let ratio = max(deltaTranslationM, arDeltaM) / denom
             if gap > periodicRelocalizeMaxServerARDistanceGapM ||
                 ratio > periodicRelocalizeMaxServerARDistanceRatio {
-                print(String(format: "[PeriodicV3] server/AR delta mismatch — server=%.2fm ar=%.2fm gap=%.2fm ratio=%.2f. 결과 무시",
+                print(String(format: "[PeriodicV3] server/AR delta mismatch — server=%.2fm ar=%.2fm |gap|=%.2fm ratio=%.2f. 결과 무시",
                              deltaTranslationM, arDeltaM, gap, ratio))
                 self.dumpPeriodicRelocalizeReject(
                     response: response,
@@ -1760,6 +1888,40 @@ class ARNavigationLogic {
                     prevLocalizedPose: prevLocalizedPoseSnapshot,
                     prevMatchedARPose: prevMatchedARPoseSnapshot,
                     reason: "server_ar_delta_mismatch"
+                )
+                return
+            }
+        }
+
+        // T_AW_from_SW 회전 일관성 가드.
+        // (matchedAR · M · T_SC.inverse) 의 회전이 이전 페어 대비 크게 흔들리면 wrong-match.
+        // 실측 케이스(15:41:12): conf=0.77, match=147 이라 다른 가드 통과했지만 R 가 18° 흔들려 path 가 우측으로 밀림.
+        if let prevMatchedARPoseSnapshot, let prevPose = prevLocalizedPoseSnapshot,
+           let ppx = prevPose.x, let ppy = prevPose.y, let ppz = prevPose.z,
+           let ppqx = prevPose.qx, let ppqy = prevPose.qy, let ppqz = prevPose.qz, let ppqw = prevPose.qw {
+            let prevServerQuat = simd_quatf(ix: Float(ppqx), iy: Float(ppqy), iz: Float(ppqz), r: Float(ppqw))
+            let R_prev = Self.computeARFromServerRotation(serverQuat: prevServerQuat,
+                                                          serverPos: simd_float3(Float(ppx), Float(ppy), Float(ppz)),
+                                                          arCameraPose: prevMatchedARPoseSnapshot)
+            let R_new = Self.computeARFromServerRotation(serverQuat: quat,
+                                                         serverPos: newTranslation,
+                                                         arCameraPose: newMatchedARPose)
+            let qPrev = simd_quatf(R_prev)
+            let qNew = simd_quatf(R_new)
+            let diffQuat = qNew * qPrev.inverse
+            let realClamped = min(1.0, abs(diffQuat.real))
+            let angleRad = 2.0 * acos(realClamped)
+            let angleDeg = Float(angleRad * 180.0 / .pi)
+            if angleDeg > periodicRelocalizeMaxTransformRotationDeltaDeg {
+                print(String(format: "[PeriodicV3] transform rotation inconsistent — %.1f° > %.1f°. 결과 무시",
+                             angleDeg, periodicRelocalizeMaxTransformRotationDeltaDeg))
+                self.dumpPeriodicRelocalizeReject(
+                    response: response,
+                    capturedImages: capturedImages,
+                    capturedPoses: capturedPoses,
+                    prevLocalizedPose: prevLocalizedPoseSnapshot,
+                    prevMatchedARPose: prevMatchedARPoseSnapshot,
+                    reason: "transform_rotation_inconsistent"
                 )
                 return
             }
@@ -2590,6 +2752,24 @@ class ARNavigationLogic {
         let w = max(-1.0, min(1.0, diff.real))
         let angleRad = 2.0 * acos(abs(w))
         return Float(angleRad * 180.0 / .pi)
+    }
+
+    /// (server pose, AR camera pose) 페어로 정의되는 server-world → ARKit-world 변환의 회전 성분만 추출.
+    /// `bridgePosePair` 의 T_AW_from_SW = arCameraPose * M * T_SC.inverse 식과 동일 구조.
+    /// translation 무시, rotation 만 비교 목적이라 upper3x3 만 반환.
+    private static func computeARFromServerRotation(serverQuat: simd_quatf,
+                                                    serverPos: simd_float3,
+                                                    arCameraPose: simd_float4x4) -> simd_float3x3 {
+        var T_SC = simd_float4x4(serverQuat)
+        T_SC.columns.3 = simd_float4(serverPos.x, serverPos.y, serverPos.z, 1)
+        let T_AW_from_SW = arCameraPose
+            * CoordinateTransformer.rtabCameraToARKit
+            * T_SC.inverse
+        return simd_float3x3(
+            simd_float3(T_AW_from_SW.columns.0.x, T_AW_from_SW.columns.0.y, T_AW_from_SW.columns.0.z),
+            simd_float3(T_AW_from_SW.columns.1.x, T_AW_from_SW.columns.1.y, T_AW_from_SW.columns.1.z),
+            simd_float3(T_AW_from_SW.columns.2.x, T_AW_from_SW.columns.2.y, T_AW_from_SW.columns.2.z)
+        )
     }
 
     private static func navigationActionKind(steps: [PathStep], at i: Int) -> NavigationActionKind {

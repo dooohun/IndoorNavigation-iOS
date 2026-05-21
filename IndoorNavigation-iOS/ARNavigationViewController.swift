@@ -1651,6 +1651,11 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     var scanFailedLabel: UILabel!
     var arrivalBadge: UIView!
 
+    // 출발지 확인 모달 — 초기 측위 + pathfinding 완료 후 "현재 위치가 {POI}이(가) 맞나요?" 표시.
+    // 사용자가 확인 누르면 logic.confirmStartLocation, 취소 누르면 logic.cancelStartConfirmation.
+    private var startConfirmBadge: UIView!
+    private var startConfirmLabel: UILabel!
+
     var hudContainerView: UIView!
     // Phase 6: 기존 HUD 멤버는 신규 카드 UX 흐름에서 미사용 — 옵셔널화로 nil 안전
     var destinationPillView: UIView?
@@ -1740,6 +1745,7 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         setupScanCompleteBadge()
         setupScanFailedView()
         setupArrivalBadge()
+        setupStartConfirmBadge()
         // Phase 6: setupHUD() 폐기 → 신규 setup 으로 대체
         // Phase 6 후속: nav-bar 분해 → 미니맵 위 nav 카드(setupNavCard) + 독립 closeButton(setupCloseButton)
         setupHudContainer()
@@ -2229,6 +2235,151 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
             confirmButton.heightAnchor.constraint(equalToConstant: 44),
         ])
         _ = bounds  // suppress unused-warning
+    }
+
+    /// 출발지 확인 모달 — 초기 측위/pathfinding 완료 후 "현재 위치가 {POI}이(가) 맞나요?" 와 확인/취소 버튼.
+    /// 구조는 setupArrivalBadge 와 동일 (HUDPassthroughView dim + 흰 pill + 그 아래 버튼 row). 차이점:
+    /// 1) pill 라벨이 동적, 2) 버튼이 2개(취소/확인). 모달 내 빈 dim 영역은 hit-test 통과시키지 않음.
+    private func setupStartConfirmBadge() {
+        let bounds = self.view.bounds
+
+        // dim 컨테이너 — 0.55 검정. HUDPassthroughView 패턴 그대로.
+        // 자식(pill·버튼) 외 빈 영역은 hit === self → nil 반환되어 sceneView 로 통과.
+        // 사용자가 모달을 우회해 더블탭 측위 재시도하는 시나리오 막으려면 일반 UIView 로 교체해야 하지만,
+        // 현재 게이트(isAwaitingStartConfirmation) 로 startLocalizationFlow 자체가 차단되므로 pass-through 도 무해.
+        startConfirmBadge = HUDPassthroughView(frame: bounds)
+        startConfirmBadge.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        startConfirmBadge.isHidden = true
+        startConfirmBadge.isUserInteractionEnabled = true
+        startConfirmBadge.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+
+        // pill — 동적 라벨이라 가로 폭은 라벨 intrinsic + 좌우 인셋으로 결정.
+        let pill = UIView()
+        pill.backgroundColor = UIColor.white.withAlphaComponent(0.95)
+        pill.layer.cornerRadius = 22
+        pill.layer.shadowColor = UIColor.black.cgColor
+        pill.layer.shadowOpacity = 0.15
+        pill.layer.shadowRadius = 6
+        pill.layer.shadowOffset = CGSize(width: 0, height: 2)
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        startConfirmBadge.addSubview(pill)
+
+        let iconConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+        let iconImage = UIImage(systemName: "mappin.circle.fill", withConfiguration: iconConfig)
+        let iconView = UIImageView(image: iconImage)
+        iconView.tintColor = .systemRed
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(iconView)
+
+        let label = UILabel()
+        label.text = "현재 위치가 맞나요?"
+        label.textColor = .darkText
+        label.font = .systemFont(ofSize: 16, weight: .semibold)
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(label)
+        startConfirmLabel = label
+
+        // 버튼 row — 취소 / 확인. arrival 모달의 confirm 버튼 패턴 그대로 (iOS15+ Configuration.filled).
+        let cancelButton: UIButton
+        let confirmButton: UIButton
+        if #available(iOS 15.0, *) {
+            var cancelConfig = UIButton.Configuration.filled()
+            cancelConfig.title = "취소"
+            cancelConfig.baseBackgroundColor = UIColor.white.withAlphaComponent(0.95)
+            cancelConfig.baseForegroundColor = .black
+            cancelConfig.cornerStyle = .capsule
+            cancelButton = UIButton(configuration: cancelConfig)
+            cancelButton.layer.borderWidth = 1
+            cancelButton.layer.borderColor = UIColor.systemGray3.cgColor
+
+            var confirmConfig = UIButton.Configuration.filled()
+            confirmConfig.title = "확인"
+            confirmConfig.baseBackgroundColor = .systemBlue
+            confirmConfig.baseForegroundColor = .white
+            confirmConfig.cornerStyle = .capsule
+            confirmButton = UIButton(configuration: confirmConfig)
+        } else {
+            cancelButton = UIButton(type: .system)
+            cancelButton.setTitle("취소", for: .normal)
+            cancelButton.setTitleColor(.black, for: .normal)
+            cancelButton.backgroundColor = UIColor.white.withAlphaComponent(0.95)
+            cancelButton.layer.cornerRadius = 22
+            cancelButton.layer.masksToBounds = true
+            cancelButton.layer.borderWidth = 1
+            cancelButton.layer.borderColor = UIColor.systemGray3.cgColor
+
+            confirmButton = UIButton(type: .system)
+            confirmButton.setTitle("확인", for: .normal)
+            confirmButton.setTitleColor(.white, for: .normal)
+            confirmButton.backgroundColor = .systemBlue
+            confirmButton.layer.cornerRadius = 22
+            confirmButton.layer.masksToBounds = true
+        }
+        cancelButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        confirmButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        cancelButton.translatesAutoresizingMaskIntoConstraints = false
+        confirmButton.translatesAutoresizingMaskIntoConstraints = false
+        cancelButton.addTarget(self, action: #selector(onStartCancelTapped), for: .touchUpInside)
+        confirmButton.addTarget(self, action: #selector(onStartConfirmTapped), for: .touchUpInside)
+
+        let buttonRow = UIStackView(arrangedSubviews: [cancelButton, confirmButton])
+        buttonRow.axis = .horizontal
+        buttonRow.alignment = .center
+        buttonRow.spacing = 12
+        buttonRow.distribution = .fill
+        buttonRow.translatesAutoresizingMaskIntoConstraints = false
+        startConfirmBadge.addSubview(buttonRow)
+
+        self.view.addSubview(startConfirmBadge)
+
+        NSLayoutConstraint.activate([
+            pill.centerXAnchor.constraint(equalTo: startConfirmBadge.centerXAnchor),
+            pill.centerYAnchor.constraint(equalTo: startConfirmBadge.centerYAnchor),
+            pill.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+            pill.leadingAnchor.constraint(greaterThanOrEqualTo: startConfirmBadge.safeAreaLayoutGuide.leadingAnchor, constant: 40),
+            pill.trailingAnchor.constraint(lessThanOrEqualTo: startConfirmBadge.safeAreaLayoutGuide.trailingAnchor, constant: -40),
+
+            iconView.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 16),
+            iconView.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 22),
+            iconView.heightAnchor.constraint(equalToConstant: 22),
+
+            label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 8),
+            label.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -20),
+            label.topAnchor.constraint(equalTo: pill.topAnchor, constant: 10),
+            label.bottomAnchor.constraint(equalTo: pill.bottomAnchor, constant: -10),
+
+            buttonRow.centerXAnchor.constraint(equalTo: startConfirmBadge.centerXAnchor),
+            buttonRow.topAnchor.constraint(equalTo: pill.bottomAnchor, constant: 16),
+
+            cancelButton.widthAnchor.constraint(equalToConstant: 120),
+            cancelButton.heightAnchor.constraint(equalToConstant: 44),
+            confirmButton.widthAnchor.constraint(equalToConstant: 120),
+            confirmButton.heightAnchor.constraint(equalToConstant: 44),
+        ])
+        _ = bounds
+    }
+
+    @objc private func onStartConfirmTapped() {
+        UIView.animate(withDuration: 0.2, animations: {
+            self.startConfirmBadge.alpha = 0
+        }, completion: { _ in
+            self.startConfirmBadge.isHidden = true
+            self.startConfirmBadge.alpha = 1
+        })
+        logic.confirmStartLocation()
+    }
+
+    @objc private func onStartCancelTapped() {
+        UIView.animate(withDuration: 0.2, animations: {
+            self.startConfirmBadge.alpha = 0
+        }, completion: { _ in
+            self.startConfirmBadge.isHidden = true
+            self.startConfirmBadge.alpha = 1
+        })
+        logic.cancelStartConfirmation()
     }
 
     /// 도착 pill 의 "확인" 버튼 콜백 — AR/타이머 정리 후 root(네이버 지도)로 복귀.
@@ -3118,6 +3269,53 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
             self.floorTransitionOverlayView.alpha = 0
         } completion: { _ in
             self.floorTransitionOverlayView.isHidden = true
+        }
+    }
+
+    func showStartConfirmation(nearPoiName: String?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            // 모달 표시 직전에 같이 떠 있을 수 있는 loading/route calculating 정리.
+            self.setLoading(false)
+            self.showRouteCalculating(false)
+
+            let labelText: String = {
+                if let n = nearPoiName, !n.isEmpty {
+                    return "현재 위치가 \(n)이(가) 맞나요?"
+                }
+                return "현재 위치가 맞나요?"
+            }()
+            self.startConfirmLabel.text = labelText
+
+            self.startConfirmBadge.alpha = 0
+            self.startConfirmBadge.isHidden = false
+            // 다른 오버레이보다 위에 와야 함. arrivalBadge / floorTransition 처럼 명시적 bring.
+            self.view.bringSubviewToFront(self.startConfirmBadge)
+            UIView.animate(withDuration: 0.3) {
+                self.startConfirmBadge.alpha = 1
+            }
+        }
+    }
+
+    func dismissStartConfirmation() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            UIView.animate(withDuration: 0.2, animations: {
+                self.startConfirmBadge.alpha = 0
+            }, completion: { _ in
+                self.startConfirmBadge.isHidden = true
+                self.startConfirmBadge.alpha = 1
+            })
+        }
+    }
+
+    func resetLocateButtonLabel() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            // 첫 측위 성공 상태 해제 → 라벨도 초기값("주변 스캔") 으로 복원.
+            self.hasLocalizedSuccessfully = false
+            self.locateButton.setTitle("주변 스캔", for: .normal)
         }
     }
 }
