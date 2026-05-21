@@ -1395,8 +1395,14 @@ class ARNavigationLogic {
                 }
                 prevPos = (sx, sy)
             }
-            // instruction 은 항상 action 기반 한국어(서버 영문 무시) — UX 일관성 보장.
-            let instr: String = Self.fallbackInstructionText(for: action)
+            // instruction: turn 은 인근 POI 결합, 계단은 노드명 결합, 나머지는 action fallback.
+            let prev: PathStep? = (i > 0) ? steps[i - 1] : nil
+            let instr: String = contextualInstructionText(
+                for: action,
+                step: s,
+                previousStep: prev,
+                floorLevel: s.floorLevel ?? localizedFloorLevel
+            )
             items.append(RouteOverviewItem(
                 kind: .step,
                 action: action,
@@ -1451,6 +1457,230 @@ class ARNavigationLogic {
         case .arrive: return "목적지 도착"
         case .unknown: return "이동"
         }
+    }
+
+    // MARK: - RouteOverview instruction 문맥 합성
+
+    /// step 에 따라 POI/계단 문맥을 합성한 instruction 텍스트 생성.
+    /// - turnLeft/turnRight: 3m 이내 POI(transition 제외) 발견 시 "{name} 앞에서/지나쳐서 좌/우회전".
+    /// - stairsUp/stairsDown: 계단 노드명 발견 시 "{name}(계단)으로 위/아래층 이동".
+    /// - 그 외/매칭 실패: fallbackInstructionText.
+    private func contextualInstructionText(
+        for action: NavigationActionKind,
+        step: PathStep,
+        previousStep: PathStep?,
+        floorLevel: Int?
+    ) -> String {
+        switch action {
+        case .turnLeft, .turnRight:
+            guard let poi = findNearestPOI(
+                at: step.position,
+                floorLevel: floorLevel,
+                maxDistance: 3.0,
+                excludingTransitions: true
+            ) else {
+                return Self.fallbackInstructionText(for: action)
+            }
+            let rel = relation(step: step, previousStep: previousStep, poiX: poi.x, poiY: poi.y)
+            let turnText: String = (action == .turnLeft) ? "좌회전" : "우회전"
+            switch rel {
+            case .before:
+                return "\(poi.name) 앞에서 \(turnText)"
+            case .past:
+                return "\(poi.name) 지나쳐서 \(turnText)"
+            }
+        case .stairsUp, .stairsDown:
+            guard let name = findTransitionName(forStep: step, floorLevel: floorLevel) else {
+                return Self.fallbackInstructionText(for: action)
+            }
+            let direction: String = (action == .stairsUp) ? "위층" : "아래층"
+            let label: String = name.contains("계단") ? name : "\(name) 계단"
+            return "\(label)으로 \(direction) 이동"
+        default:
+            return Self.fallbackInstructionText(for: action)
+        }
+    }
+
+    /// POI 와 turn step 의 진행 방향 상 위치 관계.
+    /// - before: turn 직전(아직 POI 를 지나치지 않음)
+    /// - past: POI 를 지나친 직후
+    private enum POIRelation {
+        case before
+        case past
+    }
+
+    /// floorMapCache 의 destinations[] 중 step.position 의 XY 거리 ≤ maxDistance 인 가장 가까운 POI.
+    /// excludingTransitions=true 면 isTransitionDestination 판정된 항목 제외.
+    /// cache miss / position nil / floorLevel mismatch / 이름 빈 destination 만 → nil.
+    private func findNearestPOI(
+        at position: Position?,
+        floorLevel: Int?,
+        maxDistance: Double,
+        excludingTransitions: Bool
+    ) -> (name: String, x: Double, y: Double, distance: Double)? {
+        guard let pos = position, let px = pos.x, let py = pos.y else { return nil }
+        let resolvedFloorId = localizedFloorId ?? floorId
+        let resolvedAreaId = localizedAreaId ?? ""
+        let cacheKey = "\(resolvedFloorId)#\(resolvedAreaId)"
+        guard let map = floorMapCache[cacheKey] else { return nil }
+        if let target = floorLevel, map.floorLevel != target {
+            return nil
+        }
+        guard let destinations = map.destinations, !destinations.isEmpty else { return nil }
+
+        var best: (name: String, x: Double, y: Double, distance: Double)?
+        for dest in destinations {
+            guard let dx = dest.x, let dy = dest.y else { continue }
+            let nameCandidate: String? = {
+                if let n = dest.name, !n.isEmpty { return n }
+                if let l = dest.label, !l.isEmpty { return l }
+                return nil
+            }()
+            guard let displayName = nameCandidate else { continue }
+            if excludingTransitions && Self.isTransitionDestination(dest) { continue }
+            let ddx = dx - px
+            let ddy = dy - py
+            let d = sqrt(ddx * ddx + ddy * ddy)
+            if d > maxDistance { continue }
+            if best == nil || d < best!.distance {
+                best = (displayName, dx, dy, d)
+            }
+        }
+        return best
+    }
+
+    /// 계단/엘리베이터/리프트 등 transition 성 destination 판정.
+    /// - category 우선 (STAIRS/STAIR/ELEVATOR/LIFT 포함).
+    /// - category 빈 경우 name/label 키워드(계단/엘리베이터/Stair/Elevator/EV) 로 fallback.
+    private static func isTransitionDestination(_ dest: FloorMapDestination) -> Bool {
+        if let category = dest.category, !category.isEmpty {
+            let upper = category.uppercased()
+            if upper.contains("STAIR") || upper.contains("ELEVATOR") || upper.contains("LIFT") {
+                return true
+            }
+            return false
+        }
+        let label = (dest.name?.isEmpty == false ? dest.name : dest.label) ?? ""
+        if label.isEmpty { return false }
+        let upper = label.uppercased()
+        if label.contains("계단") || label.contains("엘리베이터") { return true }
+        if upper.contains("STAIR") || upper.contains("ELEVATOR") || upper.contains("EV") { return true }
+        return false
+    }
+
+    /// 계단/엘리베이터 step 의 노드 이름을 connectors/destinations 에서 lookup.
+    /// 1순위: step.nodeId 와 일치하는 connector.name
+    /// 2순위: step.position 과 connector.x/y 거리 ≤ 1.0m 인 최근접 connector.name
+    /// 3순위: destinations 중 transition 성 항목 nodeId/좌표 매칭
+    /// 실패 → nil.
+    private func findTransitionName(forStep step: PathStep, floorLevel: Int?) -> String? {
+        let resolvedFloorId = localizedFloorId ?? floorId
+        let resolvedAreaId = localizedAreaId ?? ""
+        let cacheKey = "\(resolvedFloorId)#\(resolvedAreaId)"
+        guard let map = floorMapCache[cacheKey] else { return nil }
+        if let target = floorLevel, map.floorLevel != target {
+            return nil
+        }
+
+        // 1순위: connector.routeNodeId == step.nodeId
+        if let connectors = map.connectors, let nodeId = step.nodeId, !nodeId.isEmpty {
+            if let match = connectors.first(where: { ($0.routeNodeId ?? "") == nodeId }) {
+                if let n = match.name, !n.isEmpty { return n }
+            }
+        }
+
+        // 2순위: connector 좌표 거리 ≤ 1.0m
+        if let connectors = map.connectors,
+           let sx = step.position?.x, let sy = step.position?.y {
+            var best: (name: String, distance: Double)?
+            for c in connectors {
+                guard let cx = c.x, let cy = c.y else { continue }
+                guard let n = c.name, !n.isEmpty else { continue }
+                let dx = cx - sx
+                let dy = cy - sy
+                let d = sqrt(dx * dx + dy * dy)
+                if d > 1.0 { continue }
+                if best == nil || d < best!.distance {
+                    best = (n, d)
+                }
+            }
+            if let b = best { return b.name }
+        }
+
+        // 3순위: destinations 중 transition 성 → nodeId / 좌표 매칭
+        if let destinations = map.destinations {
+            // nodeId 매칭 (PathStep.nodeId 와 dest.routeNodeId)
+            if let nodeId = step.nodeId, !nodeId.isEmpty {
+                if let match = destinations.first(where: {
+                    Self.isTransitionDestination($0) && ($0.routeNodeId ?? "") == nodeId
+                }) {
+                    if let n = match.name, !n.isEmpty { return n }
+                    if let l = match.label, !l.isEmpty { return l }
+                }
+            }
+            // 좌표 매칭 (≤ 1.0m)
+            if let sx = step.position?.x, let sy = step.position?.y {
+                var best: (name: String, distance: Double)?
+                for d in destinations where Self.isTransitionDestination(d) {
+                    guard let dx = d.x, let dy = d.y else { continue }
+                    let nameCandidate: String? = {
+                        if let n = d.name, !n.isEmpty { return n }
+                        if let l = d.label, !l.isEmpty { return l }
+                        return nil
+                    }()
+                    guard let n = nameCandidate else { continue }
+                    let ex = dx - sx
+                    let ey = dy - sy
+                    let dist = sqrt(ex * ex + ey * ey)
+                    if dist > 1.0 { continue }
+                    if best == nil || dist < best!.distance {
+                        best = (n, dist)
+                    }
+                }
+                if let b = best { return b.name }
+            }
+        }
+
+        return nil
+    }
+
+    /// turn step 진행 방향 기준 POI 의 위치 관계 판정.
+    /// - T = step.position, P = previousStep.position (nil 이면 localizedPose 폴백, 둘 다 nil → .before)
+    /// - d = T - P, q = POI - P
+    /// - |d|^2 ≤ 0.01 또는 |d| ≤ 2.0 → .before 단일화
+    /// - t = (q·d) / |d|^2: t < 0.7 → .past, ≥ 0.7 → .before
+    private func relation(
+        step: PathStep,
+        previousStep: PathStep?,
+        poiX: Double,
+        poiY: Double
+    ) -> POIRelation {
+        guard let tx = step.position?.x, let ty = step.position?.y else { return .before }
+
+        let prevXY: (Double, Double)? = {
+            if let px = previousStep?.position?.x, let py = previousStep?.position?.y {
+                return (px, py)
+            }
+            if let pose = localizedPose, let px = pose.x, let py = pose.y {
+                return (px, py)
+            }
+            return nil
+        }()
+        guard let (px, py) = prevXY else { return .before }
+
+        let dx = tx - px
+        let dy = ty - py
+        let dLenSq = dx * dx + dy * dy
+        if dLenSq <= 0.01 { return .before }
+        let dLen = sqrt(dLenSq)
+        if dLen <= 2.0 { return .before }
+
+        let qx = poiX - px
+        let qy = poiY - py
+        let s = (qx * dx + qy * dy) / dLen
+        let t = s / dLen
+        if t < 0.7 { return .past }
+        return .before
     }
 
     // MARK: - AR 경로 렌더링 (PathChevron 시스템 — drawPathFromSteps 가 직접 PathChevronController 호출)

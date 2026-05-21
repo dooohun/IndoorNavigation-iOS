@@ -8,7 +8,8 @@ struct RouteOverviewItem {
     let kind: Kind
     /// origin/destination 은 .unknown. step 은 ARNavigationLogic.navigationActionKind 결과.
     let action: NavigationActionKind
-    /// 사용자에게 보일 한 줄 설명. step 의 경우 PathStep.instruction 또는 action 기반 한국어 fallback.
+    /// 사용자에게 보일 한 줄 설명. step 의 경우 ARNavigationLogic.makeRouteOverviewItems 에서
+    /// POI/계단 문맥 합성된 한국어. 빈 경우 셀이 action 기반 fallback 사용.
     let instruction: String
     /// 직전 valid 좌표로부터의 XY 유클리드 거리(m). origin/destination 은 0.
     let distanceMeters: Double
@@ -307,13 +308,17 @@ final class RouteOverviewStepCell: UITableViewCell {
     }
 
     func configure(item: RouteOverviewItem) {
-        // 텍스트: origin/destination 은 instruction (현재 위치 / 목적지명) 그대로,
-        // step 은 action 기반 한국어 강제(서버 영문 무시).
+        // 텍스트: origin/destination 은 instruction (현재 위치 / 목적지명) 그대로.
+        // step 은 ARNavigationLogic 에서 POI/계단 문맥 합성한 instruction 우선,
+        // 빈 문자열일 때만 action 기반 한국어 fallback.
         switch item.kind {
         case .origin, .destination:
             titleLabel.text = item.instruction
         case .step:
-            titleLabel.text = RouteOverviewViewController.koreanInstruction(for: item.action)
+            let text = item.instruction.trimmingCharacters(in: .whitespaces)
+            titleLabel.text = text.isEmpty
+                ? RouteOverviewViewController.koreanInstruction(for: item.action)
+                : text
         }
 
         // 아이콘: asset (SVG) / SF Symbol 분기.
