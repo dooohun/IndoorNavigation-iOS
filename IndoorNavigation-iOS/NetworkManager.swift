@@ -136,32 +136,6 @@ class NetworkManager {
         }
     }
 
-    /// 첫 호출 시 서버 cache build 가 30~60초 걸릴 수 있어 timeout 90s.
-    func featurePointsLookup(buildingId: String,
-                             request requestDto: FeatureLookupRequest,
-                             completion: @escaping (Result<FeatureLookupResponse, Error>) -> Void) {
-        guard let url = URL(string: "\(baseURL)/buildings/\(buildingId)/feature-points/lookup") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 90
-
-        do {
-            request.httpBody = try JSONEncoder().encode(requestDto)
-            log("REQ", "POST lookup queries=\(requestDto.queries.count)")
-        } catch {
-            completion(.failure(error))
-            return
-        }
-
-        Self.performJSON(request) { (result: Result<FeatureLookupResponse, Error>) in
-            if case .success(let resp) = result {
-                log("RES", "lookup: keyframes \(resp.keyframes.count), \(resp.stats.byteSize / 1024)KB")
-            }
-            completion(result)
-        }
-    }
-
     func findRouteByCoordinates(buildingId: String,
                                 floorId: String,
                                 request requestDto: FloorCoordinateRouteRequest,
@@ -218,7 +192,7 @@ class NetworkManager {
     // MARK: - SLAM Localize V3
 
     /// `POST /api/slam/v3/localize` — multipart 이미지 업로드.
-    /// 서버에서 SuperPoint 추출 + LightGlue 매칭 + PnP 까지 수행 — 5장 처리에 30초+ 걸려 timeout 90s.
+    /// 서버에서 feature 추출 + 매칭 + PnP 까지 수행 — 5장 처리에 30초+ 걸려 timeout 90s.
     ///
     /// 신서버 스펙: `building_id` / `map_id` / `floor_id` 는 query parameter, multipart 본문에는 images + depths 만.
     /// `depths` 는 LiDAR sceneDepth FP32 raw bytes (옵셔널 — 서버는 곧 optional 로 변경 예정).

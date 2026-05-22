@@ -1752,11 +1752,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
     // AR 마커 라이프사이클 manager — DistanceMarker / NextArrow 단일 마커 표시.
     private let markerController = ARMarkerController()
 
-    // Phase 7: SuperPoint 디버그 시각화 (DEBUG 빌드 전용)
-    #if DEBUG
-    private var superPointDebug: SuperPointDebugController?
-    #endif
-
     private var logic: ARNavigationLogic!
 
     override func viewDidLoad() {
@@ -1799,11 +1794,6 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         //          setupHeadingOverlay/setupTurnCard 미호출이라 nil. delegate 메서드 호출 시 강제 언래핑 크래시.
         //          GuidanceDirector 인스턴스는 보존(향후 Phase 5 부활 가능성). delegate 미등록 → no-op.
         // TODO(phase8+): GuidanceDirector 인스턴스 자체 옵셔널화 또는 폐기.
-
-        // Phase 7: SuperPoint extractor.
-        // Phase 6 UI 정리: 상단 SP / DUMP 디버그 버튼은 사용자 요청으로 비활성.
-        // SuperPointDebugController 인스턴스화 자체를 끔 — keypoint 오버레이/추론 시간/dump 버튼 모두 노출 X.
-        logic.setupSuperPointExtractor()
 
         // Phase 8: 화면 더블탭 → 측위 재시작 (무한 테스트용)
         setupRetapGestureForTesting()
@@ -2871,10 +2861,9 @@ class ARNavigationViewController: UIViewController, ARSCNViewDelegate, ARSession
         sceneView.session.pause()
     }
 
-    // MARK: - ARSessionDelegate (Phase 7)
+    // MARK: - ARSessionDelegate
 
-    /// 매 ARFrame마다 SuperPoint 추론 cadence를 평가하고 통과 시 extractor 호출.
-    /// 무거운 처리는 logic.processARFrame 내부에서 cadence 게이트로 차단된다.
+    /// 매 ARFrame마다 navigation step / chevron / 마커 / 층 전환 검출을 1Hz throttle 로 갱신.
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         logic.processARFrame(frame)
     }

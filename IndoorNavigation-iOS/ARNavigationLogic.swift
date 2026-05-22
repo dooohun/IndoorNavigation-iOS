@@ -84,16 +84,6 @@ protocol ARNavigationLogicDelegate: AnyObject {
 
 class ARNavigationLogic {
 
-    /// LightGlue 비활성 (2026-05-10) — 매처 정확도 한계 확정으로 Phase 4 추적 루프 정지.
-    /// SuperPoint 추출 + V3 측위 + path 렌더 + 정적 checkpoint 만 유지.
-    /// 모델 자원(LightGlueMatcher.mlpackage) 은 추후 재활성화 위해 보존.
-    static let useLightGlueMatcher: Bool = false
-
-    /// SuperPoint 추출 비활성 (2026-05-10) — 발열/배터리 절감용 일시 OFF.
-    /// V3 측위는 서버 측 SuperPoint 추출이라 클라 추출 없이도 정상 동작.
-    /// 모델 자원(SuperPoint.mlpackage) 은 추후 재활성화 위해 보존.
-    static let useSuperPointExtractor: Bool = false
-
     #if DEBUG
     /// Mock localize fixture 사용 (2026-05-13 사용자 JSON). true 면 스캔→캡처/네트워크 모두 우회.
     /// 즉시 fixture 데이터로 handleLocalizeV3Success 동등 상태 세팅 + drawPathFromSteps 호출.
@@ -212,46 +202,12 @@ class ARNavigationLogic {
     // 방향 안내 (Phase 5)
     private let guidanceDirector = GuidanceDirector()
 
-    // MARK: - SuperPoint (Phase 7)
-
-    /// SuperPoint 추출기. 기본은 ML 구현(SuperPointExtractorML), DEBUG 빌드에서 UserDefaults
-    /// `useSuperPointStub == true` 면 stub 으로 폴백. ML init 실패 시에도 stub 폴백.
-    private var superPointExtractor: SuperPointExtracting?
-    /// 추론 빈도 제어 (정지/걷기/회전 + thermal throttle).
-    private let cadenceController = InferenceCadenceController()
-    /// 최근 추론 시간(ms) ring buffer (capacity 100). DEBUG 빌드에서 mean/p95 산출에 사용.
-    private var inferenceTimesMs: [Double] = []
-    private let inferenceTimesCapacity: Int = 100
-    #if DEBUG
-    /// 디버그 시각화 컨트롤러 (옵셔널 weak). 본 모듈은 디버그 폴더 타입을 단방향 의존만 — receiveFrame 호출만 한다.
-    private weak var superPointDebug: SuperPointDebugController?
-    #endif
-
-    // MARK: - Phase 8 mock matching (mock bundle 호환성 검증)
-    /// 서버 endpoint 결정 전 mock JSON bundle 로드. extract 결과와 매칭해 호환성 검증.
-    private var localizationBundle: LocalizationBundle?
-    /// keyframe 별 base64 디코딩된 descriptor bytes 캐시 (반복 디코딩 회피).
-    private var keyframeDescriptorCache: [Data] = []
-    /// NetworkBundleProvider strong reference — fetch completion 까지 인스턴스 살려둠
-    /// (로컬 변수만 두면 setupSuperPointExtractor 종료 시 deallocated → completion silent return).
-    private var networkBundleProvider: NetworkBundleProvider?
-    /// PnP solver — RANSAC 으로 outlier 매칭에 면역. iter 100, inlier 임계 20px (intrinsics
-    /// 불일치 미세 reproj 차이 흡수 — 단계 5 클라 K 정확화 전 잠정), 최소 inlier 8.
-    /// 단순 DLT 단독은 outlier 1~2 개에도 reproj 폭주하므로 실측에서 무용지물 (관찰됨).
-    private let pnpSolver: PnPSolving = RansacPnPSolver(
-        iterations: 100,
-        inlierThresholdPx: 20.0,
-        minInliers: 8
-    )
-    /// PnP 최소 매칭 점 수 (DLT 이론상 6, 실용은 더 많을수록 안정).
-    private let pnpMinPairs: Int = 6
-
     // MARK: - Wall centering (drift 보정 — LiDAR mesh 기반)
     private var wallCenteringController: WallCenteringController?
     private var floorMapPolygonRingsCache: [[CGPoint]] = []
 
     // MARK: - 주기 재측위 (V3 only)
-    /// LightGlue 기반 추적이 비활성된 상태에서 ARKit pose 누적 drift 를 보정하는 주기적 V3 측위.
+    /// ARKit pose 누적 drift 를 보정하는 주기적 V3 측위.
     /// `startPeriodicRelocalize` 가 초기 측위 성공 후 타이머 시작 → cadence 마다 3장 캡처 → V3 호출.
     /// 응답 pose 는 기존 `localizedPose` 와 `blendAlpha` 로 SLERP/lerp blend (서서히 보정).
     /// `matchedARPose` 도 같은 alpha 로 blend 해 서버 pose 와 AR pose pair 의 정합성을 유지.
@@ -269,7 +225,7 @@ class ARNavigationLogic {
     private let periodicRelocalizeMinConfidence: Double = 0.50
     /// 주기 V3 재측위 feature match 수 가드. confidence 가 매칭 품질을 이미 반영하므로
     /// 절대값은 노이즈성 floor 만 차단하는 수준으로 낮춤 (이전 80 → 30).
-    /// 빌딩 부위마다 SuperPoint 검출 수가 달라 80 은 정상 응답도 자주 떨어트림.
+    /// 빌딩 부위마다 서버측 feature 검출 수가 달라 80 은 정상 응답도 자주 떨어트림.
     private let periodicRelocalizeMinMatches: Int = 30
     /// propagated prev quat 대비 응답 quat 회전 변화 가드. propagated 기준이라 정상이면 거의 0,
     /// drift+noise 합쳐도 한 자릿수 도 수준. 45° 는 명백한 wrong-match 만 컷.
@@ -293,37 +249,9 @@ class ARNavigationLogic {
     /// 캡처 시작 시각(Date timeIntervalSince1970). timeout 판정에 사용. 정상/abort 시 nil 로 정리.
     private var periodicCaptureStartTime: TimeInterval?
 
-    // MARK: - Phase 8 추적 cadence (A 트랙)
-    /// 추적 측위 주기 (초). SuperPoint ~700ms + LightGlue 5kf × ~100ms ≈ 1.2s.
-    /// cadence 5.0s = thermal throttle 회피 + prefix drop 충분 빈도.
-    private let trackingCadenceSec: TimeInterval = 5.0
-    /// 매 tick 매칭할 후보 keyframe 최대 개수 (candidates 앞쪽부터).
-    /// prefix drop 모델상 사용자는 인덱스 0~N 근처 → 19개 모두 매칭 불요.
-    private let trackingMatchTopK: Int = 5
-    /// 추적 timer.
-    private var trackingTimer: Timer?
-    /// 추적 추론 큐 — userInitiated.
-    private let trackingQueue = DispatchQueue(label: "tracking.lightglue", qos: .userInitiated)
-    /// tick 간 큐 쌓임 방지. main 전용.
-    private var isTrackingTickInFlight: Bool = false
-    /// 도착 임계 (m). TODO(A1).
-    private let trackingArrivalThresholdM: Float = 1.0
-
-    // Phase 8 keyframe 단계 추적 (A 트랙 재설계)
-    /// 진행 방향 정렬된 후보 — 인덱스 0 이 시작쪽(목적지로부터 먼 점), 마지막 인덱스가 목적지쪽(가장 가까운 점).
-    /// tick 마다 best 까지 prefix drop — "지워나감" 모델.
-    private var trackingKeyframeCandidates: [BundleKeyframe] = []
-    /// 단일 흰색 원형 바닥 마커. 다음 keyframe 위치를 표시.
-    private var checkpointNode: SCNNode?
-    /// 직전 tick best — 변화 추적 로그용.
-    private var lastBestKeyframeIndex: Int?
-    /// fetchBundleForPath 시점에 보관한 query 좌표열. 새 lookup 트리거 시 다음 좌표 결정용.
-    private var pathQueryPoints: [NetworkBundleProvider.QueryPoint] = []
-    /// 다음 query 좌표 커서. triggerNewLookup 호출 시 +1.
-    private var consumedQueryPointIndex: Int = 0
     /// pathfinding steps 시각화용 노드 (sphere + 인접 segment cylinder).
     private var pathNodes: [SCNNode] = []
-    /// drawPathFromSteps 가 받은 마지막 steps — PnP 보정 후 재렌더용.
+    /// drawPathFromSteps 가 받은 마지막 steps — 주기 재측위 후 재렌더용.
     private var lastPathSteps: [PathStep] = []
     private var floorMapCache: [String: FloorMapResponse] = [:]
     private var floorMapRequestGeneration: Int = 0
@@ -342,10 +270,6 @@ class ARNavigationLogic {
     private static let walkStrideM: Double = 0.7
     /// turn step 3D 화살표 진입 임계 (XZ, m). 카메라 ↔ turn step 거리 ≤ 10m 일 때 NextArrow 진입 (사양 §3).
     private static let turnArrowLookaheadM: Double = 10.0
-
-    /// LightGlue 매칭 엔진 — 토글 ON 시에만 init. mlpackage 미배치/load 실패 시 nil → fallback.
-    // 비활성: useLightGlueMatcher=false. 인스턴스화 회피로 mlpackage 로드 비용 절감.
-    private lazy var lightGlueMatcher: LightGlueMatcherEngine? = { return nil }()
 
     // MARK: - 출발지 확인 모달 게이트
     /// 초기 측위 + pathfinding 응답까지 도달 후 사용자 확인 대기 중인지 여부.
@@ -374,149 +298,44 @@ class ARNavigationLogic {
         pathChevronController.setHidden(hidden)
     }
 
-    /// SuperPoint extractor 인스턴스화 + warmUp. ViewController에서 viewDidLoad 끝에 호출.
-    /// 기본 경로: SuperPointExtractorML (Core ML 추론). DEBUG 빌드에서 UserDefaults
-    /// `useSuperPointStub` 가 true 면 stub 으로 강제 폴백. ML init 실패 시에도 stub 폴백.
-    func setupSuperPointExtractor() {
-        guard Self.useSuperPointExtractor else {
-            print("[SuperPoint] 비활성 — 발열 절감용 OFF. mlpackage 로드/warmUp 회피.")
-            return
-        }
-        let useStub: Bool = {
-            #if DEBUG
-            return UserDefaults.standard.bool(forKey: "useSuperPointStub")
-            #else
-            return false
-            #endif
-        }()
-
-        if useStub {
-            let stub = SuperPointExtractorStub()
-            stub.warmUp()
-            superPointExtractor = stub
-            return
-        }
-
-        do {
-            let ml = try SuperPointExtractorML()
-            ml.onInferenceTimeMs = { [weak self] ms in self?.recordInferenceTime(ms) }
-            ml.warmUp()
-            superPointExtractor = ml
-        } catch {
-            let stub = SuperPointExtractorStub()
-            stub.warmUp()
-            superPointExtractor = stub
-        }
-
-    }
-
-    /// SuperPointExtractorML 의 onInferenceTimeMs 콜백으로부터 호출. 최근 100개만 유지.
-    /// DEBUG 빌드에서는 mean/p95 ms 를 디버그 컨트롤러에 전달한다.
-    private func recordInferenceTime(_ ms: Double) {
-        inferenceTimesMs.append(ms)
-        if inferenceTimesMs.count > inferenceTimesCapacity {
-            inferenceTimesMs.removeFirst(inferenceTimesMs.count - inferenceTimesCapacity)
-        }
-        #if DEBUG
-        let times = inferenceTimesMs
-        guard !times.isEmpty else { return }
-        let mean = times.reduce(0, +) / Double(times.count)
-        let sorted = times.sorted()
-        let pIdx = min(sorted.count - 1, Int(ceil(Double(sorted.count) * 0.95)) - 1)
-        let p95 = sorted[max(0, pIdx)]
-        superPointDebug?.updateInferenceTime(meanMs: mean, p95Ms: p95)
-        #endif
-    }
-
-    #if DEBUG
-    /// 디버그 시각화 컨트롤러 연결 (DEBUG 빌드 전용).
-    func attachSuperPointDebug(_ debug: SuperPointDebugController) {
-        superPointDebug = debug
-    }
-    #endif
-
     /// ARSessionDelegate.session(_:didUpdate:) 에서 매 프레임 호출.
-    /// cadence 통과 시에만 extract 수행하고, DEBUG 빌드에서 디버그 오버레이로 결과 전달.
+    /// 2D 지도 위치 / step vm / chevron / 마커 / floor-transition 검출을 1Hz throttle 로 갱신.
     func processARFrame(_ frame: ARFrame) {
-        // Phase 6: 2D 지도 위치는 매 AR frame 갱신하고, 텍스트 step vm만 1Hz throttle.
-        if !lastPathSteps.isEmpty {
-            let floorNavigationPose = currentFloorNavigationPose(frame: frame)
-            delegate?.updateFloorNavigationPosition(
-                floorNavigationPose?.position,
-                headingDegrees: floorNavigationPose?.headingDegrees
-            )
+        guard !lastPathSteps.isEmpty else { return }
 
-            let now = CACurrentMediaTime()
-            if now - lastNavStepTickAt >= 1.0 {
-                lastNavStepTickAt = now
-                let cam = simd_float3(frame.camera.transform.columns.3.x,
-                                      frame.camera.transform.columns.3.y,
-                                      frame.camera.transform.columns.3.z)
-                recomputeCurrentStepIndex(cameraPos: cam)
-                // Floor-transition 자동 트리거: currentStepIndex 가 floor 변경 직전 step 도달 시 모달 표시
-                // cooldown 으로 매 tick 반복 트리거 방어 (안전망).
-                let nowMt = CACurrentMediaTime()
-                if !hasActiveFloorTransition,
-                   nowMt - lastFloorTransitionTriggerAt >= floorTransitionRetriggerCooldownSec,
-                   let info = detectFloorTransition(currentStepIdx: currentStepIndex, cameraPos: cam) {
-                    triggerFloorTransition(type: info.type, targetFloor: info.targetFloor, currentStepIdx: currentStepIndex)
-                }
-                if let vm = makeNavigationStepViewModel(cameraPos: cam) {
-                    delegate?.updateNavigationStep(vm)
-                }
-                let turnVM = makeTurnArrowViewModel(cameraPos: cam)
-                delegate?.updateTurnArrow(turnVM)
-                let markers = makeActiveMarkerList(cameraPos: cam)
-                delegate?.updateMarkers(markers)
-                // PathChevron: 가장 앞 chevron 통과 시 제거 + 신규 spawn.
-                pathChevronController.tickCamera(cameraPos: cam)
-                // 다음 drawPathFromSteps (PnP 재호출 등) 가 chevron 분포 cursor 결정에 사용할 카메라 캐시.
-                lastCameraPos = cam
-            }
-        }
-
-        guard Self.useSuperPointExtractor else { return }
-        guard let extractor = superPointExtractor else { return }
-
-        let thermal = ProcessInfo.processInfo.thermalState
-        guard cadenceController.shouldRunInference(
-            cameraTransform: frame.camera.transform,
-            timestamp: frame.timestamp,
-            thermalState: thermal
-        ) else { return }
-
-        let intrinsics = frame.camera.intrinsics
-        // 디바이스 자세 → SuperPoint 입력 orientation 결정. ARFrame raw 는 항상 landscape 라
-        // 사용자가 폰 portrait 면 90° CW 회전 후 가로 띠 crop 으로 upright 입력을 만든다.
-        let deviceIsLandscape = UIDevice.current.orientation.isLandscape
-        let orientation: InputOrientation = deviceIsLandscape ? .landscape : .portrait
-        let result = extractor.extract(
-            image: frame.capturedImage,
-            intrinsics: intrinsics,
-            timestamp: frame.timestamp,
-            orientation: orientation
+        let floorNavigationPose = currentFloorNavigationPose(frame: frame)
+        delegate?.updateFloorNavigationPosition(
+            floorNavigationPose?.position,
+            headingDegrees: floorNavigationPose?.headingDegrees
         )
 
-        #if DEBUG
-        if let debug = superPointDebug {
-            debug.frameDumper.consumeIfRequested(
-                frame: result,
-                arPose: frame.camera.transform
-            ) { res in
-                switch res {
-                case .success:
-                    debug.notifyDumpResult(success: true)
-                case .failure:
-                    debug.notifyDumpResult(success: false)
-                }
-            }
-        }
-        #endif
+        let now = CACurrentMediaTime()
+        guard now - lastNavStepTickAt >= 1.0 else { return }
+        lastNavStepTickAt = now
 
-        #if DEBUG
-        superPointDebug?.receiveFrame(result)
-        #endif
-        _ = result
+        let cam = simd_float3(frame.camera.transform.columns.3.x,
+                              frame.camera.transform.columns.3.y,
+                              frame.camera.transform.columns.3.z)
+        recomputeCurrentStepIndex(cameraPos: cam)
+        // Floor-transition 자동 트리거: currentStepIndex 가 floor 변경 직전 step 도달 시 모달 표시.
+        // cooldown 으로 매 tick 반복 트리거 방어 (안전망).
+        let nowMt = CACurrentMediaTime()
+        if !hasActiveFloorTransition,
+           nowMt - lastFloorTransitionTriggerAt >= floorTransitionRetriggerCooldownSec,
+           let info = detectFloorTransition(currentStepIdx: currentStepIndex, cameraPos: cam) {
+            triggerFloorTransition(type: info.type, targetFloor: info.targetFloor, currentStepIdx: currentStepIndex)
+        }
+        if let vm = makeNavigationStepViewModel(cameraPos: cam) {
+            delegate?.updateNavigationStep(vm)
+        }
+        let turnVM = makeTurnArrowViewModel(cameraPos: cam)
+        delegate?.updateTurnArrow(turnVM)
+        let markers = makeActiveMarkerList(cameraPos: cam)
+        delegate?.updateMarkers(markers)
+        // PathChevron: 가장 앞 chevron 통과 시 제거 + 신규 spawn.
+        pathChevronController.tickCamera(cameraPos: cam)
+        // 다음 drawPathFromSteps 가 chevron 분포 cursor 결정에 사용할 카메라 캐시.
+        lastCameraPos = cam
     }
 
     // MARK: - 다중 프레임 캡처 후 Localize
@@ -525,8 +344,6 @@ class ARNavigationLogic {
     /// 화면 더블탭으로 측위 재시작 시에도 재사용.
     private func resetForNewTrial() {
         // SCNNode 제거
-        checkpointNode?.removeFromParentNode()
-        checkpointNode = nil
         destinationPinNode = nil
         pathChevronController.clear()
         delegate?.updateTurnArrow(nil)
@@ -535,8 +352,6 @@ class ARNavigationLogic {
         // timer 정지
         arrivalCheckTimer?.invalidate()
         arrivalCheckTimer = nil
-        trackingTimer?.invalidate()
-        trackingTimer = nil
         captureTimer?.invalidate()
         captureTimer = nil
         stopPeriodicRelocalize()
@@ -553,11 +368,6 @@ class ARNavigationLogic {
         destinationARPosition = nil
         lastStartSnapDistance = nil
         hasNotifiedArrival = false
-        isTrackingTickInFlight = false
-        trackingKeyframeCandidates = []
-        lastBestKeyframeIndex = nil
-        pathQueryPoints = []
-        consumedQueryPointIndex = 0
         pathNodes.forEach { $0.removeFromParentNode() }
         pathNodes = []
         lastPathSteps = []
@@ -565,11 +375,6 @@ class ARNavigationLogic {
         delegate?.hideFloorNavigationMap()
         currentStepIndex = 0
         lastNavStepTickAt = 0
-
-        // bundle 클리어
-        localizationBundle = nil
-        keyframeDescriptorCache = []
-        networkBundleProvider = nil
 
         // capture 버퍼 클리어
         capturedImages = []
@@ -945,7 +750,6 @@ class ARNavigationLogic {
         print("[MOCK] inject fixture: steps=\(steps.count), localizedFloorLevel=\(localizedFloorLevel ?? -999)")
         drawPathFromSteps(steps)
         refreshFloorNavigationMap(routeSteps: steps, currentFrame: arSession?.currentFrame)
-        fetchBundleForPath(steps: steps, fallbackTranslation: translation, fallbackFloorLevel: response.floorLevel)
     }
     #endif
 
@@ -1246,13 +1050,11 @@ class ARNavigationLogic {
                     print("[V3-PATH] steps raw=\(steps.count) prefixed=\(prefixed.count), totalDistance=\(resp.totalDistance)m, floorTransitions=\(resp.floorTransitions?.count ?? 0)")
 
                     if isRelocalizeRefresh {
-                        // 주기 재측위 / PnP 보정 경로 — 기존 흐름 그대로 (이미 확인된 사용자라 게이트 우회).
+                        // 주기 재측위 경로 — 기존 흐름 그대로 (이미 확인된 사용자라 게이트 우회).
                         self.drawPathFromSteps(prefixed, isRelocalizeRefresh: true)
                         self.refreshFloorNavigationMap(routeSteps: prefixed,
                                                        currentFrame: self.arSession?.currentFrame,
                                                        isRelocalizeRefresh: true)
-                        // steps[].position 좌표를 lookup multi-query 로 사용 → 경로 전체 영역 keyframe pack 받음.
-                        self.fetchBundleForPath(steps: prefixed, fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
                         return
                     }
 
@@ -1267,9 +1069,6 @@ class ARNavigationLogic {
                                                        currentFrame: self.arSession?.currentFrame,
                                                        isRelocalizeRefresh: false)
                         self.dumpLocalizeDebug(rawSteps: resp.steps)
-                        self.fetchBundleForPath(steps: prefixed,
-                                                fallbackTranslation: translation,
-                                                fallbackFloorLevel: startFloorLevel)
                         self.delegate?.setHUDVisible(true)
                         self.delegate?.updateStatus("\(self.destinationName) 방향으로 이동하세요.", color: .white)
                         if let mPose = self.matchedARPose {
@@ -1295,9 +1094,6 @@ class ARNavigationLogic {
                                                        currentFrame: self.arSession?.currentFrame,
                                                        isRelocalizeRefresh: false)
                         self.dumpLocalizeDebug(rawSteps: resp.steps)
-                        self.fetchBundleForPath(steps: prefixed,
-                                                fallbackTranslation: translation,
-                                                fallbackFloorLevel: startFloorLevel)
                         self.delegate?.setHUDVisible(true)
                         self.delegate?.updateStatus("\(self.destinationName) 방향으로 이동하세요.", color: .white)
                         if let mPose = self.matchedARPose {
@@ -1321,56 +1117,14 @@ class ARNavigationLogic {
                     )
                 case .failure(let err):
                     let msg = String(describing: err)
-                    // pathfinding 실패해도 사용자 좌표 1점으로 lookup fallback — 추적 측위는 가능하게
-                    print("[V3-PATH] 실패 (\(msg)) — 사용자 좌표 단일 query 로 lookup fallback")
+                    print("[V3-PATH] 실패 (\(msg))")
                     // stale 플래그 클리어 — 다음 trial 일반 흐름.
                     self.pendingFloorTransitionRestart = false
-                    self.fetchBundleForPath(steps: [], fallbackTranslation: translation, fallbackFloorLevel: startFloorLevel)
+                    self.delegate?.showRouteCalculating(false)
+                    self.delegate?.setLoading(false)
                 }
             }
         }
-    }
-
-    /// pathfinding 응답 steps 좌표 multi-query (또는 fallback 단일 query) 로 lookup 호출.
-    /// 받은 keyframe pack 으로 추적 측위 시작.
-    private func fetchBundleForPath(steps: [PathStep], fallbackTranslation: simd_float3, fallbackFloorLevel: Int?) {
-        // 주기 재측위 정책 전환 — lookup 기반 추적(LightGlue) 폐기. 본 함수는 본문 보존하되 early return.
-        // 후속 UI 상태 직접 정리 (loading off + status update) — 호출자가 기대하던 상태로 복귀.
-        if !Self.useLightGlueMatcher {
-            print("[NetworkBundle] lookup disabled — 주기 재측위 정책 (early return)")
-            self.delegate?.showRouteCalculating(false)
-            self.delegate?.setLoading(false)
-            self.delegate?.updateStatus("\(self.destinationName) 방향으로 이동하세요.", color: .white)
-            return
-        }
-
-        // query 좌표 결정: steps 가 충분하면 그것, 아니면 사용자 좌표 1개
-        var queryPoints: [NetworkBundleProvider.QueryPoint] = []
-        if !steps.isEmpty {
-            for step in steps {
-                guard let pos = step.position else { continue }
-                queryPoints.append(NetworkBundleProvider.QueryPoint(
-                    floorLevel: step.floorLevel ?? (fallbackFloorLevel ?? 1),
-                    x: pos.x ?? 0, y: pos.y ?? 0, z: pos.z ?? 0
-                ))
-            }
-        }
-        if queryPoints.isEmpty {
-            queryPoints.append(NetworkBundleProvider.QueryPoint(
-                floorLevel: fallbackFloorLevel ?? 1,
-                x: Double(fallbackTranslation.x),
-                y: Double(fallbackTranslation.y),
-                z: Double(fallbackTranslation.z)
-            ))
-        }
-        // 새 lookup 트리거 시 다음 query 좌표 결정용 — pathfinding 응답 그대로 보관.
-        self.pathQueryPoints = queryPoints
-        self.consumedQueryPointIndex = 0
-
-        // lookup 호출 비활성화 — 측위/path 렌더링 까지만 진행, keyframe 추적 미실행.
-        print("[NetworkBundle] lookup 호출 SKIP (queries=\(queryPoints.count))")
-        self.delegate?.showRouteCalculating(false)
-        self.delegate?.setLoading(false)
     }
 
     // MARK: - 출발지 확인 모달 API
@@ -1848,16 +1602,6 @@ class ARNavigationLogic {
     }
 
     // MARK: - AR 경로 렌더링 (PathChevron 시스템 — drawPathFromSteps 가 직접 PathChevronController 호출)
-    //
-    // 이전 sphere + cylinder line 시각화는 PathChevron 시스템(바닥 ^ chevron, 2.5m 간격, sequential pulse)으로 대체.
-    // 보조 헬퍼(simplifyXZ / rdpRecurse / perpendicularDistanceXZ / catmullRomSpline / lineSegmentNode /
-    // createCheckpointNode / computeRemainingDistance) 는 본 PR 에서 제거.
-    // tracking 추적 모델(trackingKeyframeCandidates + checkpointNode placeholder)은 LightGlue 비활성 상태라 dead path 지만 보존.
-
-    // MARK: - 경로 진행 추적 (Phase 8 keyframe 단계 추적 모델로 대체 — dead path)
-    //
-    // tickPathProgress / startPathProgressTracking / pathProgressTimer 는 PathChevron 시스템 도입 시 제거.
-    // ViewController.viewWillDisappear 에서 호출하는 stopPathProgressTracking() 만 no-op 으로 보존.
 
     /// ViewController.viewWillDisappear 에서 호출 — 안전한 no-op.
     func stopPathProgressTracking() {
@@ -2077,38 +1821,6 @@ class ARNavigationLogic {
         currentStepIndex = 0
         delegate?.updateTurnArrow(nil)
         delegate?.updateMarkers([])
-    }
-
-    // MARK: - Phase 8 추적 측위 cadence (A 트랙)
-
-    /// 추적 측위 시작 — V3 측위 + lookup 완료 후 호출. cadence 마다 background 측위.
-    func startTracking() {
-        guard Self.useLightGlueMatcher else {
-            print("[Tracking] 비활성 — LightGlue OFF (SuperPoint 단독 모드). V3 측위 + 정적 path/checkpoint 만 표시.")
-            return
-        }
-        guard let bundle = localizationBundle, !bundle.keyframes.isEmpty else {
-            print("[Tracking] start 실패 — bundle 없음 또는 빈 keyframes")
-            return
-        }
-        guard lightGlueMatcher != nil else {
-            print("[Tracking] start 실패 — lightGlueMatcher=nil")
-            return
-        }
-        guard superPointExtractor != nil else {
-            print("[Tracking] start 실패 — superPointExtractor=nil")
-            return
-        }
-        trackingTimer?.invalidate()
-        trackingTimer = Timer.scheduledTimer(withTimeInterval: trackingCadenceSec, repeats: true) { [weak self] _ in
-            self?.runTrackingTick()
-        }
-        print("[Tracking] 시작 — cadence=\(trackingCadenceSec)s, keyframes=\(bundle.keyframes.count)")
-    }
-
-    func stopTracking() {
-        trackingTimer?.invalidate()
-        trackingTimer = nil
     }
 
     // MARK: - 주기 재측위
@@ -2791,264 +2503,6 @@ class ARNavigationLogic {
         LocalizeDebugLogger.dumpPeriodic(snapshot)
     }
 
-    private func runTrackingTick() {
-        guard !isTrackingTickInFlight else {
-            return
-        }
-        guard let frame = arSession?.currentFrame,
-              let bundle = localizationBundle,
-              let extractor = superPointExtractor,
-              let engine = lightGlueMatcher else { return }
-        // 후보 비어있으면 skip (setupTrackingCandidates 미호출 또는 직후 reset)
-        guard !trackingKeyframeCandidates.isEmpty else { return }
-
-        let arPoseAtCapture = frame.camera.transform
-        let pixelBuffer = frame.capturedImage
-        let intrinsics = frame.camera.intrinsics
-        let timestamp = frame.timestamp
-        let deviceIsLandscape = UIDevice.current.orientation.isLandscape
-        let orientation: InputOrientation = deviceIsLandscape ? .landscape : .portrait
-
-        // tick 시점 후보 snapshot — background 큐에서 매칭만 (PnP 폐기)
-        let candidatesSnapshot = trackingKeyframeCandidates
-        let intrinsicsSnapshot = bundle.manifest.intrinsics
-
-        isTrackingTickInFlight = true
-        let bundleSnapshot = bundle
-        print("[Tick] 시작 — candidates=\(candidatesSnapshot.count)")
-        trackingQueue.async { [weak self] in
-            guard let self = self else { return }
-            let queryFrame = extractor.extract(
-                image: pixelBuffer,
-                intrinsics: intrinsics,
-                timestamp: timestamp,
-                orientation: orientation
-            )
-            print("[Tick] SuperPoint 추출 완료 — keypoints=\(queryFrame.keypoints.count)")
-            var matchErrors = 0
-            var allKfData: [(idx: Int, count: Int, matches: [LightGlueMatcherEngine.Match])] = []
-            // 발열 제어: prefix drop 모델상 사용자는 candidates 앞쪽 근처 → topK 만 매칭.
-            let matchLimit = min(self.trackingMatchTopK, candidatesSnapshot.count)
-            for idx in 0..<matchLimit {
-                let kf = candidatesSnapshot[idx]
-                guard !kf.keypoints.isEmpty else { continue }
-                do {
-                    let m = try engine.match(query: queryFrame, targetKeyframe: kf, targetIntrinsics: intrinsicsSnapshot)
-                    allKfData.append((idx, m.count, m))
-                } catch {
-                    matchErrors += 1
-                    if matchErrors <= 1 { print("[Tick] LightGlue 실패 kf=\(idx): \(error)") }
-                }
-            }
-            let perKfMatches = allKfData.map { (idx: $0.idx, matched: $0.count) }
-            let summary = perKfMatches.map { "\($0.idx):\($0.matched)" }.joined(separator: ",")
-            print("[Tick] LightGlue 결과 — kf매칭=\(perKfMatches.count)/\(candidatesSnapshot.count) [\(summary)] errors=\(matchErrors)")
-            guard let best = perKfMatches.max(by: { $0.matched < $1.matched }) else {
-                DispatchQueue.main.async {
-                    print("[Tick] best 없음 — 후보 유지")
-                    self.isTrackingTickInFlight = false
-                }
-                return
-            }
-
-            // PnP 보정 — V3 측위 quat 오차 + ARKit drift 누적 정정. 매 tick 적용.
-            var pnpRefinement: PoseEstimate? = nil
-            let bestRaw = allKfData.first { $0.idx == best.idx }?.matches ?? []
-            let bestKf = candidatesSnapshot[best.idx]
-            let pairs = MatchedPointExtractor.extract(
-                lightGlueMatches: bestRaw,
-                queryKeypoints: queryFrame.keypoints,
-                bundleKeyframe: bestKf
-            )
-            if pairs.count >= self.pnpMinPairs {
-                let mIntr = bundleSnapshot.manifest.intrinsics
-                let K = simd_float3x3(rows: [
-                    SIMD3<Float>(Float(mIntr.fx), 0, Float(mIntr.cx)),
-                    SIMD3<Float>(0, Float(mIntr.fy), Float(mIntr.cy)),
-                    SIMD3<Float>(0, 0, 1),
-                ])
-                if let solved = self.pnpSolver.solve(
-                    objectPoints: pairs.map { $0.worldPoint },
-                    imagePoints: pairs.map { $0.imagePoint },
-                    intrinsics: K
-                ), solved.reprojectionError < 30 {
-                    pnpRefinement = solved
-                    print(String(format: "[Tick] PnP 보정 성공 — pairs=%d reproj=%.2fpx", pairs.count, solved.reprojectionError))
-                } else {
-                    print("[Tick] PnP fail (pairs=\(pairs.count) — reproj 초과 또는 solve 실패)")
-                }
-            } else {
-                print("[Tick] PnP skip — pairs=\(pairs.count) < \(self.pnpMinPairs)")
-            }
-
-            DispatchQueue.main.async {
-                print("[Tick] best kf=\(best.idx) matched=\(best.matched) → prefix drop")
-                if let pnp = pnpRefinement {
-                    self.applyPnPRefinement(pose: pnp, arPose: arPoseAtCapture)
-                }
-                self.handleTrackingMatchResult(
-                    bestIdx: best.idx,
-                    bestMatched: best.matched,
-                    perKfMatches: perKfMatches,
-                    arPoseAtCapture: arPoseAtCapture
-                )
-                self.isTrackingTickInFlight = false
-            }
-        }
-    }
-
-    /// PnP 결과로 localizedPose / matchedARPose 갱신 + path / checkpoint 재렌더.
-    /// PoseEstimate.rotation 은 world→camera (W2C). server pose 응답 형식과 동일 convention 이라
-    /// quaternion 그대로 qx/qy/qz/qw 로. translation 은 -R^T t_W2C 로 camera position in world.
-    private func applyPnPRefinement(pose: PoseEstimate, arPose: simd_float4x4) {
-        let R_W2C = pose.rotation
-        let t_W2C = pose.translation
-        let R_C2W = R_W2C.transpose
-        let t_W = -(R_C2W * t_W2C)
-        let q_W2C = simd_quatf(R_W2C)
-
-        self.localizedPose = Pose(
-            x: Double(t_W.x), y: Double(t_W.y), z: Double(t_W.z),
-            qx: Double(q_W2C.imag.x), qy: Double(q_W2C.imag.y),
-            qz: Double(q_W2C.imag.z), qw: Double(q_W2C.real)
-        )
-        self.matchedARPose = arPose
-        print(String(format: "[PnP] refined → t_W=(%.2f,%.2f,%.2f) reproj=%.2fpx", t_W.x, t_W.y, t_W.z, pose.reprojectionError))
-
-        // 보정된 pose 로 path / checkpoint 재렌더 — 보정 모드: 진행 상태 유지
-        self.drawPathFromSteps(self.lastPathSteps, isRelocalizeRefresh: true)
-        self.refreshFloorNavigationMap(routeSteps: self.lastPathSteps, currentFrame: arSession?.currentFrame, isRelocalizeRefresh: true)
-        self.updateCheckpointNode()
-    }
-
-    /// runTrackingTick 의 main 큐 후속 처리. PnP 없이 best keyframe 까지 prefix drop +
-    /// checkpoint 갱신 + localizedPose 갱신 + 도착 판정.
-    private func handleTrackingMatchResult(
-        bestIdx: Int,
-        bestMatched: Int,
-        perKfMatches: [(idx: Int, matched: Int)],
-        arPoseAtCapture: simd_float4x4
-    ) {
-        // "지워나감" — best 까지 prefix drop. snapshot 인덱스(idx)는 매칭 시점 candidatesSnapshot 기준.
-        // 본 main 큐 도달 시점에 trackingKeyframeCandidates 가 다른 흐름으로 변경됐을 가능성 — count 가드.
-        guard bestIdx < trackingKeyframeCandidates.count else {
-            return
-        }
-        trackingKeyframeCandidates = Array(trackingKeyframeCandidates[bestIdx...])
-        lastBestKeyframeIndex = bestIdx
-        _ = arPoseAtCapture  // 매 tick 변환 갱신 폐기 — checkpointNode 는 V3 측위 시점에 한 번 고정.
-
-        // 후보 1개로 줄었으면 새 lookup 트리거 (현재 keyframe 영역 모두 통과한 상태)
-        if trackingKeyframeCandidates.count <= 1 {
-            triggerNewLookup()
-        }
-
-        // 도착 판정 — 후보 1개 이하 + query 좌표 모두 소비 + 카메라 ↔ checkpoint XZ 거리 < 임계
-        if trackingKeyframeCandidates.count <= 1,
-           consumedQueryPointIndex >= max(pathQueryPoints.count - 1, 0),
-           let frame = arSession?.currentFrame,
-           let checkpoint = checkpointNode {
-            let cam = frame.camera.transform.columns.3
-            let dx = cam.x - checkpoint.position.x
-            let dz = cam.z - checkpoint.position.z
-            let dist = sqrt(dx * dx + dz * dz)
-            if dist < trackingArrivalThresholdM, !hasNotifiedArrival {
-                hasNotifiedArrival = true
-                stopTracking()
-                delegate?.showArrivalNotification()
-            }
-        }
-    }
-
-    /// trackingKeyframeCandidates 를 진행 방향 정렬. 인덱스 0 = 시작쪽(목적지에서 먼 점),
-    /// 마지막 인덱스 = 목적지쪽(가장 가까운 점). 사용자가 진행할수록 prefix drop.
-    private func setupTrackingCandidates(bundle: LocalizationBundle) {
-        let goalVec = simd_float3(
-            Float(self.goal.x),
-            Float(self.goal.y),
-            Float(self.goal.z ?? 0)
-        )
-        let sorted = bundle.keyframes.sorted { (a, b) -> Bool in
-            let da = distanceToGoal(kf: a, goal: goalVec)
-            let db = distanceToGoal(kf: b, goal: goalVec)
-            return da > db  // 거리 내림차순 — 인덱스 0 이 가장 멀고(시작쪽), 마지막이 가장 가까움(목적지쪽)
-        }
-        trackingKeyframeCandidates = sorted
-        lastBestKeyframeIndex = nil
-        updateCheckpointNode()
-        // AR 마커 초기 표시 지연 방지 — 후보 정렬 직후 1회 발신.
-        // 다음 1Hz processARFrame tick 까지 기다리지 않고 첫 마커가 즉시 등장하도록.
-        if let frame = arSession?.currentFrame {
-            let cam = simd_float3(
-                frame.camera.transform.columns.3.x,
-                frame.camera.transform.columns.3.y,
-                frame.camera.transform.columns.3.z
-            )
-            let markers = makeActiveMarkerList(cameraPos: cam)
-            delegate?.updateMarkers(markers)
-        }
-    }
-
-    /// keyframe pose4x4 마지막 열 → simd_float3, goal 과 거리 계산.
-    private func distanceToGoal(kf: BundleKeyframe, goal: simd_float3) -> Float {
-        let kfTr = kf.pose4x4
-        let kfPos = simd_float3(
-            Float(kfTr[0][3]),
-            Float(kfTr[1][3]),
-            Float(kfTr[2][3])
-        )
-        return simd_distance(kfPos, goal)
-    }
-
-    /// 단일 흰색 원형 바닥 마커 갱신 → 시각 노드는 ARMarkerController 로 이관(다이아몬드 마커가 대체).
-    /// 좌표 계산 로직만 보존 (도착 판정이 checkpointNode.position 을 참조하므로 placeholder 노드에 위치만 기록).
-    /// 시각 렌더링(흰색 원형 geometry, scene.rootNode.addChildNode) 은 무력화.
-    private func updateCheckpointNode() {
-        guard let lastKf = trackingKeyframeCandidates.last,
-              let arPose = matchedARPose,
-              let pose = localizedPose else { return }
-
-        let serverPos = simd_float3(
-            Float(pose.x ?? 0),
-            Float(pose.y ?? 0),
-            Float(pose.z ?? 0)
-        )
-        let quat = simd_quatf(
-            ix: Float(pose.qx ?? 0),
-            iy: Float(pose.qy ?? 0),
-            iz: Float(pose.qz ?? 0),
-            r: Float(pose.qw ?? 1)
-        )
-        let input = CoordinateTransformer.Input(
-            serverPosition: serverPos,
-            serverQuaternion: quat,
-            arCameraPose: arPose
-        )
-        let kfTr = lastKf.pose4x4
-        let kfPos = simd_float3(
-            Float(kfTr[0][3]),
-            Float(kfTr[1][3]),
-            Float(kfTr[2][3])
-        )
-        let arPos = CoordinateTransformer.transform(serverPoint: kfPos, input: input)
-
-        // 카메라 높이 → 바닥 레벨 추정 (drawPathNodes 동일 패턴)
-        let cameraY = arPose.columns.3.y
-        let floorY = cameraY - 1.7
-        let placement = simd_float3(arPos.x, floorY, arPos.z)
-
-        // placeholder 노드 — scene 에 추가하지 않음. arrival 판정에서 position 만 참조.
-        if let node = checkpointNode {
-            node.position = SCNVector3(placement.x, placement.y, placement.z)
-        } else {
-            let node = SCNNode()
-            node.name = "checkpointPositionPlaceholder"
-            node.position = SCNVector3(placement.x, placement.y, placement.z)
-            checkpointNode = node
-            // 의도적으로 scene?.rootNode.addChildNode(node) 미수행 — 시각 표현은 ARMarkerController 가 담당.
-        }
-    }
-
     /// pathfinding steps[].position 들을 server world → AR world 변환 후 PathChevronController 로 시각화.
     /// V3 측위 + lookup 직후 1회 호출. 매 tick 갱신 X (단, PnP 보정 시 재호출됨 — cameraPos 기준 spawn cursor 결정).
     /// - Parameter isRelocalizeRefresh: 주기 재측위/PnP 보정으로 인한 재렌더 여부. true 면 currentStepIndex / turn arrow / marker
@@ -3204,50 +2658,6 @@ class ARNavigationLogic {
             captureToCurrentARRotationDeg: cameraComparison.captureToCurrentRotDeg
         )
         LocalizeDebugLogger.dump(snapshot)
-    }
-
-    /// 후보 1개 이하 도달 시 — 다음 query 좌표(또는 목적지) 로 새 lookup. 결과로 후보 갱신.
-    private func triggerNewLookup() {
-        // 주기 재측위 정책 전환 — lookup 기반 추적(LightGlue) 폐기. 본 함수는 본문 보존하되 early return.
-        if !Self.useLightGlueMatcher {
-            print("[NetworkBundle] triggerNewLookup disabled — 주기 재측위 정책 (early return)")
-            return
-        }
-
-        consumedQueryPointIndex += 1
-        let nextQueryPoint: NetworkBundleProvider.QueryPoint
-        if consumedQueryPointIndex < pathQueryPoints.count {
-            nextQueryPoint = pathQueryPoints[consumedQueryPointIndex]
-        } else {
-            nextQueryPoint = NetworkBundleProvider.QueryPoint(
-                floorLevel: localizedFloorLevel ?? 1,
-                x: self.goal.x,
-                y: self.goal.y,
-                z: self.goal.z ?? 0
-            )
-        }
-        let provider = NetworkBundleProvider(
-            buildingId: self.buildingId,
-            queryPoints: [nextQueryPoint],
-            radiusM: 5.0,
-            maxKeyframesPerQuery: 5
-        )
-        self.networkBundleProvider = provider
-        print("[NetworkBundle] new lookup (consumed=\(consumedQueryPointIndex)/\(pathQueryPoints.count))")
-        provider.fetch { [weak self] result in
-            guard let self = self else { return }
-            switch result {
-            case .success(let bundle):
-                self.localizationBundle = bundle
-                self.keyframeDescriptorCache = bundle.keyframes.map {
-                    Data(base64Encoded: $0.descriptorsB64) ?? Data()
-                }
-                self.setupTrackingCandidates(bundle: bundle)
-                print("[NetworkBundle] new keyframes=\(bundle.keyframes.count)")
-            case .failure(let err):
-                print("[NetworkBundle] new lookup 실패: \(err) — 기존 후보 유지")
-            }
-        }
     }
 
     // MARK: - Phase 6 UI 모델
@@ -3857,8 +3267,6 @@ class ARNavigationLogic {
             }
         }
     }
-
-    // MARK: - 목적지 3D 핀 마커 (Phase 8 단일 checkpointNode 로 대체 — createDestinationPin 폐기)
 
     // MARK: - 목적지 도착 감지
 

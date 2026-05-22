@@ -1,3 +1,0 @@
-torch>=2.1
-coremltools>=7.2
-numpy>=1.24
