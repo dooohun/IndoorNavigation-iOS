@@ -2,6 +2,17 @@ import UIKit
 import ARKit
 import SceneKit
 
+// MARK: - DebugSettings (Info.plist 기반 디버그 토글)
+//
+// 운영/디버그 동작 분기를 Info.plist 키로 외부 제어한다 (코드 재빌드 없이 plist 만 바꿔 토글).
+enum DebugSettings {
+    /// "FullRouteDebugOverlay" (Bool, 기본 false). true 면 서버 raw 전체 경로를 점·선으로
+    /// AR 에 렌더(라우팅 진단용). false 면 운영 동작 — 앞쪽 chevron 화살표만 표시.
+    static var fullRouteDebugOverlay: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "FullRouteDebugOverlay") as? Bool ?? false
+    }
+}
+
 // MARK: - Phase 6 UI 모델 (Step 기반 카드 UX)
 
 enum NavigationActionKind {
@@ -167,6 +178,17 @@ class ARNavigationLogic {
     /// 최근 1Hz tick 시점의 카메라 XZ 위치 캐시 — drawPathFromSteps 가 chevron 분포 카메라 기준 spawn cursor 결정에 사용.
     private var lastCameraPos: simd_float3?
 
+    // 디버그: 서버 raw 경로 시각화 (바닥 투영 chevron 과 별개).
+    // CoordinateTransformer 가 변환한 server world → AR world 좌표를 floorY 보정 없이
+    // "그대로" 점·선으로 그린다. chevron 이 바닥에 깔려 방향 판별이 어려울 때, 서버가 보낸
+    // 경로의 실제 3D 위치(높이 포함)를 눈으로 확인해 localize 방향/위치 오류를 진단하는 용도.
+    private weak var debugPathParent: SCNNode?
+    private var debugRawPathNode: SCNNode?
+    /// true 면 drawPathFromSteps 시 raw 전체 경로를 점·선으로 동반 렌더.
+    /// 기본값은 Info.plist "FullRouteDebugOverlay" 로 제어 — 평소 false(운영: 앞쪽 chevron 화살표만),
+    /// 라우팅 진단이 필요할 때만 plist 에서 true 로 켠다. 코드는 보존하고 이 플래그로만 분기한다.
+    private var debugRawPathEnabled: Bool = DebugSettings.fullRouteDebugOverlay
+
     // 층 이동 인터렉션
     private var hasActiveFloorTransition: Bool = false
     /// triggerFloorTransition 마지막 발화 시각 (CACurrentMediaTime). 동일 step 도달 시 1Hz tick 마다
@@ -291,6 +313,16 @@ class ARNavigationLogic {
     /// PathChevron 시스템 부모 노드 등록. ViewController 가 sceneView 준비 후 1회 호출.
     func attachChevronParent(_ parent: SCNNode) {
         pathChevronController.attach(to: parent)
+        debugPathParent = parent
+    }
+
+    /// 디버그 raw 경로 렌더 토글. 외부(HUD 디버그 버튼 등)에서 on/off.
+    func setDebugRawPathEnabled(_ enabled: Bool) {
+        debugRawPathEnabled = enabled
+        if !enabled {
+            debugRawPathNode?.removeFromParentNode()
+            debugRawPathNode = nil
+        }
     }
 
     /// PathChevron 가시성 토글. setHUDVisible(false) 와 짝으로 호출 — chevron 도 동반 숨김.
@@ -346,6 +378,8 @@ class ARNavigationLogic {
         // SCNNode 제거
         destinationPinNode = nil
         pathChevronController.clear()
+        debugRawPathNode?.removeFromParentNode()
+        debugRawPathNode = nil
         delegate?.updateTurnArrow(nil)
         delegate?.updateMarkers([])
 
@@ -2557,6 +2591,9 @@ class ARNavigationLogic {
         )
         print("[Path] drew \(steps.count) steps as \(filteredARPoints.count) chevron-distribution points (filtered to current floor)")
 
+        // 디버그: 서버 raw 경로(floorY 보정 X, 변환된 3D 그대로)를 점·선으로 동반 렌더.
+        drawDebugRawServerPath(steps: steps, input: input)
+
         // 도착 감지용 destination AR 좌표 갱신. 매 drawPathFromSteps 호출마다 최신 값으로 set
         // (재측위 시에도 갱신되어 transform drift 보정 반영). 마지막 PathStep.position 기준.
         // 단, 마지막 step 이 transition (계단/엘리베이터) 인 경우 도착 판정을 일시 정지해야 한다 —
@@ -2605,6 +2642,83 @@ class ARNavigationLogic {
             let markers = makeActiveMarkerList(cameraPos: cam)
             delegate?.updateMarkers(markers)
         }
+    }
+
+    /// 디버그: 서버가 보낸 경로 step 들을 CoordinateTransformer 로 변환한 AR world 좌표 "그대로"
+    /// (floorY 보정/투영 없이) 점·선으로 렌더한다. chevron 은 모든 점을 floorY 로 눌러 방향만 보이지만,
+    /// 이 렌더는 서버 경로의 실제 3D 위치(높이 포함)를 보존해 localize 위치/방향 오류를 눈으로 진단한다.
+    /// - 빨강 구  : 각 step 의 raw 변환 위치
+    /// - 노랑 선  : step 간 연결 (진행 순서)
+    /// - 초록 구  : 시작 step (경로 출발점)
+    /// - 보라 구  : 마지막 step (목적지)
+    private func drawDebugRawServerPath(steps: [PathStep], input: CoordinateTransformer.Input) {
+        debugRawPathNode?.removeFromParentNode()
+        debugRawPathNode = nil
+        guard debugRawPathEnabled, let parent = debugPathParent else { return }
+
+        let arPoints: [simd_float3] = steps.compactMap { step in
+            guard let pos = step.position,
+                  let x = pos.x, let y = pos.y, let z = pos.z else { return nil }
+            return CoordinateTransformer.transform(
+                serverPoint: simd_float3(Float(x), Float(y), Float(z)),
+                input: input
+            )
+        }
+        guard arPoints.count >= 2 else { return }
+
+        let container = SCNNode()
+        container.name = "debugRawServerPath"
+
+        for (i, p) in arPoints.enumerated() {
+            let isStart = (i == 0)
+            let isEnd = (i == arPoints.count - 1)
+            let sphere = SCNSphere(radius: isEnd ? 0.12 : 0.08)
+            let mat = SCNMaterial()
+            mat.diffuse.contents = isEnd ? UIColor.purple : (isStart ? UIColor.green : UIColor.red)
+            mat.lightingModel = .constant
+            mat.readsFromDepthBuffer = false
+            sphere.materials = [mat]
+            let node = SCNNode(geometry: sphere)
+            node.position = SCNVector3(p.x, p.y, p.z)
+            node.renderingOrder = 20
+            container.addChildNode(node)
+
+            if i > 0 {
+                let a = arPoints[i - 1]
+                container.addChildNode(makeDebugLine(from: a, to: p))
+            }
+        }
+
+        parent.addChildNode(container)
+        debugRawPathNode = container
+        print("[DebugRawPath] rendered \(arPoints.count) raw server points (no floorY projection)")
+    }
+
+    /// 두 AR world 점을 잇는 얇은 실린더 노드(노랑). depth 무시하고 항상 보이게.
+    private func makeDebugLine(from a: simd_float3, to b: simd_float3) -> SCNNode {
+        let d = b - a
+        let len = simd_length(d)
+        let cyl = SCNCylinder(radius: 0.015, height: CGFloat(len))
+        let mat = SCNMaterial()
+        mat.diffuse.contents = UIColor.yellow
+        mat.lightingModel = .constant
+        mat.readsFromDepthBuffer = false
+        cyl.materials = [mat]
+        let node = SCNNode(geometry: cyl)
+        node.position = SCNVector3((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2)
+        // SCNCylinder 는 Y 축 정렬 — 선 방향으로 회전.
+        let up = simd_float3(0, 1, 0)
+        let dir = simd_normalize(d)
+        let dot = simd_dot(up, dir)
+        if abs(dot) < 0.9999 {
+            let axis = simd_normalize(simd_cross(up, dir))
+            let angle = acosf(max(-1, min(1, dot)))
+            node.rotation = SCNVector4(axis.x, axis.y, axis.z, angle)
+        } else if dot < 0 {
+            node.rotation = SCNVector4(1, 0, 0, Float.pi)
+        }
+        node.renderingOrder = 20
+        return node
     }
 
     /// V3 측위 + pathfinding 후 디버깅 데이터 일괄 dump.
