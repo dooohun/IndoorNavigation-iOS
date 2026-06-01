@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AA11BB22CC33DD44EE55FF66 /* Settings.bundle in Resources */ = {isa = PBXBuildFile; fileRef = AA99BB88CC77DD66EE55FF44 /* Settings.bundle */; };
 		C0D545C447A7F014676DAA4E /* Pods_IndoorNavigation_iOSTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B855377E0C31DBE1415EBBB9 /* Pods_IndoorNavigation_iOSTests.framework */; };
 		D60618F64CC4DFF2F2CB5055 /* Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C1469C3C7ED700899DD46AB5 /* Pods_IndoorNavigation_iOS_IndoorNavigation_iOSUITests.framework */; };
 		FAB3670D9215E2E0B3EC70BE /* Pods_IndoorNavigation_iOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B12F6DDCA598FBE003F6B9BC /* Pods_IndoorNavigation_iOS.framework */; };
@@ -32,6 +33,7 @@
 /* Begin PBXFileReference section */
 		393E9AAB2F5EADFF00EDBAAE /* IndoorNavigation-iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "IndoorNavigation-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		393E9AB82F5EAE0100EDBAAE /* IndoorNavigation-iOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "IndoorNavigation-iOSTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA99BB88CC77DD66EE55FF44 /* Settings.bundle */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.plug-in"; path = Settings.bundle; sourceTree = "<group>"; };
 		393E9AC22F5EAE0100EDBAAE /* IndoorNavigation-iOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "IndoorNavigation-iOSUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		638CCC6BF4A7075847E5FB1A /* Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.release.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests/Pods-IndoorNavigation-iOS-IndoorNavigation-iOSUITests.release.xcconfig"; sourceTree = "<group>"; };
 		A2BBBB5B93F14568A3102295 /* Pods-IndoorNavigation-iOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-IndoorNavigation-iOS.debug.xcconfig"; path = "Target Support Files/Pods-IndoorNavigation-iOS/Pods-IndoorNavigation-iOS.debug.xcconfig"; sourceTree = "<group>"; };
@@ -96,6 +98,7 @@
 				393E9AAD2F5EADFF00EDBAAE /* IndoorNavigation-iOS */,
 				393E9ABB2F5EAE0100EDBAAE /* IndoorNavigation-iOSTests */,
 				393E9AC52F5EAE0100EDBAAE /* IndoorNavigation-iOSUITests */,
+				AA99BB88CC77DD66EE55FF44 /* Settings.bundle */,
 				393E9AAC2F5EADFF00EDBAAE /* Products */,
 				E94C159CAA56FF5141A02EA7 /* Pods */,
 				E3D646A00B203021A20B83F0 /* Frameworks */,
@@ -254,6 +257,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA11BB22CC33DD44EE55FF66 /* Settings.bundle in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

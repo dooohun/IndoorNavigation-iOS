@@ -2,14 +2,18 @@ import UIKit
 import ARKit
 import SceneKit
 
-// MARK: - DebugSettings (Info.plist 기반 디버그 토글)
+// MARK: - DebugSettings (iOS 설정 앱 기반 디버그 토글)
 //
-// 운영/디버그 동작 분기를 Info.plist 키로 외부 제어한다 (코드 재빌드 없이 plist 만 바꿔 토글).
+// iOS Settings.app > 앱 설정에서 런타임 토글. UserDefaults(suiteName: nil) 경유.
+// 기본값은 AppDelegate에서 register(defaults:)로 false 등록 — 설정 앱을 한 번도 안 열어도 false.
 enum DebugSettings {
-    /// "FullRouteDebugOverlay" (Bool, 기본 false). true 면 서버 raw 전체 경로를 점·선으로
-    /// AR 에 렌더(라우팅 진단용). false 면 운영 동작 — 앞쪽 chevron 화살표만 표시.
+    static let fullRouteOverlayKey = "debug_full_route_overlay"
+
+    /// true 면 서버 raw 전체 경로를 점·선으로 AR 에 렌더(라우팅 진단용).
+    /// false(기본) 면 운영 동작 — 앞쪽 chevron 화살표만 표시.
+    /// 호출 시점마다 UserDefaults 를 읽어 설정 앱 변경이 즉시 반영된다.
     static var fullRouteDebugOverlay: Bool {
-        Bundle.main.object(forInfoDictionaryKey: "FullRouteDebugOverlay") as? Bool ?? false
+        UserDefaults.standard.bool(forKey: fullRouteOverlayKey)
     }
 }
 
@@ -184,10 +188,12 @@ class ARNavigationLogic {
     // 경로의 실제 3D 위치(높이 포함)를 눈으로 확인해 localize 방향/위치 오류를 진단하는 용도.
     private weak var debugPathParent: SCNNode?
     private var debugRawPathNode: SCNNode?
-    /// true 면 drawPathFromSteps 시 raw 전체 경로를 점·선으로 동반 렌더.
-    /// 기본값은 Info.plist "FullRouteDebugOverlay" 로 제어 — 평소 false(운영: 앞쪽 chevron 화살표만),
-    /// 라우팅 진단이 필요할 때만 plist 에서 true 로 켠다. 코드는 보존하고 이 플래그로만 분기한다.
-    private var debugRawPathEnabled: Bool = DebugSettings.fullRouteDebugOverlay
+    /// 호출 시점마다 UserDefaults 를 읽어 설정 앱 변경을 즉시 반영한다.
+    /// setDebugRawPathEnabled(_:) 로 외부 override 하려면 _debugRawPathOverride 를 사용한다.
+    private var _debugRawPathOverride: Bool? = nil
+    private var debugRawPathEnabled: Bool {
+        _debugRawPathOverride ?? DebugSettings.fullRouteDebugOverlay
+    }
 
     // 층 이동 인터렉션
     private var hasActiveFloorTransition: Bool = false
@@ -317,8 +323,9 @@ class ARNavigationLogic {
     }
 
     /// 디버그 raw 경로 렌더 토글. 외부(HUD 디버그 버튼 등)에서 on/off.
+    /// nil 전달 시 override 를 해제해 UserDefaults(설정 앱) 값으로 복귀.
     func setDebugRawPathEnabled(_ enabled: Bool) {
-        debugRawPathEnabled = enabled
+        _debugRawPathOverride = enabled
         if !enabled {
             debugRawPathNode?.removeFromParentNode()
             debugRawPathNode = nil
