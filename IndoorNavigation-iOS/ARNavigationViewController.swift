@@ -2937,6 +2937,7 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
     }
 
     func showArrivalNotification() {
+        NavigationTTSManager.shared.announceArrival()
         setHUDVisible(false)
         arrivalBadge.alpha = 0
         arrivalBadge.isHidden = false
@@ -2991,6 +2992,10 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
                 string: "\(navDistInt)m", attributes: kernAttrs
             )
             self.navCardDirectionLabel.text = self.actionLabel(for: vm.action)
+
+            // 음성 안내(TTS) — 액션 변경/임박 시에만 1회 발화(내부에서 중복 제거).
+            NavigationTTSManager.shared.announceStep(action: vm.action,
+                                                     distanceMeters: vm.distanceMeters)
 
             // nav 카드 하단 보조 카드 — 목적지 이름 + 총 거리
             self.navCardSubView.isHidden = false
@@ -3272,6 +3277,10 @@ extension ARNavigationViewController: ARNavigationLogicDelegate {
             floorTransitionLabel.text = "도착층으로 이동"
         }
         _ = (transitionType, currentFloor)
+
+        // 음성 안내 — "계단/엘리베이터를 이용해 N층으로 이동하세요" + 다음 구간 위해 중복 제거 초기화.
+        NavigationTTSManager.shared.announceFloorTransition(transitionType: transitionType,
+                                                            targetFloor: targetFloor)
 
         floorTransitionOverlayView.alpha = 0
         floorTransitionOverlayView.isHidden = false
