@@ -1,6 +1,7 @@
 import UIKit
 import ARKit
 import SceneKit
+import AVFoundation
 
 // MARK: - DebugSettings (iOS 설정 앱 기반 디버그 토글)
 //
@@ -140,26 +141,29 @@ class ARNavigationLogic {
         self.verticalPreference = verticalPreference
     }
 
-    // 다중 프레임 캡처
-    // TODO(서버답): V3 권장 이미지 개수 4-5장 가정
-    let maxImages = 5
+    // 측위 캡처 파라미터
     let captureInterval: TimeInterval = 0.8
     /// 캡처 시점 카메라 이동 속도 임계 (m/s). 초과 시 motion blur 우려로 skip.
     let captureMaxTranslationVel: Float = 0.3
     /// 캡처 시점 카메라 회전 속도 임계 (rad/s ≈ 30°/s). 초과 시 skip.
     let captureMaxRotationVel: Float = 0.52
+    /// 초기 측위 전체 타임아웃 (초). 이 시간 동안 성공 응답이 없으면 실패 처리.
+    private let localizationTimeoutSec: TimeInterval = 10.0
     private var lastCaptureTimestamp: TimeInterval?
     private var matchedARPose: simd_float4x4?
     private var localizedPose: Pose?
     private var localizedFloorId: String?
     private var localizedFloorLevel: Int?
     private var localizedAreaId: String?  // V3 응답 areaId — pathfinding/map 호출에 동반.
-    private var capturedImages: [UIImage] = []
+    /// 각 캡처 프레임별 ARPose 임시 저장 (인덱스 매칭용 — 1장씩 전송이므로 항상 0번 인덱스).
     private var capturedARPoses: [simd_float4x4] = []
-    /// LiDAR sceneDepth FP32 raw bytes. capturedImages 와 같은 인덱스로 채움.
-    /// LiDAR 미지원 단말 / sceneDepth 미활성이면 빈 배열 — server multipart 에 첨부 안 함.
-    private var capturedDepths: [Data] = []
+    /// 마지막으로 캡처한 단일 프레임 저장 (motion velocity 계산용).
+    private var lastCapturedPose: simd_float4x4?
+    /// 첫 측위 진행 중 "이미 성공 응답으로 확정됨" 플래그 — in-flight 응답 중복 채택 방지.
+    private var isLocalizationSettled: Bool = false
     private var captureTimer: Timer?
+    /// 초기 측위 10초 타임아웃 타이머.
+    private var localizationTimeoutTimer: Timer?
 
     // LocalizeDebugLogger 용 — drawPathFromSteps 까지 살아남을 데이터
     private var lastLocalizeResponse: SLAMLocalizeResponse?
@@ -171,6 +175,11 @@ class ARNavigationLogic {
     private var arrivalCheckTimer: Timer?
     private var hasNotifiedArrival = false
     private let arrivalThreshold: Float = 2.0  // 2m 이내 도착 판정
+
+    // TTS 음성 안내 (한국어)
+    private let speechSynthesizer = AVSpeechSynthesizer()
+    private var didAnnounceStart: Bool = false
+    private var didAnnounceArrival: Bool = false
 
     // 경로 진행 추적 상태
     private var allSteps: [PathStep] = []
@@ -194,6 +203,10 @@ class ARNavigationLogic {
     private var debugRawPathEnabled: Bool {
         _debugRawPathOverride ?? DebugSettings.fullRouteDebugOverlay
     }
+    /// 디버그 오버레이 컬링 반경 (m). 이 거리 밖 요소는 isHidden = true.
+    private static let debugOverlayCullRadius: Float = 7.0
+    /// 디버그 오버레이 공용 색 (엣지 선 + 방향 화살표 동일 색).
+    private static let debugOverlayColor: UIColor = .white
 
     // 층 이동 인터렉션
     private var hasActiveFloorTransition: Bool = false
@@ -250,7 +263,7 @@ class ARNavigationLogic {
     /// 그대로 hard-set 되어 path 가 우측으로 밀림 → blend 적용 범위를 넓혀 노이즈 측위 영향 축소.
     private let periodicRelocalizeHardSetThresholdM: Float = 5.0
     /// 주기 V3 재측위 confidence 가드. 초기 측위와 같은 기준으로 wrong-match 위험 응답을 무시.
-    private let periodicRelocalizeMinConfidence: Double = 0.50
+    private let periodicRelocalizeMinConfidence: Double = 0.55
     /// 주기 V3 재측위 feature match 수 가드. confidence 가 매칭 품질을 이미 반영하므로
     /// 절대값은 노이즈성 floor 만 차단하는 수준으로 낮춤 (이전 80 → 30).
     /// 빌딩 부위마다 서버측 feature 검출 수가 달라 80 은 정상 응답도 자주 떨어트림.
@@ -371,8 +384,9 @@ class ARNavigationLogic {
         delegate?.updateTurnArrow(turnVM)
         let markers = makeActiveMarkerList(cameraPos: cam)
         delegate?.updateMarkers(markers)
-        // PathChevron: 가장 앞 chevron 통과 시 제거 + 신규 spawn.
-        pathChevronController.tickCamera(cameraPos: cam)
+
+        // 디버그 오버레이 컬링 — 카메라 기준 7m 밖 요소 hide.
+        updateDebugOverlayCulling(cameraPos: cam)
         // 다음 drawPathFromSteps 가 chevron 분포 cursor 결정에 사용할 카메라 캐시.
         lastCameraPos = cam
     }
@@ -418,10 +432,17 @@ class ARNavigationLogic {
         lastNavStepTickAt = 0
 
         // capture 버퍼 클리어
-        capturedImages = []
         capturedARPoses = []
-        capturedDepths = []
+        lastCapturedPose = nil
         lastCaptureTimestamp = nil
+        isLocalizationSettled = false
+        localizationTimeoutTimer?.invalidate()
+        localizationTimeoutTimer = nil
+
+        // TTS 플래그 리셋 — 새 trial 에서 다시 안내 가능.
+        didAnnounceStart = false
+        didAnnounceArrival = false
+        speechSynthesizer.stopSpeaking(at: .immediate)
 
         // GuidanceDirector 도 reset (Phase 5 dead path 지만 호출 부수효과 없게)
         guidanceDirector.reset()
@@ -478,10 +499,25 @@ class ARNavigationLogic {
         captureTimer = Timer.scheduledTimer(withTimeInterval: captureInterval, repeats: true) { [weak self] _ in
             self?.captureOneFrame()
         }
+
+        // 10초 타임아웃 — 성공 응답 없으면 실패 처리.
+        localizationTimeoutTimer = Timer.scheduledTimer(withTimeInterval: localizationTimeoutSec, repeats: false) { [weak self] _ in
+            guard let self, !self.isLocalizationSettled else { return }
+            self.stopCapture()
+            self.capturedARPoses = []
+            self.lastCapturedPose = nil
+            self.delegate?.setLoading(false)
+            self.delegate?.setScanningOverlay(visible: false)
+            self.delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
+            self.delegate?.setLocateButtonVisible(true)
+            print("[Localize] 10초 타임아웃 — 측위 실패 처리")
+        }
     }
 
     private func captureOneFrame() {
         guard let frame = arSession?.currentFrame else { return }
+        // 이미 측위 확정됐으면 추가 캡처/전송 하지 않음.
+        guard !isLocalizationSettled else { return }
 
         // 1. ARKit 모션 경고 — excessiveMotion / relocalizing / insufficientFeatures
         if case .limited(let reason) = frame.camera.trackingState {
@@ -501,7 +537,7 @@ class ARNavigationLogic {
 
         // 2. 직전 캡처 대비 카메라 이동·회전 속도 — blur 임계 차단
         if let lastTime = lastCaptureTimestamp,
-           let lastTransform = capturedARPoses.last {
+           let lastTransform = lastCapturedPose {
             let dt = max(Float(frame.timestamp - lastTime), 0.001)
             let curT = frame.camera.transform.columns.3
             let lastT = lastTransform.columns.3
@@ -537,22 +573,21 @@ class ARNavigationLogic {
         guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
         let uiImage = UIImage(cgImage: cgImage)
 
-        capturedImages.append(uiImage)
-        capturedARPoses.append(frame.camera.transform)
-        if let depthPB = frame.sceneDepth?.depthMap,
-           let depthData = Self.depthMapData(from: depthPB) {
-            capturedDepths.append(depthData)
-        }
+        // 이 프레임의 AR pose 저장 (handleLocalizeV3Success 에서 matchedARPose 매칭용).
+        let arPose = frame.camera.transform
+        lastCapturedPose = arPose
+        capturedARPoses = [arPose]  // 1장 단위 전송 — 항상 인덱스 0
         lastCaptureTimestamp = frame.timestamp
 
-        let count = capturedImages.count
-        // count 기반 progress 미사용 — VC 가 시간 기반 multi-phase 자동 애니메이션 담당.
+        let depthData: Data? = {
+            guard let depthPB = frame.sceneDepth?.depthMap else { return nil }
+            return Self.depthMapData(from: depthPB)
+        }()
+
         delegate?.updateStatus("천천히 주변을 둘러보세요", color: .white)
 
-        if count >= maxImages {
-            stopCapture()
-            sendToServer()
-        }
+        // 1장을 즉시 서버로 전송 (in-flight 병렬 가능 — 첫 성공 응답이 확정).
+        sendSingleFrame(image: uiImage, arPose: arPose, depth: depthData)
     }
 
     /// `kCVPixelFormatType_DepthFloat32` CVPixelBuffer → FP32 raw little-endian bytes.
@@ -586,56 +621,69 @@ class ARNavigationLogic {
     func stopCapture() {
         captureTimer?.invalidate()
         captureTimer = nil
+        localizationTimeoutTimer?.invalidate()
+        localizationTimeoutTimer = nil
         delegate?.setCaptureProgress(phase: nil)
     }
 
-    /// V3 측위 흐름 — multipart 업로드 + SLAMLocalizeResponse 핸들링.
-    private func sendToServer() {
-        guard !capturedImages.isEmpty else {
-            delegate?.setLoading(false)
-            delegate?.setCaptureProgress(phase: nil)
-            delegate?.setScanningOverlay(visible: false)
-            delegate?.showScanFailed(message: "캡처된 이미지가 없어요.\n다시 시도해 주세요.")
-            delegate?.setLocateButtonVisible(true)
-            return
-        }
-
-        // 캡처 완료 → 서버 측위 phase 전환 (VC 가 progress bar 35→95% 자동 애니메이션)
-        delegate?.setCaptureProgress(phase: .localizing)
-
-        // 신서버 floorId 는 uuid 문자열. 우선순위:
-        //   1) localizedFloorId — 최근 측위 성공 결과 (정상 흐름)
-        //   2) pendingTargetFloorId — 층 전환 직후, connector 데이터에서 lookup 한 새 층 floorId (transition restart 케이스)
-        //   3) userCurrentFloorId — 앱 시작 시 사용자가 선택한 시작 층 (초기 측위 케이스)
+    /// 1장짜리 즉시 전송 — captureOneFrame 에서 호출. in-flight 병렬 전송, 첫 성공 확정.
+    private func sendSingleFrame(image: UIImage, arPose: simd_float4x4, depth: Data?) {
+        // 신서버 floorId 우선순위:
+        //   1) localizedFloorId — 최근 측위 성공 결과
+        //   2) pendingTargetFloorId — 층 전환 직후 lookup floorId
+        //   3) userCurrentFloorId — 앱 시작 시 선택 층 (초기 측위)
         //   4) nil — 서버 ANY 매칭
         let floorIdHint: String? = {
             if let f = localizedFloorId, !f.isEmpty { return f }
             if let f = pendingTargetFloorId, !f.isEmpty { return f }
-            // 층 전환 후 lookup 실패한 경우엔 옛 시작층(userCurrentFloorId) hint 금지 — wrong-match 방지.
-            // 차라리 nil 로 두고 서버 ANY 매칭에 위임한다.
             if pendingFloorTransitionRestart { return nil }
             return (userCurrentFloorId?.isEmpty == false) ? userCurrentFloorId : nil
         }()
-        let depthsForUpload: [Data]? = capturedDepths.isEmpty ? nil : capturedDepths
+        let depthsForUpload: [Data]? = depth.map { [$0] }
+
+        // 이 요청에 대응하는 AR pose 를 클로저에 캡처 (비동기 응답 시점엔 capturedARPoses 가 바뀔 수 있어).
+        let capturedPose = arPose
 
         NetworkManager.shared.localizeV3(
             buildingId: buildingId,
-            images: capturedImages,
+            images: [image],
             depths: depthsForUpload,
             mapId: nil,
             floorId: floorIdHint
         ) { [weak self] result in
             DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.delegate?.setCaptureProgress(phase: nil)
-                self.delegate?.setScanningOverlay(visible: false)
+                guard let self else { return }
+                // 이미 다른 응답으로 측위 확정됐으면 무시 — race safety.
+                guard !self.isLocalizationSettled else { return }
+
                 switch result {
                 case .success(let response):
+                    // 신뢰도·매칭 수 임계 미달 — 이 응답은 버리고 다른 in-flight 응답 기다림.
+                    guard response.confidence >= 0.55 else {
+                        print("[Localize] confidence \(response.confidence) < 0.55 — 응답 무시")
+                        return
+                    }
+                    guard (response.numMatches ?? 0) >= 30 else {
+                        print("[Localize] numMatches \(response.numMatches ?? 0) < 30 — 응답 무시")
+                        return
+                    }
+                    guard response.pose.toMatrix4x4() != nil,
+                          response.pose.translation != nil,
+                          response.pose.rotationQuaternion != nil else {
+                        print("[Localize] 포즈 파싱 실패 — 응답 무시")
+                        return
+                    }
+                    // 첫 성공 확정 — 캡처·타이머 즉시 중단.
+                    self.isLocalizationSettled = true
+                    self.stopCapture()
+                    // matchedARPose 를 이 요청의 pose 로 고정.
+                    self.capturedARPoses = [capturedPose]
+                    self.delegate?.setScanningOverlay(visible: false)
                     self.handleLocalizeV3Success(response: response)
+
                 case .failure:
-                    self.delegate?.setLoading(false)
-                    self.delegate?.showScanFailed(message: "서버 연결에 실패했어요.\n다시 한번 스캔해 주세요.")
-                    self.delegate?.setLocateButtonVisible(true)
+                    // 개별 요청 실패 — 타임아웃이 전체 실패를 처리하므로 여기선 조용히 무시.
+                    print("[Localize] 단일 프레임 요청 실패 — 타임아웃까지 대기")
                 }
             }
         }
@@ -643,9 +691,15 @@ class ARNavigationLogic {
 
     /// V3 측위 응답 핸들러 — showScanComplete + V3 pathfinding 시작.
     private func handleLocalizeV3Success(response: SLAMLocalizeResponse) {
-        guard response.confidence >= 0.50 else {
+        guard response.confidence >= 0.55 else {
             delegate?.setLoading(false)
             delegate?.showScanFailed(message: "위치 인식 신뢰도가 낮아요.\n다시 한번 스캔해 주세요.")
+            delegate?.setLocateButtonVisible(true)
+            return
+        }
+        guard (response.numMatches ?? 0) >= 30 else {
+            delegate?.setLoading(false)
+            delegate?.showScanFailed(message: "위치 인식 매칭 수가 부족해요.\n다시 한번 스캔해 주세요.")
             delegate?.setLocateButtonVisible(true)
             return
         }
@@ -679,7 +733,7 @@ class ARNavigationLogic {
         // 디버그 로깅 — drawPathFromSteps 시점까지 보관
         lastLocalizeResponse = response
         lastMatchedImageIndex = arPoseIndex
-        lastMatchedImage = capturedImages.indices.contains(arPoseIndex) ? capturedImages[arPoseIndex] : nil
+        lastMatchedImage = nil  // 1장 즉시 전송 흐름에서는 이미지 버퍼 보관 생략
 
         let pose = Pose(
             x: Double(translation.x), y: Double(translation.y), z: Double(translation.z),
@@ -1120,42 +1174,25 @@ class ARNavigationLogic {
                         self.startWallCenteringIfNeeded()
                         return
                     }
-                    // 일반 흐름 진입 — stale 플래그 클리어 (예: 층 전환 후 응답에 추가 층 전환 step 포함된 케이스).
+                    // 초기 측위 + 첫 pathfinding 응답 — 확인 모달/RouteOverview 없이 즉시 렌더링.
                     self.pendingFloorTransitionRestart = false
-
-                    // 초기 측위 + 첫 pathfinding 응답 — 게이트.
-                    // 실제 렌더링/HUD/주기 측위 시작은 사용자가 출발지 확인 모달에서 "확인" 을 눌러야 일어남.
-                    // RouteOverview 는 다층 전체(raw)를 보여줘야 함 — prefix 자르면 단일 층만 노출됨.
-                    self.pendingOverviewSteps = steps
-                    self.isAwaitingStartConfirmation = true
-                    self.pendingPostConfirmRender = { [weak self] in
-                        guard let self else { return }
-                        self.drawPathFromSteps(prefixed, isRelocalizeRefresh: false)
-                        self.refreshFloorNavigationMap(routeSteps: prefixed,
-                                                       currentFrame: self.arSession?.currentFrame,
-                                                       isRelocalizeRefresh: false)
-                        self.dumpLocalizeDebug(rawSteps: resp.steps)
-                        self.delegate?.setHUDVisible(true)
-                        self.delegate?.updateStatus("\(self.destinationName) 방향으로 이동하세요.", color: .white)
-                        if let mPose = self.matchedARPose {
-                            let c = mPose.columns.3
-                            self.lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
-                        }
-                        self.startPeriodicRelocalize()
-                        self.startWallCenteringIfNeeded()
+                    self.hasShownInitialNavigation = true
+                    self.isAwaitingStartConfirmation = false
+                    self.drawPathFromSteps(prefixed, isRelocalizeRefresh: false)
+                    self.refreshFloorNavigationMap(routeSteps: prefixed,
+                                                   currentFrame: self.arSession?.currentFrame,
+                                                   isRelocalizeRefresh: false)
+                    self.dumpLocalizeDebug(rawSteps: resp.steps)
+                    self.delegate?.setHUDVisible(true)
+                    self.delegate?.updateStatus("\(self.destinationName) 방향으로 이동하세요.", color: .white)
+                    if let mPose = self.matchedARPose {
+                        let c = mPose.columns.3
+                        self.lastPeriodicRelocalizeCameraPos = simd_float3(c.x, c.y, c.z)
                     }
-
-                    // map cache 가 채워진 직후 nearestPOIName 결정 가능 → 모달 표시.
-                    self.refreshFloorNavigationMap(
-                        routeSteps: prefixed,
-                        currentFrame: self.arSession?.currentFrame,
-                        isRelocalizeRefresh: false,
-                        onMapReady: { [weak self] in
-                            guard let self, self.isAwaitingStartConfirmation else { return }
-                            let name = self.nearestPOIName()
-                            self.delegate?.showStartConfirmation(nearPoiName: name)
-                        }
-                    )
+                    self.startPeriodicRelocalize()
+                    self.startWallCenteringIfNeeded()
+                    // TTS: 경로 안내 시작 발화.
+                    self.announceNavigationStart(steps: steps)
                 case .failure(let err):
                     let msg = String(describing: err)
                     print("[V3-PATH] 실패 (\(msg))")
@@ -1205,16 +1242,12 @@ class ARNavigationLogic {
         return nil
     }
 
-    /// 출발지 확인 모달의 "확인" 버튼 콜백. 모달 dismiss + 전체 경로 안내 화면 표시.
-    /// 게이트(isAwaitingStartConfirmation) 는 startNavigation 호출 전까지 true 로 유지 — 더블탭 재진입 차단 보존.
-    /// 실제 렌더링은 pendingPostConfirmRender 에 그대로 보존, startNavigation 에서 실행.
+    /// 출발지 확인 모달의 "확인" 버튼 콜백. 모달 dismiss + 바로 경로 렌더링 진입 (RouteOverview 생략).
     func confirmStartLocation() {
         guard isAwaitingStartConfirmation else { return }
-        // 게이트는 풀지 않음. pendingPostConfirmRender 도 보존.
         delegate?.dismissStartConfirmation()
-        let items = makeRouteOverviewItems(steps: pendingOverviewSteps)
-        let total = computeTotalDistanceMeters(steps: pendingOverviewSteps)
-        delegate?.showRouteOverview(items: items, totalDistanceMeters: total, destinationName: destinationName)
+        // RouteOverview 를 띄우지 않고 즉시 startNavigation 동작 실행.
+        startNavigation()
     }
 
     /// "전체 경로 안내" 화면의 "안내 시작" 버튼 콜백. 보류된 렌더링/HUD/주기 측위 시작.
@@ -1398,6 +1431,33 @@ class ARNavigationLogic {
             if let sf = s.floorLevel { prevFloor = sf }
         }
         return total
+    }
+
+    // MARK: - TTS 헬퍼
+
+    /// 한국어 TTS 발화. 1회성 — 중복 호출 안전 (AVSpeechSynthesizer 가 큐잉).
+    private func speak(_ text: String) {
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: "ko-KR")
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        speechSynthesizer.speak(utterance)
+    }
+
+    /// 경로 안내 시작 TTS. 1회만 발화 (didAnnounceStart 플래그).
+    private func announceNavigationStart(steps: [PathStep]) {
+        guard !didAnnounceStart else { return }
+        didAnnounceStart = true
+        let distM = computeTotalDistanceMeters(steps: steps)
+        let distInt = Int(distM.rounded())
+        let text = "\(destinationName)까지 \(distInt)미터 경로 안내를 시작합니다."
+        speak(text)
+    }
+
+    /// 도착 TTS. 1회만 발화 (didAnnounceArrival 플래그).
+    private func announceArrival() {
+        guard !didAnnounceArrival else { return }
+        didAnnounceArrival = true
+        speak("목적지에 도착했습니다.")
     }
 
     /// NavigationActionKind → 한국어 표시 문구. RouteOverview 에서도 동일 매핑 사용.
@@ -1849,13 +1909,28 @@ class ARNavigationLogic {
         delegate?.updateStatus("천천히 주변을 둘러보세요", color: .white)
         delegate?.setCaptureProgress(phase: .capturing)
 
-        capturedImages = []
         capturedARPoses = []
-        capturedDepths = []
+        lastCapturedPose = nil
         lastCaptureTimestamp = nil
+        isLocalizationSettled = false
+        localizationTimeoutTimer?.invalidate()
+        localizationTimeoutTimer = nil
 
         captureTimer = Timer.scheduledTimer(withTimeInterval: captureInterval, repeats: true) { [weak self] _ in
             self?.captureOneFrame()
+        }
+
+        // 층 전환 재측위 타임아웃.
+        localizationTimeoutTimer = Timer.scheduledTimer(withTimeInterval: localizationTimeoutSec, repeats: false) { [weak self] _ in
+            guard let self, !self.isLocalizationSettled else { return }
+            self.stopCapture()
+            self.capturedARPoses = []
+            self.lastCapturedPose = nil
+            self.delegate?.setLoading(false)
+            self.delegate?.setScanningOverlay(visible: false)
+            self.delegate?.showScanFailed(message: "위치 인식에 실패했어요.\n다시 한번 스캔해 주세요.")
+            self.delegate?.setLocateButtonVisible(true)
+            print("[Localize] 층 전환 재측위 10초 타임아웃 — 실패 처리")
         }
 
         // Phase 6: step index 만 리셋. vm 발신은 다음 drawPathFromSteps 가 담당.
@@ -2563,6 +2638,9 @@ class ARNavigationLogic {
         // matched 시점 페어 대신 현재 카메라 시점으로 전진된 페어 사용 — chevron / destination 위치를
         // "지금" ARKit world 기준으로 anchor. matchedARPose / localizedPose 만 있을 때 (currentFrame nil)
         // 는 매칭 시점 페어 그대로 fallback.
+        // matched 시점 페어 대신 현재 카메라 시점으로 전진된 페어 사용 — chevron / destination 위치를
+        // "지금" ARKit world 기준으로 anchor. matchedARPose / localizedPose 만 있을 때 (currentFrame nil)
+        // 는 매칭 시점 페어 그대로 fallback.
         guard let bridge = bridgePosePair(currentFrame: arSession?.currentFrame) else { return }
         let input = CoordinateTransformer.Input(
             serverPosition: bridge.serverPos,
@@ -2591,12 +2669,9 @@ class ARNavigationLogic {
             return
         }
 
-        pathChevronController.setRoute(
-            arPoints: filteredARPoints,
-            floorY: floorY,
-            cameraPos: lastCameraPos
-        )
-        print("[Path] drew \(steps.count) steps as \(filteredARPoints.count) chevron-distribution points (filtered to current floor)")
+        // Chevron 비활성화 — 디버그 오버레이(점·선·방향 화살표)가 경로 시각화를 담당.
+        pathChevronController.clear()
+        print("[Path] drew \(steps.count) steps, \(filteredARPoints.count) AR points (chevron off)")
 
         // 디버그: 서버 raw 경로(floorY 보정 X, 변환된 3D 그대로)를 점·선으로 동반 렌더.
         drawDebugRawServerPath(steps: steps, input: input)
@@ -2652,12 +2727,12 @@ class ARNavigationLogic {
     }
 
     /// 디버그: 서버가 보낸 경로 step 들을 CoordinateTransformer 로 변환한 AR world 좌표 "그대로"
-    /// (floorY 보정/투영 없이) 점·선으로 렌더한다. chevron 은 모든 점을 floorY 로 눌러 방향만 보이지만,
-    /// 이 렌더는 서버 경로의 실제 3D 위치(높이 포함)를 보존해 localize 위치/방향 오류를 눈으로 진단한다.
-    /// - 빨강 구  : 각 step 의 raw 변환 위치
-    /// - 노랑 선  : step 간 연결 (진행 순서)
-    /// - 초록 구  : 시작 step (경로 출발점)
+    /// (floorY 보정/투영 없이) 점·선으로 렌더한다.
+    /// - index 0 노드·엣지는 현재 위치 노이즈라 제외 — index 1 부터 렌더.
+    /// - 빨강 구  : 각 step 위치 (index 1~)
+    /// - 노랑 선  : step 간 연결 (index 1→2, 2→3, …)
     /// - 보라 구  : 마지막 step (목적지)
+    /// - 흰색 화살표: 각 노드에서 다음 노드를 향하는 방향 (마지막 노드는 생략)
     private func drawDebugRawServerPath(steps: [PathStep], input: CoordinateTransformer.Input) {
         debugRawPathNode?.removeFromParentNode()
         debugRawPathNode = nil
@@ -2671,34 +2746,85 @@ class ARNavigationLogic {
                 input: input
             )
         }
+        // index 0 제외 → index 1 이상 필요
         guard arPoints.count >= 2 else { return }
 
         let container = SCNNode()
         container.name = "debugRawServerPath"
 
-        for (i, p) in arPoints.enumerated() {
-            let isStart = (i == 0)
+        // index 1 부터 렌더 — index 0(현재 위치 노이즈) 제외.
+        for i in 1..<arPoints.count {
+            let p = arPoints[i]
             let isEnd = (i == arPoints.count - 1)
-            let sphere = SCNSphere(radius: isEnd ? 0.12 : 0.08)
-            let mat = SCNMaterial()
-            mat.diffuse.contents = isEnd ? UIColor.purple : (isStart ? UIColor.green : UIColor.red)
-            mat.lightingModel = .constant
-            mat.readsFromDepthBuffer = false
-            sphere.materials = [mat]
-            let node = SCNNode(geometry: sphere)
-            node.position = SCNVector3(p.x, p.y, p.z)
-            node.renderingOrder = 20
-            container.addChildNode(node)
 
-            if i > 0 {
+            // 엣지 — 이전 노드(i-1)와 연결. i==1 이면 index 0→1 엣지 제외, index 1→2 부터 그림.
+            if i >= 2 {
                 let a = arPoints[i - 1]
                 container.addChildNode(makeDebugLine(from: a, to: p))
+            }
+
+            // 방향 화살표 — 현재 노드에서 다음 노드 방향 (마지막 노드 제외).
+            if !isEnd {
+                let next = arPoints[i + 1]
+                container.addChildNode(makeDebugDirectionArrow(at: p, toward: next))
             }
         }
 
         parent.addChildNode(container)
         debugRawPathNode = container
-        print("[DebugRawPath] rendered \(arPoints.count) raw server points (no floorY projection)")
+        print("[DebugRawPath] rendered \(arPoints.count - 1) nodes (index 1~\(arPoints.count - 1), index 0 제외)")
+
+        // 최초 렌더 시점에도 카메라 위치 기준으로 즉시 컬링 적용.
+        if let cam = lastCameraPos {
+            updateDebugOverlayCulling(cameraPos: cam)
+        }
+    }
+
+    /// 디버그 오버레이 컬링 — 카메라 XZ 거리 기준으로 각 child node 의 isHidden 을 토글.
+    /// debugRawPathNode 가 nil 이거나 오버레이가 꺼져 있으면 no-op.
+    /// processARFrame 1Hz tick 에서 호출해 카메라 이동에 따라 표시 구간을 갱신한다.
+    private func updateDebugOverlayCulling(cameraPos: simd_float3) {
+        guard let container = debugRawPathNode else { return }
+        let r = Self.debugOverlayCullRadius
+        for child in container.childNodes {
+            let dx = child.position.x - cameraPos.x
+            let dz = child.position.z - cameraPos.z
+            child.isHidden = (dx * dx + dz * dz) > (r * r)
+        }
+    }
+
+    /// 노드 위치 at 에서 toward 방향을 가리키는 작은 방향 화살표(흰색, 바닥에 누운 형태).
+    /// SCNShape chevron path 로 구성. 컬링 대상이 되도록 at 에 position 배치.
+    private func makeDebugDirectionArrow(at p: simd_float3, toward next: simd_float3) -> SCNNode {
+        let dx = next.x - p.x
+        let dz = next.z - p.z
+        let len = sqrt(dx * dx + dz * dz)
+        let yaw: Float = len > 0.001 ? atan2(-dx / len, -dz / len) : 0
+
+        // 작은 chevron 베지어 (단위: m 스케일)
+        let path = UIBezierPath()
+        path.move(to: CGPoint(x: -0.3, y: -0.15))
+        path.addLine(to: CGPoint(x: 0, y: 0.25))
+        path.addLine(to: CGPoint(x: 0.3, y: -0.15))
+        path.addLine(to: CGPoint(x: 0.18, y: -0.15))
+        path.addLine(to: CGPoint(x: 0, y: 0.08))
+        path.addLine(to: CGPoint(x: -0.18, y: -0.15))
+        path.close()
+
+        let shape = SCNShape(path: path, extrusionDepth: 0.03)
+        let mat = SCNMaterial()
+        mat.diffuse.contents = Self.debugOverlayColor
+        mat.lightingModel = .constant
+        mat.readsFromDepthBuffer = false
+        mat.isDoubleSided = true
+        shape.materials = [mat]
+
+        let node = SCNNode(geometry: shape)
+        // SCNShape 는 XY 평면 — -π/2 X 회전으로 바닥에 눕힌 뒤 yaw 적용.
+        node.eulerAngles = SCNVector3(-Float.pi / 2, yaw, 0)
+        node.position = SCNVector3(p.x, p.y + 0.05, p.z)
+        node.renderingOrder = 21
+        return node
     }
 
     /// 두 AR world 점을 잇는 얇은 실린더 노드(노랑). depth 무시하고 항상 보이게.
@@ -2707,7 +2833,7 @@ class ARNavigationLogic {
         let len = simd_length(d)
         let cyl = SCNCylinder(radius: 0.015, height: CGFloat(len))
         let mat = SCNMaterial()
-        mat.diffuse.contents = UIColor.yellow
+        mat.diffuse.contents = Self.debugOverlayColor
         mat.lightingModel = .constant
         mat.readsFromDepthBuffer = false
         cyl.materials = [mat]
@@ -3421,6 +3547,8 @@ class ARNavigationLogic {
             arrivalCheckTimer?.invalidate()
             arrivalCheckTimer = nil
             stopPeriodicRelocalize()
+            // TTS: 도착 발화.
+            announceArrival()
             DispatchQueue.main.async {
                 self.delegate?.showArrivalNotification()
             }

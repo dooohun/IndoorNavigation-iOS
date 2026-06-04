@@ -3414,25 +3414,15 @@ extension ARNavigationViewController: GuidanceDirectorDelegate {
     }
 
     func guidance(_ director: GuidanceDirector, showTurnCard direction: TurnDirection, distance: Double) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.turnCardView.update(direction: direction, distanceMeters: distance)
-            self.turnCardView.showSlideIn(in: self.view)
-        }
+        // Turn Card 표시 비활성화.
     }
 
     func guidance(_ director: GuidanceDirector, updateTurnCardDistance distance: Double) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.turnCardView.updateDistance(distance)
-        }
+        // Turn Card 거리 갱신 비활성화.
     }
 
     func guidanceHideTurnCard(_ director: GuidanceDirector) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.turnCardView.hideSlideOut()
-        }
+        // Turn Card 숨김 비활성화 (이미 숨겨져 있음).
     }
 }
 
