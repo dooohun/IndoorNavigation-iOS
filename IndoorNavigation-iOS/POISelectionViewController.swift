@@ -336,19 +336,6 @@ class POISelectionViewController: UIViewController, UITableViewDataSource, UITab
             arVC.modalPresentationStyle = .fullScreen
             self.present(arVC, animated: true)
         })
-        #if DEBUG
-        alert.addAction(UIAlertAction(title: "2D Mock", style: .default) { [weak self] _ in
-            guard let self = self else { return }
-            let dp = poi.displayPoint
-            let mockVC = FloorNavigationMapMockViewController(
-                buildingId: self.building.buildingId,
-                floorId: poi.floorId ?? "",
-                destinationName: poi.name ?? "",
-                goal: Coordinate(x: dp?.x ?? 0, y: dp?.y ?? 0, z: dp?.z ?? 0)
-            )
-            self.present(mockVC, animated: true)
-        })
-        #endif
         alert.addAction(UIAlertAction(title: "취소", style: .cancel))
         present(alert, animated: true)
     }
