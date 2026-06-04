@@ -203,6 +203,10 @@ class ARNavigationLogic {
     private var debugRawPathEnabled: Bool {
         _debugRawPathOverride ?? DebugSettings.fullRouteDebugOverlay
     }
+    /// 디버그 오버레이 컬링 반경 (m). 이 거리 밖 요소는 isHidden = true.
+    private static let debugOverlayCullRadius: Float = 7.0
+    /// 디버그 오버레이 공용 색 (엣지 선 + 방향 화살표 동일 색).
+    private static let debugOverlayColor: UIColor = .white
 
     // 층 이동 인터렉션
     private var hasActiveFloorTransition: Bool = false
@@ -381,8 +385,8 @@ class ARNavigationLogic {
         let markers = makeActiveMarkerList(cameraPos: cam)
         delegate?.updateMarkers(markers)
 
-        // PathChevron: 가장 앞 chevron 통과 시 제거 + 신규 spawn.
-        pathChevronController.tickCamera(cameraPos: cam)
+        // 디버그 오버레이 컬링 — 카메라 기준 7m 밖 요소 hide.
+        updateDebugOverlayCulling(cameraPos: cam)
         // 다음 drawPathFromSteps 가 chevron 분포 cursor 결정에 사용할 카메라 캐시.
         lastCameraPos = cam
     }
@@ -2665,12 +2669,9 @@ class ARNavigationLogic {
             return
         }
 
-        pathChevronController.setRoute(
-            arPoints: filteredARPoints,
-            floorY: floorY,
-            cameraPos: lastCameraPos
-        )
-        print("[Path] drew \(steps.count) steps as \(filteredARPoints.count) chevron-distribution points (filtered to current floor)")
+        // Chevron 비활성화 — 디버그 오버레이(점·선·방향 화살표)가 경로 시각화를 담당.
+        pathChevronController.clear()
+        print("[Path] drew \(steps.count) steps, \(filteredARPoints.count) AR points (chevron off)")
 
         // 디버그: 서버 raw 경로(floorY 보정 X, 변환된 3D 그대로)를 점·선으로 동반 렌더.
         drawDebugRawServerPath(steps: steps, input: input)
@@ -2726,12 +2727,12 @@ class ARNavigationLogic {
     }
 
     /// 디버그: 서버가 보낸 경로 step 들을 CoordinateTransformer 로 변환한 AR world 좌표 "그대로"
-    /// (floorY 보정/투영 없이) 점·선으로 렌더한다. chevron 은 모든 점을 floorY 로 눌러 방향만 보이지만,
-    /// 이 렌더는 서버 경로의 실제 3D 위치(높이 포함)를 보존해 localize 위치/방향 오류를 눈으로 진단한다.
-    /// - 빨강 구  : 각 step 의 raw 변환 위치
-    /// - 노랑 선  : step 간 연결 (진행 순서)
-    /// - 초록 구  : 시작 step (경로 출발점)
+    /// (floorY 보정/투영 없이) 점·선으로 렌더한다.
+    /// - index 0 노드·엣지는 현재 위치 노이즈라 제외 — index 1 부터 렌더.
+    /// - 빨강 구  : 각 step 위치 (index 1~)
+    /// - 노랑 선  : step 간 연결 (index 1→2, 2→3, …)
     /// - 보라 구  : 마지막 step (목적지)
+    /// - 흰색 화살표: 각 노드에서 다음 노드를 향하는 방향 (마지막 노드는 생략)
     private func drawDebugRawServerPath(steps: [PathStep], input: CoordinateTransformer.Input) {
         debugRawPathNode?.removeFromParentNode()
         debugRawPathNode = nil
@@ -2745,34 +2746,85 @@ class ARNavigationLogic {
                 input: input
             )
         }
+        // index 0 제외 → index 1 이상 필요
         guard arPoints.count >= 2 else { return }
 
         let container = SCNNode()
         container.name = "debugRawServerPath"
 
-        for (i, p) in arPoints.enumerated() {
-            let isStart = (i == 0)
+        // index 1 부터 렌더 — index 0(현재 위치 노이즈) 제외.
+        for i in 1..<arPoints.count {
+            let p = arPoints[i]
             let isEnd = (i == arPoints.count - 1)
-            let sphere = SCNSphere(radius: isEnd ? 0.12 : 0.08)
-            let mat = SCNMaterial()
-            mat.diffuse.contents = isEnd ? UIColor.purple : (isStart ? UIColor.green : UIColor.red)
-            mat.lightingModel = .constant
-            mat.readsFromDepthBuffer = false
-            sphere.materials = [mat]
-            let node = SCNNode(geometry: sphere)
-            node.position = SCNVector3(p.x, p.y, p.z)
-            node.renderingOrder = 20
-            container.addChildNode(node)
 
-            if i > 0 {
+            // 엣지 — 이전 노드(i-1)와 연결. i==1 이면 index 0→1 엣지 제외, index 1→2 부터 그림.
+            if i >= 2 {
                 let a = arPoints[i - 1]
                 container.addChildNode(makeDebugLine(from: a, to: p))
+            }
+
+            // 방향 화살표 — 현재 노드에서 다음 노드 방향 (마지막 노드 제외).
+            if !isEnd {
+                let next = arPoints[i + 1]
+                container.addChildNode(makeDebugDirectionArrow(at: p, toward: next))
             }
         }
 
         parent.addChildNode(container)
         debugRawPathNode = container
-        print("[DebugRawPath] rendered \(arPoints.count) raw server points (no floorY projection)")
+        print("[DebugRawPath] rendered \(arPoints.count - 1) nodes (index 1~\(arPoints.count - 1), index 0 제외)")
+
+        // 최초 렌더 시점에도 카메라 위치 기준으로 즉시 컬링 적용.
+        if let cam = lastCameraPos {
+            updateDebugOverlayCulling(cameraPos: cam)
+        }
+    }
+
+    /// 디버그 오버레이 컬링 — 카메라 XZ 거리 기준으로 각 child node 의 isHidden 을 토글.
+    /// debugRawPathNode 가 nil 이거나 오버레이가 꺼져 있으면 no-op.
+    /// processARFrame 1Hz tick 에서 호출해 카메라 이동에 따라 표시 구간을 갱신한다.
+    private func updateDebugOverlayCulling(cameraPos: simd_float3) {
+        guard let container = debugRawPathNode else { return }
+        let r = Self.debugOverlayCullRadius
+        for child in container.childNodes {
+            let dx = child.position.x - cameraPos.x
+            let dz = child.position.z - cameraPos.z
+            child.isHidden = (dx * dx + dz * dz) > (r * r)
+        }
+    }
+
+    /// 노드 위치 at 에서 toward 방향을 가리키는 작은 방향 화살표(흰색, 바닥에 누운 형태).
+    /// SCNShape chevron path 로 구성. 컬링 대상이 되도록 at 에 position 배치.
+    private func makeDebugDirectionArrow(at p: simd_float3, toward next: simd_float3) -> SCNNode {
+        let dx = next.x - p.x
+        let dz = next.z - p.z
+        let len = sqrt(dx * dx + dz * dz)
+        let yaw: Float = len > 0.001 ? atan2(-dx / len, -dz / len) : 0
+
+        // 작은 chevron 베지어 (단위: m 스케일)
+        let path = UIBezierPath()
+        path.move(to: CGPoint(x: -0.3, y: -0.15))
+        path.addLine(to: CGPoint(x: 0, y: 0.25))
+        path.addLine(to: CGPoint(x: 0.3, y: -0.15))
+        path.addLine(to: CGPoint(x: 0.18, y: -0.15))
+        path.addLine(to: CGPoint(x: 0, y: 0.08))
+        path.addLine(to: CGPoint(x: -0.18, y: -0.15))
+        path.close()
+
+        let shape = SCNShape(path: path, extrusionDepth: 0.03)
+        let mat = SCNMaterial()
+        mat.diffuse.contents = Self.debugOverlayColor
+        mat.lightingModel = .constant
+        mat.readsFromDepthBuffer = false
+        mat.isDoubleSided = true
+        shape.materials = [mat]
+
+        let node = SCNNode(geometry: shape)
+        // SCNShape 는 XY 평면 — -π/2 X 회전으로 바닥에 눕힌 뒤 yaw 적용.
+        node.eulerAngles = SCNVector3(-Float.pi / 2, yaw, 0)
+        node.position = SCNVector3(p.x, p.y + 0.05, p.z)
+        node.renderingOrder = 21
+        return node
     }
 
     /// 두 AR world 점을 잇는 얇은 실린더 노드(노랑). depth 무시하고 항상 보이게.
@@ -2781,7 +2833,7 @@ class ARNavigationLogic {
         let len = simd_length(d)
         let cyl = SCNCylinder(radius: 0.015, height: CGFloat(len))
         let mat = SCNMaterial()
-        mat.diffuse.contents = UIColor.yellow
+        mat.diffuse.contents = Self.debugOverlayColor
         mat.lightingModel = .constant
         mat.readsFromDepthBuffer = false
         cyl.materials = [mat]
